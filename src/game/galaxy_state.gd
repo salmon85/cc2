@@ -361,3 +361,17 @@ func from_json(text: String) -> bool:
 		push_error("[GalaxyState] from_json: payload is not an object")
 		return false
 	return from_dict(parsed)
+
+
+## An independent copy of this galaxy.
+##
+## Needed wherever two parties must hold "the same" state without sharing objects -- a
+## server and a client replica, or a baseline to diff a replay against. This goes through
+## the serialisation form on purpose rather than a member-wise clone: it proves the copy
+## is genuinely reconstructable from the wire, which is what the network path depends on.
+func duplicate_state() -> GalaxyState:
+	var copy := GalaxyState.new()
+	if not copy.from_dict(to_dict()):
+		push_error("[GalaxyState] duplicate_state: self did not round-trip")
+		return null
+	return copy

@@ -12,6 +12,15 @@ class_name CC2CLI
 ## loopback server, so offline play and networked play run identical turn-resolution code.
 
 const DEFAULT_PORT := 27015
+## Default port for the ENet dedicated server. Kept separate from `DEFAULT_PORT` (the
+## Quake-style 27015 the original game shipped with) because the Phase 6 transport binds
+## its own default, and silently repointing a documented constant the CLI tests pin would
+## be a behaviour change nobody asked for.
+const DEFAULT_NET_PORT := 7777
+## Default number of empire slots a dedicated server opens.
+const DEFAULT_SLOTS := 2
+const MIN_SLOTS := 1
+const MAX_SLOTS := 8
 const DEFAULT_BIND_IP := "0.0.0.0"
 const DEFAULT_CLIENT_IP := "127.0.0.1"
 ## Single player runs its authority in-process on the loopback interface.
@@ -46,6 +55,12 @@ class Options extends RefCounted:
 	var seed_given: bool = false
 	var system_count: int = 50
 	var faction_count: int = 2
+	## Empire slots a dedicated server opens. One slot per connected human; the server
+	## itself is not a slot, so `--slots=2` admits two remote players.
+	var slots: int = DEFAULT_SLOTS
+	## Whether --port was given explicitly, so `--server` can fall back to the ENet
+	## default without overriding a port the operator actually asked for.
+	var port_given: bool = false
 	var headless: bool = false
 	var log_turns: bool = false
 	## Non-fatal notes (unknown flags, clamped values) surfaced to the player.
@@ -58,8 +73,8 @@ class Options extends RefCounted:
 		var mode_name: String = [
 			"SINGLE_PLAYER", "DEDICATED_SERVER", "CLIENT", "SETUP_MENU"
 		][mode]
-		return "%s ip=%s port=%d seed=%d systems=%d factions=%d%s" % [
-			mode_name, ip, port, seed_value, system_count, faction_count,
+		return "%s ip=%s port=%d seed=%d systems=%d factions=%d slots=%d%s" % [
+			mode_name, ip, port, seed_value, system_count, faction_count, slots,
 			"" if not warnings.is_empty() else " (no warnings)",
 		]
 
@@ -103,7 +118,12 @@ static func parse(argv: PackedStringArray) -> Options:
 				elif arg.begins_with("--factions="):
 					opts.faction_count = _parse_clamped_int(
 						arg.substr(11), opts, 1, 8, "factions", 2)
-				elif arg == "--ip" or arg == "--port" or arg == "--seed":
+				elif arg.begins_with("--slots="):
+					opts.slots = _parse_clamped_int(
+						arg.substr(8), opts, MIN_SLOTS, MAX_SLOTS,
+						"slots", DEFAULT_SLOTS)
+				elif arg == "--ip" or arg == "--port" or arg == "--seed" \
+						or arg == "--slots":
 					# Space-separated variant: consume the next token.
 					if i + 1 < argv.size():
 						i += 1
@@ -113,6 +133,10 @@ static func parse(argv: PackedStringArray) -> Options:
 							want_client = true
 						elif arg == "--port":
 							opts.port = _parse_port(value, opts)
+						elif arg == "--slots":
+							opts.slots = _parse_clamped_int(
+								value, opts, MIN_SLOTS, MAX_SLOTS,
+								"slots", DEFAULT_SLOTS)
 						else:
 							_parse_seed(value, opts)
 					else:
@@ -134,6 +158,10 @@ static func parse(argv: PackedStringArray) -> Options:
 		elif want_server:
 			opts.mode = Mode.DEDICATED_SERVER
 			opts.ip = DEFAULT_BIND_IP
+			# `--server` with no explicit --port uses the ENet default rather than
+			# 27015, so the documented launch line needs no port at all.
+			if not opts.port_given:
+				opts.port = DEFAULT_NET_PORT
 		elif want_client:
 			opts.mode = Mode.CLIENT
 		elif opts.mode != Mode.SETUP_MENU:
@@ -168,6 +196,7 @@ static func _clean_host(value: String) -> String:
 
 
 static func _parse_port(value: String, opts: Options) -> int:
+	opts.port_given = true
 	var parsed := _parse_clamped_int(value, opts, 1, 65535, "port", DEFAULT_PORT)
 	return parsed
 

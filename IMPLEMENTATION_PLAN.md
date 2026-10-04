@@ -284,8 +284,88 @@ reach 560px and the check fails.
 - [x] F.2 `godot --headless --editor --quit` import + no parser errors
 - [x] F.3 Determinism replay: same seed + same orders ⇒ byte-identical state hash
 
-## Out of Scope (Phase 6+)
+## Out of Scope (Phase 7+)
 
-Phase 6 ENet multiplayer transport, Phase 7 AI faction brain. The GUI is already
-written against `SessionController`, so Phase 6 replaces that class's internals with
-a network authority and leaves the panels untouched.
+Phase 7 AI faction brain. The GUI is already written against `SessionController`, so
+Phase 6 replaced that class's internals with a network authority and left the panels
+untouched.
+
+---
+
+# Phase 6: ENet Multiplayer Transport & Dedicated Server
+
+## Delivered
+
+- **`src/net/network_manager.gd`** — the peer owner. `host_game(port, max_players)` and
+  `join_game(address, port)` build an `ENetMultiplayerPeer` and install it on a private
+  `MultiplayerAPI` branch. Handles `peer_connected`, `peer_disconnected`,
+  `connected_to_server`, `connection_failed` and `server_disconnected`. Tracks each peer
+  against an empire slot; `free_slot()` never hands out slot 0's rival for a joiner by
+  accident (scan starts at 1 because the server itself is peer 1).
+- **`src/net/turn_sync_server.gd`** / **`src/net/turn_sync_client.gd`** — the authoritative
+  and client roles, plus **`src/net/turn_sync_peer.gd`**, which holds the actual RPC surface.
+- **`src/core/cli.gd`** — `--server`, `--port=<int>` (default 7777), `--slots=<int>`
+  (default 2, clamped to 1..8). The dedicated server constructs no Viewport or Control.
+- **`tests/test_enet_sync.gd`** — 110 checks, including a live 1-server/2-client run on
+  loopback.
+
+## Three engine constraints that decided the design
+
+Each was found by probing the engine, not by reading docs, and each broke the obvious
+implementation silently.
+
+1. **Two RPC classes at one node path do not work.** Godot checksums a node's `@rpc` method
+   set and requires every peer addressing that path to match. `TurnSyncServer` and
+   `TurnSyncClient` have different methods, so the literal two-file split produced
+   `The rpc node checksum failed` and dropped *every* RPC with no other symptom. Resolved
+   with one shared script carrying the superset of methods, and runtime role guards
+   (`_is_authority()`) keeping the two roles apart.
+2. **RPC paths are sent branch-relative but resolved tree-relative.** Unnamed nodes get
+   per-instance placeholders (`@Node@8`), so an endpoint created with `Node.new()` +
+   `set_script()` resolves to a different path on each peer. `NetworkManager` names it
+   (`SYNC_NODE_NAME`) and builds it through one factory so both sides agree.
+3. **The branch root must be the `NetworkManager` itself.** Holding the branch on a child
+   node scopes only that node's descendants; the manager and its direct `TurnSync` child
+   fell through to the tree default and both saw unique id 1, so every send hit
+   `RPC 'x' on yourself is not allowed by selected mode`. Re-parenting the manager into a
+   holder fixes identity but renames the subtree and re-breaks (2).
+
+## Properties proven rather than asserted
+
+- **Networked == offline.** `tests/test_enet_sync.gd` resolves the same two orders twice —
+  once locally through `TurnResolver` with no transport, once over a real ENet socket —
+  and requires identical state hashes. This is what makes single-player and multiplayer
+  the same game rather than two code paths that merely look alike.
+- **Cross-process.** `godot --headless --path . --server --port=7979 --slots=3 --seed=42`
+  logs `dedicated server ready: 0.0.0.0:7979, 3 slots, seed 42, 50 systems, stardate 1`,
+  and two separate OS processes dial in and are assigned empires 0 and 1.
+
+## Defects the self-verification loop caught in Phase 6
+
+- **Both RPC directions were dead for most of the build** — from (1) and (3) above. The
+  integration test passed its early scenarios because they exercised the local paths; only
+  the parity scenario sent a real packet and surfaced it.
+- **`resolve_if_ready()` cleared `_pending`, so a wait loop on `submitted_count()` never
+  terminated.** Checking the resolution flag before the count fixed the hang.
+- **`free()` on a subtree the ENet driver still referenced aborted the process** with
+  `Object is locked and can't be freed`. `dispose()` now uses `queue_free()`.
+- **GDScript getter-only properties return a copy**, so the first attempt at exposing
+  pending orders as a property silently discarded writes. Replaced with `stage_orders()`.
+- **`broadcast()` logged `Condition "!is_inside_tree()" is true`** when a server was
+  resolved before being added to the tree. The resolution is still correct; only the wire
+  hop is skipped. Same class of trap as the guard in `TurnSyncClient.submit_turn()`.
+
+## Regression coverage for the ordering rule
+
+Orders are applied in *slot* order, never arrival order, or a replay would not reproduce
+its own hash. The first version of this test was **structurally insensitive**: it used two
+`SET_TAX` orders on *different* factions, and since each order is applied independently to
+its own faction, the result was identical either way — the test passed with the fix
+reverted. It now drives two orders that both target empire 0, where `SET_TAX` is
+last-write-wins, so application order is observable. Reverting to arrival order yields
+`tax_rate 0.1` instead of `0.8` and a different state hash.
+
+## Verification
+
+- `tools/verify.sh`: **10 suites, 1984 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_enet_sync` alone: 110 checks.

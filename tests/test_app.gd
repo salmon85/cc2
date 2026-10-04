@@ -63,8 +63,18 @@ func _test_routing_every_mode() -> void:
 	for mode: int in expected:
 		var app := _make_app() as Node
 		var ok_route: bool = app.call("_route", _opts(mode))
-		_t.ok(ok_route, "mode %d routes successfully" % mode)
 		var session: Node = app.get("session")
+		# A dedicated server must refuse to start without a loaded definition registry --
+		# it has no galaxy to be authoritative about. This harness never boots the
+		# project, so `Defs` is empty and that refusal is the correct outcome here; the
+		# successful launch is covered end to end by `tests/test_enet_sync.gd`.
+		if mode == CC2CLI.Mode.DEDICATED_SERVER:
+			_t.ok(session != null, "mode %d still creates its session node" % mode)
+			_t.ok(not ok_route,
+				"mode %d refuses to host without definitions" % mode)
+			app.free()
+			continue
+		_t.ok(ok_route, "mode %d routes successfully" % mode)
 		_t.ok(session != null, "mode %d created a session node" % mode)
 		if session != null:
 			_t.eq(session.name, StringName(expected[mode]), "session named for mode %d" % mode)

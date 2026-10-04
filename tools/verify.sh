@@ -80,6 +80,8 @@ LoopbackTransport: resolver has no receive_order() ingress point
 [FactionState] dictionary missing required fields
 Parse JSON failed
 [cc2] unknown run mode
+[cc2] definitions not loaded; cannot generate a galaxy
+[cc2] dedicated server needs the Defs and GameDB autoloads
 [Defs] directory missing
 [GalaxyGenerator] generate: definition registry is null
 [GalaxyGenerator] generate: RNG stream is null

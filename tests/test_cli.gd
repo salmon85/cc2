@@ -13,6 +13,7 @@ func _initialize() -> void:
 
 	_test_defaults()
 	_test_dedicated_server()
+	_test_dedicated_server_slots()
 	_test_client_flags()
 	_test_single_player()
 	_test_setup_menu()
@@ -51,6 +52,36 @@ func _test_dedicated_server() -> void:
 	_t.ok(opts.headless, "--headless recorded")
 	_t.eq(opts.ip, CC2CLI.DEFAULT_BIND_IP, "server binds the wildcard address")
 	_t.ok(opts.is_server_side(), "dedicated server is authoritative")
+	# `--server` with no explicit port uses the ENet default, so the documented launch
+	# line `godot --headless --server` needs nothing else.
+	_t.eq(opts.port, CLI.DEFAULT_NET_PORT, "bare --server uses the ENet default port")
+	_t.eq(opts.slots, CLI.DEFAULT_SLOTS, "slot count defaults to 2")
+
+
+func _test_dedicated_server_slots() -> void:
+	_t.begin("dedicated server slots")
+	var full := _parse(["--server", "--port=8123", "--slots=4"])
+	_t.eq(full.port, 8123, "an explicit --port is kept")
+	_t.eq(full.slots, 4, "--slots=N parsed")
+	_t.ok(full.port_given, "an explicit --port is recorded as given")
+
+	var spaced := _parse(["--server", "--slots", "3"])
+	_t.eq(spaced.slots, 3, "space-separated --slots consumed")
+
+	var high := _parse(["--server", "--slots=99"])
+	_t.eq(high.slots, CLI.MAX_SLOTS, "slot count clamped to the maximum")
+	_t.ok(high.warnings.size() > 0, "clamping warns")
+
+	var low := _parse(["--server", "--slots=0"])
+	_t.eq(low.slots, CLI.MIN_SLOTS, "slot count clamped to the minimum")
+
+	var junk := _parse(["--server", "--slots=many"])
+	_t.eq(junk.slots, CLI.DEFAULT_SLOTS, "a non-numeric slot count falls back")
+	_t.ok(junk.warnings.size() > 0, "a non-numeric slot count warns")
+
+	var bare := _parse(["--server", "--slots"])
+	_t.eq(bare.slots, CLI.DEFAULT_SLOTS, "--slots without a value falls back")
+	_t.ok(bare.warnings.size() > 0, "a valueless --slots warns")
 
 
 func _test_client_flags() -> void:
