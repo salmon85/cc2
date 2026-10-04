@@ -99,7 +99,8 @@ func _build() -> void:
 	_view.system_clicked.connect(_on_view_system_clicked)
 	_view.background_clicked.connect(func() -> void: background_picked.emit())
 	gui_input.connect(_on_gui_input)
-	# The map has no area until the first layout pass, so framing rides on `resized`.
+	# The map has no area until the first layout pass, so framing rides on the deferred
+	# call below and on `resized`.
 	resized.connect(_on_resized)
 
 
@@ -109,8 +110,10 @@ func bind(controller: SessionController) -> void:
 		return
 	_view.bind(controller)
 	# The map is unusable until it is framed: an unfitted camera leaves the player staring
-	# at empty space because systems are small relative to the viewport.
-	frame_galaxy()
+	# at empty space because systems are small relative to the viewport. `bind()` runs
+	# before the container has laid this node out, so the fit is deferred to a frame when
+	# there is a real area to fit into.
+	frame_galaxy.call_deferred()
 
 
 func _notification(what: int) -> void:

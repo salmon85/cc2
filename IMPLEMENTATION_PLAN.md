@@ -172,7 +172,7 @@ headlessly — every assertion in the suite drives a real widget and reads real 
       only the root so the tree cannot desynchronise from the types the panels expect.
 - [x] 5.11 `src/app.gd` — attaches the client to SINGLE_PLAYER and CLIENT. DEDICATED_SERVER
       stays headless, so `--server` still runs in CI alongside the GUI build.
-- [x] 5.12 `tests/test_gui_integration.gd` — 147 checks. Instantiation, scene-tree
+- [x] 5.12 `tests/test_gui_integration.gd` — 154 checks. Instantiation, scene-tree
       integrity, panel node accessors, theme is non-default, every signal edge is
       connected, map hit-testing and zoom clamping, fleet order accept/reject, macro
       controls emitting real Phase 4 orders, **End Turn advancing the stardate by exactly
@@ -183,7 +183,7 @@ headlessly — every assertion in the suite drives a real widget and reads real 
 
 | Check | Result |
 | --- | --- |
-| `tools/verify.sh` (9 suites) | ALL GREEN — 1856 checks, 0 failed |
+| `tools/verify.sh` (9 suites) | ALL GREEN — 1863 checks, 0 failed |
 | `godot --headless --editor --quit` | rc=0, no parser errors |
 | `--server` / `--single` / `--client` | all boot rc=0; the latter two attach the client |
 | Rendered frame at 1024x576, 1280x720, 1600x900 | layout intact at every resolution |
@@ -254,6 +254,29 @@ assertion while being visibly wrong. Each now has a regression check.
   Both resolved to by-name lookups.
 
 ---
+
+## Phase 5 follow-up 2: the sliders moved the galaxy map
+
+Reported as "moving these moves the space map upwards like I dragged it, but I didn't".
+
+- **The staged-orders readout sized itself to its text.** `MacroPanel._queue_label` had
+  `fit_content = true`, so its height tracked the number of staged orders. Every slider step
+  stages a `SET_TAX`/`SET_RESEARCH` order, so dragging one made the label taller, which grew
+  the right column's minimum, which grew the row, which resized the `SIZE_EXPAND_FILL` map
+  beside it — and the map's `resized` handler re-framed the camera. Measured at a 700px
+  window: twelve slider steps took the map from 641 to 747px tall and the camera from zoom
+  1.257 to 1.464. The readout is now a fixed-height scrolling box, like the event log.
+- **The map never framed itself on a normal boot.** `frame_galaxy()` was deferred to
+  `resized`, but `resized` does not fire when a Control's *rect* changes — only its `size` —
+  so after `bind()` the fit was never re-triggered and the map sat unframed at zoom 1.0
+  centred on the origin. `bind()` now defers the fit with `call_deferred` instead. This was
+  masked during development because the screenshot harness set `custom_minimum_size` on the
+  client, which forced a real resize.
+
+Regression coverage: `macro: sliders leave the map alone` stages 24 orders by dragging the
+tax slider and asserts the readout's peak height never exceeds its cap, and that neither the
+map's size nor the camera's position or zoom moved. Reverting the fix makes the readout
+reach 560px and the check fails.
 
 ## Final Gate
 

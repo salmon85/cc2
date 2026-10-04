@@ -62,8 +62,14 @@ func _build() -> void:
 	col.add_child(_heading("STAGED ORDERS"))
 	_queue_label = RichTextLabel.new()
 	_queue_label.bbcode_enabled = true
-	_queue_label.fit_content = true
-	_queue_label.scroll_active = false
+	# `fit_content` sizes the label to its text, so staging one more order made this panel
+	# taller, pushed the whole column, and resized the galaxy map beside it -- which
+	# re-framed the camera and shifted the view the player never touched. A fixed-height
+	# scrolling readout keeps this panel's minimum size constant however many orders are
+	# staged, which is the same treatment the event log gets.
+	_queue_label.fit_content = false
+	_queue_label.scroll_active = true
+	_queue_label.scroll_following = true
 	_queue_label.custom_minimum_size = Vector2(0, 80)
 	col.add_child(_queue_label)
 

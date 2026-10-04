@@ -50,7 +50,8 @@ func _initialize() -> void:
 	_steps = PackedStringArray([
 		"instantiate", "scene_tree", "panels", "theme", "signals", "selection",
 		"map_draw", "fleet_orders", "illegal_orders", "macro_tax", "macro_research",
-		"macro_build", "end_turn", "end_turn_again", "reproducible", "teardown",
+		"macro_build", "macro_map_stable", "end_turn", "end_turn_again",
+		"reproducible", "teardown",
 	])
 	# The tree only lays out nodes from `_process` onward; `_initialize` runs before the
 	# first frame, when nothing added here is inside the tree yet.
@@ -86,6 +87,7 @@ func _process(_delta: float) -> bool:
 		"macro_tax": _step_macro_tax()
 		"macro_research": _step_macro_research()
 		"macro_build": _step_macro_build()
+		"macro_map_stable": _step_macro_does_not_move_the_map()
 		"end_turn": _step_end_turn()
 		"end_turn_again": _step_end_turn_again()
 		"reproducible": _step_reproducible()
@@ -501,6 +503,47 @@ func _step_macro_tax() -> void:
 	sup.near(c.player().tax_rate, 1.0, 0.001, "an excessive tax rate clamps to 1.0")
 	c.set_tax_rate(-1.0)
 	sup.near(c.player().tax_rate, 0.0, 0.001, "a negative tax rate clamps to 0.0")
+
+
+func _step_macro_does_not_move_the_map() -> void:
+	sup.begin("macro: sliders leave the map alone")
+	if _client == null or _client.controller == null:
+		return
+	var m := _client.map
+	var cam := m.camera()
+
+	# The defect: dragging a slider staged an order, the staged-orders label was sized to
+	# its text with `fit_content`, so the right column got taller, the row's minimum grew,
+	# and the `SIZE_EXPAND_FILL` map beside it resized -- which re-framed the camera and
+	# moved a view the player never touched.
+	var cam_before := cam.position
+	var zoom_before := cam.zoom
+	var map_before := m.size
+
+	# Stage far more orders than the readout has height for. The map is sampled every step
+	# rather than only at the end: it is `SIZE_EXPAND_FILL`, so it grows the instant the
+	# column beside it does, and a check taken after the fact could miss a transient.
+	var queue := _client.macros.queue_label()
+	var tallest := queue.custom_minimum_size.y
+	for i in 24:
+		_client.macros.tax_slider().value = 0.02 + 0.03 * i
+		tallest = maxf(tallest, queue.get_combined_minimum_size().y)
+	sup.ok(_client.controller.pending_orders().size() >= 12,
+		"the drag staged a stack of orders",
+		"%d pending" % _client.controller.pending_orders().size())
+
+	# The readout is the control whose size the order text used to drive.
+	sup.ok(not queue.fit_content,
+		"the staged-orders readout is not sized by its text")
+	sup.ok(queue.scroll_active, "the staged-orders readout scrolls instead of growing")
+	sup.near(tallest, queue.custom_minimum_size.y, 0.5,
+		"the readout never outgrows its own height (%f vs cap %f)" % [
+			tallest, queue.custom_minimum_size.y])
+
+	# And the map, which is what the player actually noticed, is untouched.
+	sup.eq(m.size, map_before, "the map did not resize when sliders were dragged")
+	sup.eq(cam.position, cam_before, "the camera did not move when sliders were dragged")
+	sup.eq(cam.zoom, zoom_before, "the camera did not re-zoom when sliders were dragged")
 
 
 func _step_macro_research() -> void:
