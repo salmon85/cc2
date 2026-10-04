@@ -140,6 +140,15 @@ func refresh() -> void:
 	_research_label.text = Format.fixed(me.total_tech_points(), 1)
 	_pending_label.text = str(_controller.pending_orders().size())
 
+	# A networked player who has submitted is waiting on the server, and the button is
+	# the one place they look to find out. It is disabled too: pressing again would only
+	# re-send a turn that is already closed.
+	if _controller.is_awaiting_server():
+		_end_turn_button.text = TurnSyncClient.WAITING_TEXT
+		_end_turn_button.disabled = true
+		return
+
+	_end_turn_button.disabled = false
 	# Dim the button only when there is genuinely nothing to send. A turn with no orders
 	# is still a legal turn — the player may just want the clock to advance.
 	_end_turn_button.text = "END TURN" if _controller.pending_orders().is_empty() \

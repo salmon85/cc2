@@ -144,6 +144,34 @@ func build_payload(report: Dictionary) -> Dictionary:
 	}
 
 
+## Hand the current game state to one peer, and tell it which empire it holds.
+##
+## Sent as soon as a peer is assigned a slot. Without it a joining client cannot know its
+## own empire (the server picks) and has no galaxy at all -- the one thing an
+## authoritative server must never let a client improvise.
+##
+## Returns false when there is no galaxy or no live interface, in which case the caller
+## has already put the peer on a slot that will never be told anything.
+func send_welcome(peer_id: int, assigned_slot: int) -> bool:
+	if galaxy == null or not is_inside_tree():
+		return false
+	var payload := build_payload({})
+	rpc_welcome.rpc_id(peer_id, assigned_slot, str(payload.get("state_hash", "")), payload)
+	return true
+
+
+## Turn a peer away, then drop it.
+##
+## A client left hanging after a refusal would sit in `joining` forever, because it has
+## no timeout of its own. Disconnecting lets it see the socket close and report the
+## refusal, which is the only way the player learns why they were not seated.
+func refuse(peer_id: int, reason: String) -> void:
+	peer_refused.emit(peer_id, reason)
+	if not is_inside_tree():
+		return
+	rpc_refuse.rpc_id(peer_id, reason)
+
+
 ## Send a payload to every connected client.
 ##
 ## A node outside the tree has no multiplayer interface, and calling an RPC on one logs

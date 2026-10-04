@@ -365,7 +365,33 @@ reverted. It now drives two orders that both target empire 0, where `SET_TAX` is
 last-write-wins, so application order is observable. Reverting to arrival order yields
 `tax_rate 0.1` instead of `0.8` and a different state hash.
 
+## Defects the client-connection work found
+
+Wiring `--client` to actually dial surfaced four problems, all of which had the
+server sitting there looking healthy:
+
+- **`--server` never resolved a turn.** Nothing called `resolve_if_ready()`; the
+  role existed but no driver polled it. Added `App._process`.
+- **Turn 1 could never resolve with `--slots=2`.** `begin()` was seeded with every
+  advertised slot, so the server waited on a second player who may never connect.
+  The wait set now starts empty and is rebuilt from who actually joined.
+- **`--slots` could exceed `--factions`,** seating a player in an empire with no
+  faction behind it. Clamped to the faction count, with a warning.
+- **The joining client could not adopt the server's galaxy into the running GUI**
+  without re-binding, because the panels hold the `GalaxyState` object. `from_dict`
+  mutates in place, so refreshing via `state_changed` is enough.
+
 ## Verification
 
-- `tools/verify.sh`: **10 suites, 1984 checks, 0 failed, ALL GREEN**, exit 0.
-- `test_enet_sync` alone: 110 checks.
+- `tools/verify.sh`: **10 suites, 2023 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_enet_sync` alone: 130 checks, including a real join/welcome/submit/resolve
+  conversation over a socket.
+- `test_gui_integration` alone: 173 checks, including the networked End Turn path.
+- Both new GUI checks were confirmed to fail when their fix is reverted.
+
+## Manual session
+
+`godot --headless --path . --server --port=7777 --slots=2 --seed=42` plus two
+`godot --path . --client --ip=127.0.0.1 --port=7777` windows: each client prints
+`joined as empire N`, and pressing End Turn in both advances them together. See
+`help.md`.

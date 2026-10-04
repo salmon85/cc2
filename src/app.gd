@@ -92,10 +92,24 @@ func _start_dedicated_server(opts: CC2CLI.Options) -> bool:
 		return false
 	server_galaxy = galaxy
 
-	# Every slot the server admits gets an empire id it can hand to a joining player.
+	# The empire ids a joining player can be given, which is also how many humans the
+	# game admits. These are *available* slots, not ones being waited on: the set of
+	# slots the server actually holds up for is rebuilt from who is actually connected,
+	# in `_on_peer_joined`. Seeding the wait set with every slot up front meant the very
+	# first game with `--slots=2` waited on a second player who may never arrive, and
+	# turn 1 therefore never resolved.
 	server_slots = PackedInt32Array()
 	for i in opts.slots:
 		server_slots.append(i)
+	# An empire is a faction, so a slot with no faction behind it would seat a player in
+	# a game they cannot play. `--factions` defaults to 2 while `--slots` allows up to 8,
+	# so this is reachable by typing, not just by accident.
+	if opts.slots > galaxy.factions.size():
+		push_warning("[cc2] %d slots requested but only %d factions exist; seating %d" % [
+			opts.slots, galaxy.factions.size(), galaxy.factions.size()])
+		server_slots = PackedInt32Array()
+		for i in galaxy.factions.size():
+			server_slots.append(i)
 
 	net = NetworkManager.new()
 	net.name = "Net"
@@ -111,24 +125,56 @@ func _start_dedicated_server(opts: CC2CLI.Options) -> bool:
 
 	turn_sync = net.add_sync_endpoint(TurnSyncServer) as TurnSyncServer
 	turn_sync.net = net
-	if not turn_sync.begin(galaxy, server_slots):
+	# Start with an *empty* wait set. `begin()` treats its argument as "slots to hold the
+	# turn for", and seeding it with every advertised slot would block turn 1 on a second
+	# player who may never connect. Real joins populate it via `_on_peer_joined`.
+	if not turn_sync.begin(galaxy, PackedInt32Array()):
 		push_error("[cc2] dedicated server failed to bind its galaxy")
 		return false
 
 	# A peer that joins mid-turn must not be able to stall the turn it missed; adding it
 	# here means it is simply counted from the next resolution onward.
-	net.peer_joined.connect(func(peer_id: int, slot: int) -> void:
-		print("[cc2] peer %d joined as empire %d" % [peer_id, slot]))
-	net.peer_left.connect(func(peer_id: int, slot: int) -> void:
-		if slot < 0:
-			return
-		print("[cc2] peer %d left (empire %d dropped)" % [peer_id, slot])
-		turn_sync.remove_active_slot(slot))
+	net.peer_joined.connect(_on_peer_joined)
+	net.peer_left.connect(_on_peer_left)
 
 	print("[cc2] dedicated server ready: %s:%d, %d slots, seed %d, %d systems, stardate %d" % [
 		opts.ip, opts.port, opts.slots, galaxy.seed_value,
 		galaxy.systems.size(), galaxy.turn + 1])
 	return true
+
+
+## Seat a newly connected peer: tell it which empire it holds and hand over the galaxy.
+##
+## The slot is adopted into the wait set *before* the welcome goes out, so a peer that
+## submits immediately is not refused for arriving in a turn that did not yet count it.
+func _on_peer_joined(peer_id: int, slot: int) -> void:
+	if slot < 0:
+		return
+	print("[cc2] peer %d joined as empire %d" % [peer_id, slot])
+	turn_sync.add_active_slot(slot)
+	if not turn_sync.send_welcome(peer_id, slot):
+		push_error("[cc2] could not send the opening state to peer %d" % peer_id)
+
+
+func _on_peer_left(peer_id: int, slot: int) -> void:
+	if slot < 0:
+		return
+	print("[cc2] peer %d left (empire %d dropped)" % [peer_id, slot])
+	turn_sync.remove_active_slot(slot)
+
+
+## Drive the authority: resolve the turn as soon as every connected player has submitted.
+##
+## Nothing else calls `resolve_if_ready()`. Without this the server accepts connections and
+## collects orders forever and no turn ever advances, which reads exactly like a hang.
+func _process(_delta: float) -> void:
+	if turn_sync == null:
+		return
+	var payload := turn_sync.resolve_if_ready()
+	if payload.is_empty():
+		return
+	var turn := int(payload.get("turn", 0))
+	print("[cc2] turn %d resolved, hash %s" % [turn + 1, payload.get("state_hash", "")])
 
 
 ## Fetch an autoload by name without hard-referencing it, so this file stays usable in
@@ -157,6 +203,116 @@ func _make_session(label: String) -> Node:
 func _attach_client(opts: CC2CLI.Options) -> void:
 	if session == null:
 		return
+	if opts.mode == CC2CLI.Mode.CLIENT:
+		_start_network_client(opts)
+	else:
+		_start_local_client(opts)
+
+
+## Dial a server and start a game on whatever it sends us.
+##
+## The galaxy is *never* generated here. A client that built its own would hold a
+## different universe from the server holding the authority, which is precisely the
+## split-brain an authoritative design exists to prevent -- and it would fail silently,
+## looking like a desync nobody can reproduce. So the local game state does not exist
+## until the server's welcome arrives.
+func _start_network_client(opts: CC2CLI.Options) -> void:
+	var tree := Engine.get_main_loop() as SceneTree
+	if tree == null:
+		return
+
+	net = NetworkManager.new()
+	net.name = "Net"
+	# The manager must be in the tree before it dials: it installs the multiplayer
+	# interface against its own path, which requires a resolved node path.
+	session.add_child(net)
+
+	net.connection_succeeded.connect(_on_client_connected)
+	net.connection_failed.connect(_on_client_failed)
+	net.peer_left.connect(_on_client_server_gone)
+
+	var client_sync := net.add_sync_endpoint(TurnSyncClient) as TurnSyncClient
+	client_sync.net = net
+	client_sync.welcomed.connect(_on_client_welcomed)
+	client_sync.turn_resolved.connect(_on_client_turn_resolved)
+	client_sync.desync_detected.connect(_on_client_desync)
+	client_sync = null
+
+	var err := net.join_game(opts.ip, opts.port)
+	if err != OK:
+		push_error("[cc2] could not reach %s:%d: %s" % [
+			opts.ip, opts.port, error_string(err)])
+		get_tree().quit(1)
+		return
+	print("[cc2] joining %s:%d -- waiting for the opening state" % [opts.ip, opts.port])
+
+
+func _on_client_connected() -> void:
+	print("[cc2] connected; handshake in progress")
+
+
+func _on_client_failed(reason: String) -> void:
+	push_error("[cc2] %s" % reason)
+	get_tree().quit(1)
+
+
+func _on_client_server_gone(_peer_id: int, _slot: int) -> void:
+	push_error("[cc2] the server closed the connection")
+	get_tree().quit(1)
+
+
+## The welcome arrived and verified: build the game client on the server's galaxy.
+##
+## `client_sync` is resolved from the tree rather than captured in the closure above,
+## because the endpoint is created before the connection completes and a local would
+## keep the node alive across the handshake for no benefit.
+func _on_client_welcomed(assigned_slot: int, payload: Dictionary) -> void:
+	var sync := net.get_node_or_null(NodePath(NetworkManager.SYNC_NODE_NAME)) as TurnSyncClient
+	if sync == null or sync.galaxy == null:
+		push_error("[cc2] welcome carried no galaxy")
+		get_tree().quit(1)
+		return
+
+	var client: Control = CLIENT_SCENE.instantiate()
+	session.add_child(client)
+	var game_client := client as GameClient
+	if game_client == null:
+		push_error("[cc2] client scene root is not a GameClient")
+		get_tree().quit(1)
+		return
+	# `assigned_slot` is the empire the *server* chose. It is not necessarily 0, and
+	# binding the wrong one would let a player command another empire's colonies.
+	if not game_client.start(sync.galaxy, assigned_slot, 0):
+		push_error("[cc2] client failed to start a session")
+		get_tree().quit(1)
+		return
+	sync.game_client = game_client
+	# Route the GUI's End Turn through the network from now on: the controller would
+	# otherwise resolve a turn locally against a galaxy the server does not hold.
+	game_client.controller.turn_submitter = sync
+
+	print("[cc2] joined as empire %d: seed %d, %d systems, stardate %d" % [
+		assigned_slot, sync.galaxy.seed_value,
+		sync.galaxy.systems.size(), sync.galaxy.turn + 1])
+
+
+## Adopt a resolved turn: the controller holds the *same* GalaxyState object the sync
+## peer just rebuilt in place, so refreshing the panels is all that is needed.
+func _on_client_turn_resolved(_turn_num: int, _report: Dictionary) -> void:
+	var sync := net.get_node_or_null(NodePath(NetworkManager.SYNC_NODE_NAME)) as TurnSyncClient
+	if sync == null or sync.game_client == null:
+		return
+	sync.game_client.controller.state_changed.emit()
+
+
+func _on_client_desync(turn_num: int, local_hash: int, server_hash: int) -> void:
+	push_error("[cc2] desync at turn %d: local %d, server %d" % [
+		turn_num + 1, local_hash, server_hash])
+	get_tree().quit(1)
+
+
+## Single player: generate a galaxy here and start a game on it.
+func _start_local_client(opts: CC2CLI.Options) -> void:
 	# The autoloads are resolved by name rather than referenced directly: this script is
 	# also instantiated by the routing test outside a full game boot, where `Defs` does
 	# not exist. Failing to find them here means "run a game first", which is a clearer

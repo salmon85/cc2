@@ -296,7 +296,8 @@ const _SCENARIOS := {
 	0: "host and join",
 	1: "turn resolution and parity",
 	2: "disconnect during a turn",
-	3: "network equals local",
+	3: "join handshake",
+	4: "network equals local",
 }
 
 ## Phase to begin on the frame after a settle.
@@ -424,6 +425,8 @@ func _process(_delta: float) -> bool:
 				_start_turn_sync()
 			"disconnect during a turn":
 				_start_disconnect()
+			"join handshake":
+				_start_handshake()
 			"network equals local":
 				_start_parity()
 		return false
@@ -435,6 +438,8 @@ func _process(_delta: float) -> bool:
 			_step_turn_sync()
 		"disconnect during a turn":
 			_step_disconnect()
+		"join handshake":
+			_step_handshake()
 		"network equals local":
 			_step_parity()
 	if _phase == "done":
@@ -678,6 +683,124 @@ func _start_parity() -> void:
 	harness.server_sync = _par_server
 	harness.client_nets.append(_par_client_net)
 	harness.client_syncs.append(_par_client)
+
+
+# --- Join handshake -------------------------------------------------------------
+
+## State for the handshake scenario.
+var _hs_welcomed: Array[int] = []
+var _hs_submitted: bool = false
+var _hs_resolved: bool = false
+var _hs_desync: bool = false
+
+## The sequence a real `--client` performs, end to end over a socket.
+##
+## A joining peer must learn its empire from the server (it never chooses) and must
+## receive the galaxy rather than generate one. Both were missing while `--client` did
+## nothing at all, and neither is observable from a unit test -- the packets have to cross
+## a real transport -- so this drives the actual wire conversation the way `app.gd` does.
+func _start_handshake() -> void:
+	# These persist between scenarios, so a second run would see stale state and skip
+	# straight past the checks it is supposed to be waiting for.
+	_hs_welcomed.clear()
+	_hs_submitted = false
+	_hs_resolved = false
+	_hs_desync = false
+
+	var harness := Harness.new()
+	_harnesses.append(harness)
+
+	harness.server_net = NetworkManagerScript.new() as NetworkManager
+	root.add_child(harness.server_net)
+	var port := NetworkManager.reserve_ephemeral_port()
+	_t.eq(harness.server_net.host_game(port, 2), OK,
+		"the handshake server is listening (port %d)" % port)
+
+	_hs_galaxy = _make_galaxy(31)
+	harness.server_sync = harness.server_net.add_sync_endpoint(TurnSyncServer) \
+		as TurnSyncServer
+	harness.server_sync.net = harness.server_net
+	# Exactly what `app.gd` does: start with an empty wait set, because a slot nobody
+	# holds would otherwise hold turn 1 open forever.
+	_t.ok(harness.server_sync.begin(_hs_galaxy, PackedInt32Array()),
+		"the handshake server bound its galaxy with no slots pending")
+
+	# The server seats a peer the instant it joins, exactly as `_on_peer_joined` does.
+	harness.server_net.peer_joined.connect(func(peer_id: int, slot: int) -> void:
+		harness.server_sync.add_active_slot(slot)
+		harness.server_sync.send_welcome(peer_id, slot))
+
+	var c := NetworkManagerScript.new() as NetworkManager
+	root.add_child(c)
+	_t.eq(c.join_game(CC2CLI.DEFAULT_LOOPBACK, port), OK, "the handshake client dials")
+	harness.client_nets.append(c)
+
+	# The client is given no galaxy at all. Everything below has to arrive over the wire.
+	var sync := c.add_sync_endpoint(TurnSyncClient) as TurnSyncClient
+	sync.net = c
+	sync.welcomed.connect(func(slot: int, _p: Dictionary) -> void:
+		_hs_welcomed.append(slot))
+	sync.turn_resolved.connect(func(_t_: int, _r: Dictionary) -> void:
+		_hs_resolved = true)
+	sync.desync_detected.connect(func(_t_: int, _a: int, _b: int) -> void:
+		_hs_desync = true)
+	harness.client_syncs.append(sync)
+
+
+func _step_handshake() -> void:
+	if _frames < 25:
+		return
+	var harness := _harnesses[_index]
+	var sync := harness.client_syncs[0] as TurnSyncClient
+
+	# The opening assertions run exactly once, on the first frame the welcome lands.
+	# Without this guard they would re-run every frame and re-report the same checks.
+	if not _hs_submitted:
+		_t.begin("join handshake")
+		_t.eq(_hs_welcomed.size(), 1, "the client was welcomed exactly once")
+		_t.eq(sync.slot, 0, "the server assigned empire 0 (the client did not choose)")
+		_t.ok(sync.galaxy != null, "the client holds a galaxy without generating one")
+		if sync.galaxy != null:
+			_t.eq(sync.galaxy.seed_value, _hs_galaxy.seed_value,
+				"the galaxy is the server's, not a fresh random one")
+			_t.eq(sync.galaxy.systems.size(), _hs_galaxy.systems.size(),
+				"the replicated galaxy has the server's system count")
+			_t.eq(sync.galaxy.state_hash(), _hs_galaxy.state_hash(),
+				"the replicated galaxy hashes identically to the server's")
+		_t.eq(harness.server_sync.active_slots(), PackedInt32Array([0]),
+			"the server now waits on the one empire that actually joined")
+		_t.ok(not harness.server_sync.all_submitted(),
+			"the turn is still open -- nobody has submitted yet")
+
+		_hs_submitted = true
+		_t.ok(sync.stage_order(Order.make_set_tax(sync.slot, 0.42)),
+			"the client stages a tax order")
+		_t.ok(sync.submit_turn(), "the client submits its turn")
+		_t.eq(sync.status_text(), TurnSyncClient.WAITING_TEXT,
+			"the client waits for the other players")
+		return
+
+	if not _hs_resolved and _frames < 90:
+		# The server resolves on its own frame to frame, exactly as `App._process` does
+		# for a real `--server`. Without this call nothing polls the pending orders and
+		# the turn stays open forever -- which is precisely the bug this scenario exists
+		# to pin down, so it must be driven the same way the game is.
+		harness.server_sync.resolve_if_ready()
+		return
+
+	_t.ok(_hs_resolved, "the client received the server's resolution")
+	_t.ok(not _hs_desync, "the resolution passed the hash check")
+	_t.eq(sync.galaxy.turn, 1, "the client advanced exactly one turn")
+	_t.eq(sync.awaiting, false, "the client is unlocked and free to act again")
+	_t.near(sync.galaxy.faction(0).tax_rate, 0.42, 0.0001,
+		"the server applied the order the client submitted")
+	_t.eq(sync.galaxy.state_hash(), harness.server_sync.galaxy.state_hash(),
+		"client and server agree on the state hash after the turn")
+	_next()
+
+
+## The galaxy the handshake server hands out, kept to compare hashes against.
+var _hs_galaxy: GalaxyState = null
 
 
 func _step_parity() -> void:

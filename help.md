@@ -14,33 +14,59 @@ so rather than implying it does.
 
 ## Quick start
 
-**Start with the server.** It works today:
+**This works now.** Three terminals; terminal 1 is the authority.
 
 ```bash
 cd /home/salmon/cc2
-~/.local/godot/godot --headless --path . --server --port=7777 --slots=3 --seed=42
+```
+
+```bash
+# Terminal 1 — dedicated server, 2 slots, reproducible galaxy
+~/.local/godot/godot --headless --path . --server --port=7777 --slots=2 --seed=42
 ```
 
 Expected output:
 
 ```
-[cc2] launch: DEDICATED_SERVER ip=0.0.0.0 port=7777 seed=42 systems=50 factions=2 slots=3 (no warnings)
+[cc2] launch: DEDICATED_SERVER ip=0.0.0.0 port=7777 seed=42 systems=50 factions=2 slots=2 (no warnings)
 [cc2] session: DedicatedServer
-[cc2] dedicated server ready: 0.0.0.0:7777, 3 slots, seed 42, 50 systems, stardate 1
+[cc2] dedicated server ready: 0.0.0.0:7777, 2 slots, seed 42, 50 systems, stardate 1
 ```
 
-The intended three-terminal flow, once the client path is wired — **terminals 2
-and 3 do not connect yet** (see *Known limitation* before relying on them):
-
 ```bash
-# Terminal 1 — dedicated server, 3 slots, reproducible galaxy
-~/.local/godot/godot --headless --path . --server --port=7777 --slots=3 --seed=42
+# Terminal 2 — a real window, playing empire 0
+~/.local/godot/godot --path . --client --ip=127.0.0.1 --port=7777
 
-# Terminal 2
-~/.local/godot/godot --headless --path . --client --ip=127.0.0.1 --port=7777 --seed=42
+# Terminal 3 — a second window, playing empire 1
+~/.local/godot/godot --path . --client --ip=127.0.0.1 --port=7777
+```
 
-# Terminal 3 — same
-~/.local/godot/godot --headless --path . --client --ip=127.0.0.1 --port=7777 --seed=42
+Each client should print:
+
+```
+[cc2] joining 127.0.0.1:7777 -- waiting for the opening state
+[cc2] connected; handshake in progress
+[cc2] joined as empire 0: seed 42, 50 systems, stardate 1
+```
+
+…and the server should log a seat per client:
+
+```
+[cc2] peer 1781186228 joined as empire 0
+[cc2] peer 368699998 joined as empire 1
+```
+
+Note the clients do **not** print a `launch:` line showing `slots`, and they ignore
+`--seed`: the galaxy belongs to the server, so a client that seeded its own would be
+playing a different universe. Whatever `--seed` the server used is what both clients
+get, which is why `seed 42` appears in their output.
+
+Play a turn: stage orders in a client, press **END TURN**. That client's top bar
+shows `Awaiting other players...` until every connected player has submitted; then
+the server resolves, both windows advance a stardate together, and the server logs:
+
+```
+[cc2] turn 1 resolved, hash 1789442519
 ```
 
 Add `--verbose` to any of them for ENet-level traffic.
@@ -55,7 +81,7 @@ given, and says so in a warning.
 | Mode | Flag | What it does |
 |---|---|---|
 | Dedicated server | `--server` | Generates the galaxy, listens with ENet, waits for orders. No window. |
-| Network client | `--client` | **Currently starts a local game — does not dial.** See *Known limitation*. |
+| Network client | `--client` | Dials a server and plays the game it sends. |
 | Single player | `--single` (aliases `--singleplayer`, `--local`) | Local game with the authority in-process. Default when no flag is given. |
 | Setup menu | `--setup` (alias `--menu`) | Prints a line and starts no session. |
 
@@ -182,48 +208,29 @@ generator and turn resolver still behave.
 
 ---
 
-## Known limitation: `--client` does not dial
+## What a client actually does now
 
-**As of the Phase 6 commit, `--client` parses and routes correctly but never
-calls `join_game()`.** It generates a galaxy locally and starts a local game
-against it. Running it against a live server prints:
+`--client` dials the server and plays the game the server sends:
 
-```
-[cc2] launch: CLIENT ip=127.0.0.1 port=7979 seed=42 ...
-[cc2] client attached: seed 42, 50 systems, stardate 1
-```
+1. `NetworkManager.join_game(ip, port)` creates the ENet client and installs its
+   multiplayer branch.
+2. `connected_to_server` / `connection_failed` / `server_disconnected` are wired
+   to the session. A failure prints the reason and exits non-zero.
+3. The client **waits**. It does not create a galaxy, a controller, or a window
+   yet.
+4. The server seats the peer, picks an empire, and sends an `rpc_welcome`
+   carrying the empire id, the full state, and its hash.
+5. The client verifies the hash, and only then instantiates the GUI on *that*
+   galaxy and *that* empire.
 
-— with no connection attempt, no error, and no `peer joined` line on the server.
-The server simply never notices the client. The process then just sits there
-until you kill it.
+Step 4 is why a client never appears to "load a random galaxy": generating one
+locally would produce a different universe from the authority, which is the exact
+failure an authoritative server exists to prevent, and it would fail silently.
 
-The transport underneath is fine; `join_game()` is exercised by the integration
-tests, which run real sockets over loopback. What is missing is the wiring in
-`src/app.gd` `_attach_client()` that would call `join_game()` and hand the
-resulting snapshot to the client instead of generating a fresh galaxy.
+### Diagnostics for the client path
 
-So: **the server side is manually testable today; the client side is not.** To
-exercise the real protocol now, run the integration test:
-
-```bash
-./tools/verify.sh                       # everything, ~2 min
-```
-
-or just the networking suite:
-
-```bash
-~/.local/godot/godot --headless --path . -s res://tests/test_enet_sync.gd
-# => RESULT test_enet_sync: OK (110 checks passed)
-```
-
-That test stands up 1 server + 2 clients on ephemeral loopback ports, submits
-orders, resolves a turn, and asserts both peers receive identical state hashes
-and advance together — which is exactly the manual flow, automated.
-
-### Diagnostics for the future client path
-
-If you wire `_attach_client()` up and it misbehaves, these are the failure modes
-already characterised during Phase 6:
+If a client misbehaves, these are the failure modes already characterised
+during Phase 6:
 
 - `The rpc node checksum failed` — the two sides have different `@rpc` method
   sets on the node at that path. Both sides must use `turn_sync_peer.gd`.
@@ -253,7 +260,8 @@ Open `7777/udp` in the firewall. On the client machine:
 ~/.local/godot/godot --headless --path . --client --ip=<server-ip> --port=7777
 ```
 
-Remember `--port` on both sides. (Modulo the `--client` limitation above.)
+Remember `--port` on both sides. A client takes no `--seed`; it plays the server's
+galaxy whatever seed that was.
 
 ---
 
@@ -263,10 +271,18 @@ Remember `--port` on both sides. (Modulo the `--client` limitation above.)
 2. Clients launched with an explicit `--port` matching the server.
 3. Server logs a join per client: `peer <id> joined as empire <slot>`.
 4. On disconnect, the slot is returned: `peer <id> left (empire <slot> dropped)`.
-5. `--seed` is identical on server and clients if you expect the same galaxy.
+5. Each client prints `joined as empire <n>`, and **no two clients share an empire**.
+6. Press **END TURN** in one window: it shows `Awaiting other players...` and the
+   stardate does *not* move yet.
+7. Press **END TURN** in the other window. Both windows advance together and the
+   server logs `turn 1 resolved, hash <n>`.
+8. Close a window: the server logs `peer <id> left (empire <n> dropped)` and the
+   remaining player's next turn is no longer held up by the departed empire.
 
-Steps 3 and 4 require the client path to be wired; today the server prints them
-only when driven by the integration test.
+A turn waits for every *connected* player, so with `--slots=2` and only one client
+connected, pressing END TURN resolves immediately. Raising `--slots` above the
+number of players who actually connect would stall turn 1 waiting for someone who
+never arrives — use the number you intend to play with.
 
 ---
 

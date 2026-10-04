@@ -317,6 +317,26 @@ func set_research_allocation(weights: PackedFloat64Array) -> bool:
 
 # --- The turn --------------------------------------------------------------
 
+## Set when this session is bound to a remote authority rather than resolving locally.
+##
+## A networked client must never call `TurnResolver` itself: it would advance a local
+## galaxy the server knows nothing about, and the two would silently diverge. With this
+## set, `end_turn()` ships the orders instead and returns an empty report -- the real
+## resolution arrives later as a broadcast.
+var turn_submitter: TurnSyncClient = null
+
+## True while the client waits for the server to resolve.
+func is_awaiting_server() -> bool:
+	return turn_submitter != null and turn_submitter.awaiting
+
+
+## The orders this player has staged, ready for the wire.
+func orders_to_submit() -> Array[Order]:
+	if queue == null:
+		return [] as Array[Order]
+	return queue.orders_for(player_id)
+
+
 ## Resolve one turn: submit staged orders to the deterministic resolver, then refresh.
 ##
 ## This is the same call the dedicated server makes; single-player is a client bound to
@@ -325,6 +345,12 @@ func end_turn() -> Dictionary:
 	if galaxy == null:
 		action_rejected.emit("no game in progress")
 		return {}
+
+	# Networked: hand the orders to the server and wait. It is the authority, and it is
+	# the only thing that can advance a turn every peer agrees on.
+	if turn_submitter != null:
+		return _end_turn_over_network()
+
 	var orders: Array = []
 	if queue != null:
 		orders = queue.orders_for(player_id)
@@ -338,6 +364,29 @@ func end_turn() -> Dictionary:
 	turn_resolved.emit(report)
 	state_changed.emit()
 	return report
+
+
+## Ship staged orders and enter the waiting state.
+##
+## Returns an empty Dictionary so every caller already written against `end_turn()` keeps
+## working: it means "nothing resolved yet". The turn genuinely has not happened, and the
+## caller learns that from the resolution broadcast rather than from this call.
+func _end_turn_over_network() -> Dictionary:
+	if is_awaiting_server():
+		action_rejected.emit(TurnSyncClient.WAITING_TEXT)
+		return {}
+	var staged := orders_to_submit()
+	for o in staged:
+		turn_submitter.stage_order(o)
+	if queue != null:
+		queue.clear()
+	if not turn_submitter.submit_turn():
+		# The submission never went out. Un-queueing would risk replaying orders the
+		# server may already hold, so the staged set is deliberately left consumed.
+		action_rejected.emit("could not reach the server")
+		return {}
+	state_changed.emit()
+	return {}
 
 
 # --- Internals -------------------------------------------------------------

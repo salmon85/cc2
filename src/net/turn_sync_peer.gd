@@ -34,6 +34,12 @@ signal desync_detected(turn_num: int, local_hash: int, server_hash: int)
 ## Emitted on the server each time a peer's orders land, for logging.
 signal orders_received(slot: int, turn_num: int, count: int)
 
+## Emitted on the client once the server has handed over a slot and the starting state.
+signal welcomed(assigned_slot: int, payload: Dictionary)
+
+## Emitted on the server when a peer is told the game is full and dropped.
+signal peer_refused(peer_id: int, reason: String)
+
 ## The empire slot this peer was assigned, or -1 before the handshake completes.
 var slot: int = -1
 
@@ -83,6 +89,53 @@ func _is_authority() -> bool:
 
 
 # --- Protocol: client -> server -------------------------------------------------
+
+# --- Protocol: server -> a single joining client --------------------------------
+
+## Server -> one client: your empire, and the game as it currently stands.
+##
+## This is the handshake. Without it a joining client has no way to learn which empire it
+## was given (the slot is chosen by the server, not requested by the player) and no way to
+## obtain the galaxy -- generating one locally would produce a *different* game, which is
+## the entire failure mode an authoritative server exists to prevent.
+##
+## `full_state_or_diff` has the same meaning as in `rpc_broadcast_turn_resolution`, and
+## the `state_hash` is a decimal String for the same reason: JSON has no 64-bit integer.
+@rpc("authority", "call_remote", "reliable")
+func rpc_welcome(
+	assigned_slot: int, state_hash: String, full_state_or_diff: Dictionary
+) -> void:
+	if _is_authority():
+		return
+	var payload := full_state_or_diff.duplicate(true)
+	payload["slot"] = assigned_slot
+	var applied := apply_snapshot(payload)
+	if applied < 0:
+		# The opening state did not verify, so the client has nothing trustworthy to
+		# play on. Leave the handshake unfinished; `app.gd` reports this and exits
+		# rather than starting a game against a galaxy the server does not hold.
+		push_error("[TurnSyncPeer] welcome snapshot failed parity check")
+		return
+	# Hand off to the role hook, exactly as a resolution does, so the client can mark
+	# itself initialised before the session starts binding panels to it.
+	apply_welcome(assigned_slot, payload)
+
+
+## Role hook invoked once a welcome snapshot has been applied and verified.
+##
+## The base records the slot and reports; the client subclass marks itself ready.
+func apply_welcome(assigned_slot: int, payload: Dictionary) -> void:
+	slot = assigned_slot
+	welcomed.emit(assigned_slot, payload)
+
+
+## Server -> one client: the game is full. The client should report and exit.
+@rpc("authority", "call_remote", "reliable")
+func rpc_refuse(reason: String) -> void:
+	if _is_authority():
+		return
+	push_error("[TurnSyncPeer] refused by server: %s" % reason)
+
 
 ## Client -> server: hand in this slot's orders for `turn_num`.
 ##

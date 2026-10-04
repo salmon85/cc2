@@ -18,6 +18,12 @@ const WAITING_TEXT := "Awaiting other players..."
 ## The `NetworkManager` this client dials through.
 var net: NetworkManager = null
 
+## The GUI bound to this client, once the welcome has been handled.
+##
+## Held so a resolution arriving later can refresh the panels without `app.gd` having to
+## re-walk the tree on every turn. Null in a headless client.
+var game_client: GameClient = null
+
 ## True between submitting and receiving the server's resolution. The UI locks the order
 ## controls while this holds, which is what stops a player from staging orders for a turn
 ## the server has already closed.
@@ -114,3 +120,16 @@ func apply_broadcast(turn_num: int, state_hash: String, payload: Dictionary) -> 
 ## The player's own orders staged for the coming turn, for the order queue UI.
 func staged_orders() -> Array[Order]:
 	return staged.duplicate()
+
+
+## The RPC entry point for the handshake. Inherited signature, overridden body.
+##
+## `apply_snapshot` in the base class has already rebuilt `galaxy` and verified the hash
+## by the time this runs, so the only work left is recording the empire and telling the
+## session it may start. `awaiting` is explicitly cleared: a client that joined mid-turn
+## must be free to act on the state it was just handed.
+func apply_welcome(assigned_slot: int, payload: Dictionary) -> void:
+	slot = assigned_slot
+	awaiting = false
+	_initialised = true
+	welcomed.emit(assigned_slot, payload)

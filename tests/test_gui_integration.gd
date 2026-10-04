@@ -50,7 +50,8 @@ func _initialize() -> void:
 	_steps = PackedStringArray([
 		"instantiate", "scene_tree", "panels", "theme", "signals", "selection",
 		"map_draw", "fleet_orders", "illegal_orders", "macro_tax", "macro_research",
-		"macro_build", "macro_map_stable", "end_turn", "end_turn_again",
+		"macro_build", "macro_map_stable", "end_turn", "networked_end_turn",
+		"end_turn_again",
 		"reproducible", "teardown",
 	])
 	# The tree only lays out nodes from `_process` onward; `_initialize` runs before the
@@ -89,6 +90,7 @@ func _process(_delta: float) -> bool:
 		"macro_build": _step_macro_build()
 		"macro_map_stable": _step_macro_does_not_move_the_map()
 		"end_turn": _step_end_turn()
+		"networked_end_turn": _step_networked_end_turn()
 		"end_turn_again": _step_end_turn_again()
 		"reproducible": _step_reproducible()
 		"teardown": _step_teardown()
@@ -686,6 +688,88 @@ func _step_end_turn() -> void:
 	# The GUI must have followed the new state without being told directly.
 	_client.map.view().queue_redraw()
 	sup.ok(true, "map redraws after the turn")
+
+
+## With a network submitter bound, End Turn must ship orders and wait -- never resolve
+## locally.
+##
+## This is the seam where a networked client could silently fork from the server: the
+## controller would advance its own copy of the galaxy and the two would diverge with no
+## error anywhere. Asserting the stardate does *not* move locally is the whole point --
+## it is what distinguishes "submitted" from "resolved".
+## A `TurnSyncClient` that records the submission instead of putting it on the wire.
+##
+## The real client would call `rpc_submit_orders.rpc_id(1, ...)`, and with no server
+## behind it the engine logs "RPC on yourself is not allowed by selected mode" -- an
+## engine diagnostic the test suite treats as a failure. The transport itself is covered
+## over real sockets in `tests/test_enet_sync.gd`; this checks only that the controller
+## hands orders to the submitter rather than resolving them itself.
+class OfflineSubmitter extends TurnSyncClient:
+	var sent_turns: Array[int] = []
+	var sent_count: int = 0
+
+	func submit_turn() -> bool:
+		if awaiting or galaxy == null:
+			return false
+		sent_turns.append(galaxy.turn)
+		sent_count += staged.size()
+		staged.clear()
+		awaiting = true
+		return true
+
+
+func _step_networked_end_turn() -> void:
+	sup.begin("networked end turn")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+
+	sup.ok(c.turn_submitter == null, "the local client has no network submitter")
+	sup.ok(not c.is_awaiting_server(), "and is not waiting on a server")
+
+	# Bind a stand-in submitter. No socket: this checks the controller's routing, and the
+	# transport is covered by tests/test_enet_sync.gd.
+	# `SessionController` is a RefCounted, not a Node, so the stub cannot be parented to
+	# it. Add it to the tree root instead.
+	var stub := OfflineSubmitter.new()
+	root.add_child(stub)
+	sup.ok(stub.begin(c.galaxy, c.player_id), "the stub client bound the galaxy")
+
+	c.turn_submitter = stub
+	var before_turn := c.galaxy.turn
+	sup.ok(not c.is_awaiting_server(), "a bound submitter starts unlocked")
+
+	# A networked end turn consumes staged orders and does not advance the stardate.
+	sup.ok(c.set_tax_rate(0.33), "an order is staged for the wire")
+	sup.ok(c.pending_orders().size() > 0, "the order reached the queue")
+	var report := c.end_turn()
+	sup.ok(report.is_empty(), "a networked end turn resolves nothing locally")
+	sup.eq(c.galaxy.turn, before_turn, "the local stardate did not move")
+	sup.ok(c.is_awaiting_server(), "the client is now waiting for the server")
+	sup.eq(c.pending_orders().size(), 0, "the staged orders were handed to the transport")
+	sup.eq(stub.sent_turns.size(), 1, "exactly one submission reached the transport")
+	sup.ok(stub.sent_count > 0, "and it carried the staged orders (%d)" % stub.sent_count)
+
+	# The player has to be able to see that they are waiting, and not be able to send
+	# again while they are. This is the only feedback a networked turn gives them.
+	var btn := _client.top_bar.end_turn_button()
+	_client.top_bar.refresh()
+	sup.eq(btn.text, TurnSyncClient.WAITING_TEXT,
+		"the top bar shows the waiting text")
+	sup.ok(btn.disabled, "and the End Turn button is disabled while waiting")
+
+	# A second press while waiting must be refused, not double-sent.
+	var refused := c.end_turn()
+	sup.ok(refused.is_empty(), "a second press resolves nothing")
+	sup.ok(c.is_awaiting_server(), "and leaves the client waiting")
+
+	# Restore the local path before the next scenario, which expects to resolve locally.
+	c.turn_submitter = null
+	stub.queue_free()
+	sup.ok(c.turn_submitter == null, "the local path is restored")
+	_client.top_bar.refresh()
+	sup.ok(not btn.disabled, "the End Turn button is live again")
+	sup.ok(btn.text != TurnSyncClient.WAITING_TEXT, "and no longer shows the waiting text")
 
 
 func _step_end_turn_again() -> void:
