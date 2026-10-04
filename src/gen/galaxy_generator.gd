@@ -95,6 +95,13 @@ static func generate(
 	for f in galaxy.factions:
 		f.bind_tech(tech_nodes)
 
+	# Seed each faction's sensor picture before the first turn resolves. Visibility is
+	# otherwise only computed at the end of a turn, which leaves a freshly generated
+	# galaxy completely dark -- the player would not even see their own homeworld, and
+	# the client would open on an empty map.
+	for f in galaxy.factions:
+		FowStage.update_visibility(galaxy, f.id, db)
+
 	return galaxy
 
 

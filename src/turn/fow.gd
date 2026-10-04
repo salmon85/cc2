@@ -9,7 +9,12 @@ class_name FowStage
 ## Recompute visible systems for one faction and store the result.
 ## Returns the set of visible system indices.
 static func update_visibility(galaxy: GalaxyState, faction_id: int, db: Node) -> Dictionary:
-	var visible: Dictionary = {}
+	# Visibility accumulates rather than being recomputed from scratch. A sensor bubble
+	# only ever *adds* knowledge, and rebuilding the set each turn would retroactively
+	# blind a faction whose scout has since moved on -- the map would flicker back to
+	# darkness the moment a fleet left a system.
+	var previous := galaxy.visible_systems.get(faction_id, {}) as Dictionary
+	var visible: Dictionary = previous.duplicate()
 	var faction: FactionState = galaxy.faction(faction_id)
 	if faction == null:
 		return visible

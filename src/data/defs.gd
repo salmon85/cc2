@@ -27,6 +27,14 @@ var tech_order: PackedStringArray = PackedStringArray()
 var _loaded: bool = false
 
 
+func _ready() -> void:
+	# The registry is an autoload, so every other autoload and the whole scene tree are
+	# downstream of it: loading here guarantees the `.tres` files are in place before any
+	# game code looks an id up. `load_all()` is idempotent, so an explicit call from a
+	# test that never enters the tree still works.
+	load_all()
+
+
 ## Where the Resource *scripts* live, which is not the same as where the `.tres` data is.
 const SCRIPT_DIR := "res://src/data"
 

@@ -133,13 +133,107 @@ Every item below was found by a headless test, not by reading the code:
   free strategy and the treasury floor unreachable in practice. Caps added and enforced.
 ---
 
+# Phase 5: Client GUI and Presentation Layer
+
+The presentation layer is built around a single seam, `SessionController`, which owns the
+`GalaxyState`, the `OrderQueue` and the seeded RNG. Panels never touch the galaxy directly:
+they call controller methods, which either mutate the state or return a rejection *and*
+emit `action_rejected` with a reason. That discipline is what makes the GUI testable
+headlessly — every assertion in the suite drives a real widget and reads real state.
+
+## Delivered
+
+- [x] 5.1 `src/ui/cc2_theme.gd` — retro-Amiga palette, `StyleBoxFlat` factories, and a
+      complete `Theme` (Label, Panel, Button in all states, HSlider, OptionButton,
+      ItemList, RichTextLabel, ScrollContainer). The slider grabber is drawn in code as a
+      10x10 `ImageTexture`, so there is **no binary asset dependency**.
+- [x] 5.2 `src/ui/format.gd` — readout formatting (thousands separators, signed
+      values, percentages, BBCode-coloured surplus/deficit, label/value field alignment).
+- [x] 5.3 `src/client/session_controller.gd` — the UI/sim seam: selection, move/build/
+      tax/research orders, and `end_turn()`, which submits staged orders to the same
+      `TurnResolver` the dedicated server runs.
+- [x] 5.4 `src/client/galaxy_map.gd` — `SubViewport` + `Camera2D`; cursor-anchored wheel
+      zoom with clamping, middle/right-drag pan, WASD/arrow/edge keys, hover highlight.
+- [x] 5.5 `src/client/galaxy_map_view.gd` — `_draw()`: stars coloured by spectral class,
+      owner rings in faction colour, warp lanes, fleet diamonds, dashed warp vectors with
+      direction arrowheads, travel progress, and the staged-order line. Fog renders
+      unsurveyed systems as anonymous hollow markers.
+- [x] 5.6 `src/client/inspector_panel.gd` — system survey + planet class, habitability,
+      population, food balance/stock, farms/mines/factories/shields/batteries/garrisons,
+      shipyard progress, stores, and the in-build queue.
+- [x] 5.7 `src/client/macro_panel.gd` — tax slider, four normalised research-allocation
+      sliders, colony + build selectors, and a live readout of the staged orders.
+- [x] 5.8 `src/client/fleet_panel.gd` — fleet registry, selection, full combat readout,
+      and the STAGE MOVE order-mode toggle.
+- [x] 5.9 `src/client/top_bar.gd` — Stardate, Imperial Treasury, Net/Turn, Research, and
+      the End Turn button.
+- [x] 5.10 `src/client/game_client.gd` + `scenes/client/GameClient.tscn` — three-column
+      frame (inspector + fleet / map / macro + log) under the HUD. The scene file holds
+      only the root so the tree cannot desynchronise from the types the panels expect.
+- [x] 5.11 `src/app.gd` — attaches the client to SINGLE_PLAYER and CLIENT. DEDICATED_SERVER
+      stays headless, so `--server` still runs in CI alongside the GUI build.
+- [x] 5.12 `tests/test_gui_integration.gd` — 135 checks. Instantiation, scene-tree
+      integrity, panel node accessors, theme is non-default, every signal edge is
+      connected, map hit-testing and zoom clamping, fleet order accept/reject, macro
+      controls emitting real Phase 4 orders, **End Turn advancing the stardate by exactly
+      1**, five consecutive turns advancing by 5, and save/load determinism *through* the
+      GUI. Nodes are freed explicitly before `quit()` so the exit is leak-free.
+
+## Verification
+
+| Check | Result |
+| --- | --- |
+| `tools/verify.sh` (9 suites) | ALL GREEN — 1844 checks, 0 failed |
+| `godot --headless --editor --quit` | rc=0, no parser errors |
+| `--server` / `--single` / `--client` | all boot rc=0; the latter two attach the client |
+| Rendered frame at 1024x576, 1280x720, 1600x900 | layout intact at every resolution |
+
+## Defects the self-verification loop caught in Phase 5
+
+- **`OptionButton` has no `find_metadata`.** The build selector called it on every
+  refresh, so the macro panel threw on the first turn. Replaced with an explicit scan
+  over `get_item_metadata`.
+- **`ItemList` has no `selected` property.** Both the fleet list and the inspector's body
+  list read it; the correct accessor is `get_selected_items`.
+- **`ItemList.select()` on an empty list** raised an out-of-bounds error whenever the
+  inspector redrew for an unsurveyed system. Now guarded.
+- **A freshly generated galaxy was completely dark.** Visibility was only ever computed
+  at the *end* of a turn, so a new player could not see even their own homeworld and the
+  client opened on an empty map. `GalaxyGenerator.generate` now seeds each faction's
+  sensor picture.
+- **Fog of war was instantaneous, not cumulative.** `update_visibility` rebuilt the set
+  from scratch each turn, so a scout moving on retroactively blinded the systems it had
+  surveyed. Visibility now accumulates — knowledge is only ever gained.
+- **`Defs` never called `load_all()` on its own**, despite documenting that it loads at
+  startup. Nothing else did it either, so a real boot generated a galaxy from an empty
+  registry. Added `_ready()`.
+- **`SessionController.attach` called `rebind_definitions()` with no argument**, falling
+  back to an autoload lookup that fails outside a full boot — every planet then reported
+  an unknown type.
+- **`GameClient.start()` dereferenced panels before `_ready()` had built them.** Callers
+  naturally call `start()` right after `add_child()`; the binding is now deferred.
+- **`_wire()` ran twice and double-connected every signal.** `Signal` is a value type, so
+  a per-edge `is_connected` guard on a copied signal always reports false. An explicit
+  `_wired` flag is the reliable guard.
+- **`_sync_viewport` assigned `size` to a full-rect-anchored control**, emitting a layout
+  warning on every pass. The anchors already track the viewport, so the assignment was
+  removed rather than deferred.
+- **`get_tree()` on a node not yet in the tree** returns null and logs an engine error.
+  `app.gd` uses `Engine.get_main_loop()` instead, which is safe during `SceneTree._initialize`.
+- **`GalaxyState` had no `visible_systems` entry for a new game** and `App._attach_client`
+  hard-referenced the `Defs` autoload, breaking the routing test in its bare `-s` context.
+  Both resolved to by-name lookups.
+
+---
+
 ## Final Gate
 
 - [x] F.1 Full headless suite green
 - [x] F.2 `godot --headless --editor --quit` import + no parser errors
 - [x] F.3 Determinism replay: same seed + same orders ⇒ byte-identical state hash
 
-## Out of Scope (Phase 5+, not required by the stop condition)
+## Out of Scope (Phase 6+)
 
-Phase 5 GUI screens (Galaxy Map / System / Imperial Summary / Fleet / Turn Report), Phase 6
-ENet multiplayer transport, Phase 7 AI faction brain.
+Phase 6 ENet multiplayer transport, Phase 7 AI faction brain. The GUI is already
+written against `SessionController`, so Phase 6 replaces that class's internals with
+a network authority and leaves the panels untouched.
