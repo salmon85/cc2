@@ -42,6 +42,11 @@ func bind(controller: SessionController) -> void:
 ## from being cut off at the default zoom.
 const WORLD_SIZE := 2200.0
 
+## Glyph for a star the player has not surveyed: a hollow ring, deliberately dimmer and
+## flatter than a known star so known space still draws the eye first.
+const UNKNOWN_MARKER_RADIUS := 7.0
+const UNKNOWN_MARKER_COLOUR := Color(0.42, 0.55, 0.50, 0.55)
+
 
 func _draw() -> void:
 	if _controller == null or _controller.galaxy == null:
@@ -101,8 +106,15 @@ func _draw_systems(galaxy: GalaxyState) -> void:
 
 		# Unknown systems are shown as an anonymous hollow marker so unexplored space is
 		# still navigable by shape, without leaking spectral class or ownership.
+		#
+		# The radius and alpha here are deliberately generous. Sensor ranges are a couple of
+		# parsecs against a galaxy spanning hundreds, so nearly every system starts out
+		# unsurveyed; a hairline ring left the map reading as an empty black field. These
+		# markers sit clearly behind known stars in brightness and carry no class colour,
+		# so the fog-of-war rule still holds -- you can see that a star is there, not what
+		# it is.
 		if not seen:
-			draw_arc(pos, 5.0, 0.0, TAU, 12, CC2Theme.WHITE_DIM * Color(1, 1, 1, 0.30), 1.0)
+			draw_arc(pos, UNKNOWN_MARKER_RADIUS, 0.0, TAU, 16, UNKNOWN_MARKER_COLOUR, 1.5)
 			continue
 
 		var colour := CC2Theme.star_color(sys.star_class)

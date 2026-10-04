@@ -172,7 +172,7 @@ headlessly — every assertion in the suite drives a real widget and reads real 
       only the root so the tree cannot desynchronise from the types the panels expect.
 - [x] 5.11 `src/app.gd` — attaches the client to SINGLE_PLAYER and CLIENT. DEDICATED_SERVER
       stays headless, so `--server` still runs in CI alongside the GUI build.
-- [x] 5.12 `tests/test_gui_integration.gd` — 135 checks. Instantiation, scene-tree
+- [x] 5.12 `tests/test_gui_integration.gd` — 147 checks. Instantiation, scene-tree
       integrity, panel node accessors, theme is non-default, every signal edge is
       connected, map hit-testing and zoom clamping, fleet order accept/reject, macro
       controls emitting real Phase 4 orders, **End Turn advancing the stardate by exactly
@@ -183,10 +183,39 @@ headlessly — every assertion in the suite drives a real widget and reads real 
 
 | Check | Result |
 | --- | --- |
-| `tools/verify.sh` (9 suites) | ALL GREEN — 1844 checks, 0 failed |
+| `tools/verify.sh` (9 suites) | ALL GREEN — 1856 checks, 0 failed |
 | `godot --headless --editor --quit` | rc=0, no parser errors |
 | `--server` / `--single` / `--client` | all boot rc=0; the latter two attach the client |
 | Rendered frame at 1024x576, 1280x720, 1600x900 | layout intact at every resolution |
+
+## Phase 5 follow-up: runtime UI defects found by playing the client
+
+Reported from a running window, not from the test suite — all three passed every headless
+assertion while being visibly wrong. Each now has a regression check.
+
+- **BBCode leaked into the HUD.** `NET / TURN` is sign-coloured, so `Format.signed_colored`
+  returns `[color=…]+0.0[/color]`, but `_cell()` built a plain `Label`, which prints the
+  tags literally. Added `_cell_bbcode()` and a `RichTextLabel` with `bbcode_enabled`.
+- **The galaxy map rendered as a black rectangle.** Two independent causes:
+  1. `frame_galaxy()` ran inside `bind()`, before the container had laid the map out, so
+     `get_rect().size` was zero and the fit collapsed to `0.0` — which `clampf` pinned to
+     `MIN_ZOOM` (0.35). The whole ±120 galaxy then rendered about 42px across. Framing now
+     defers until `resized` reports a real area, and fits the *widest* system from the
+     chosen centre rather than the galaxy disk, since centring on home pushes far-side
+     systems past the disk radius.
+  2. Fog of war reveals 1 of 40 systems on turn one (sensor ranges are 2–3 parsecs against a
+     240-parsec-wide galaxy), and unsurveyed systems drew as a 5px alpha-0.30 ring — about
+     1.75px on screen. Widened and brightened to named constants; known stars still read
+     far brighter, and unsurveyed ones still carry no class colour or ownership.
+  The SubViewport is now hosted by a `SubViewportContainer` with `stretch = true` — a bare
+  SubViewport under a Control renders to a target nothing presents.
+- **"REFUSED: select one of your colonies first" spammed the log.** The build dropdown was
+  a *request* that queued against whatever the controller had selected, which was usually a
+  system or an uncolonised body the player had clicked. `_on_build_selected` now adopts the
+  colony named by the selector above it. Separately, `_refresh_colonies()` was writing
+  `select_planet` on every `state_changed` — that runs in response to `select_planet`, so it
+  recursed and stomped the player's real choice. Selection is now established only where the
+  player actually chose something.
 
 ## Defects the self-verification loop caught in Phase 5
 

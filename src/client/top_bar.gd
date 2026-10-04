@@ -17,8 +17,10 @@ var _controller: SessionController = null
 var _stardate_label: Label = null
 var _turn_label: Label = null
 var _treasury_label: Label = null
-var _net_label: Label = null
 var _research_label: Label = null
+## Net income is coloured by sign, so this readout carries BBCode and must be a
+## RichTextLabel — a plain Label would print the tags literally.
+var _net_label: RichTextLabel = null
 var _pending_label: Label = null
 var _end_turn_button: Button = null
 
@@ -38,7 +40,7 @@ func _build() -> void:
 	_stardate_label = _cell(row, "STARDATE", CC2Theme.PHOSPHOR, CC2Theme.FONT_BIG)
 	_turn_label = _cell(row, "TURN", CC2Theme.PHOSPHOR_DIM, CC2Theme.FONT_HEAD)
 	_treasury_label = _cell(row, "IMPERIAL TREASURY", CC2Theme.CYAN, CC2Theme.FONT_HEAD)
-	_net_label = _cell(row, "NET / TURN", CC2Theme.CYAN, CC2Theme.FONT_HEAD)
+	_net_label = _cell_bbcode(row, "NET / TURN", CC2Theme.CYAN, CC2Theme.FONT_HEAD)
 	_research_label = _cell(row, "RESEARCH", CC2Theme.AMBER, CC2Theme.FONT_HEAD)
 
 	# A spacer so the treasury block sits left and the controls right regardless of how
@@ -72,6 +74,35 @@ func _build() -> void:
 
 ## One labelled readout. Returns the value label so the caller can update it.
 func _cell(parent: Control, caption: String, colour: Color, font_size: int) -> Label:
+	var box := _cell_box(parent, caption)
+
+	var value_label := Label.new()
+	value_label.text = "--"
+	value_label.add_theme_color_override("font_color", colour)
+	value_label.add_theme_font_size_override("font_size", font_size)
+	box.add_child(value_label)
+	return value_label
+
+
+## As `_cell`, but the readout carries BBCode — used where the value's colour depends on
+## the value itself. `fit_content` keeps the box sized to its text instead of expanding to
+## fill the top bar's 44px.
+func _cell_bbcode(parent: Control, caption: String, colour: Color, font_size: int) -> RichTextLabel:
+	var box := _cell_box(parent, caption)
+
+	var value_label := RichTextLabel.new()
+	value_label.bbcode_enabled = true
+	value_label.fit_content = true
+	value_label.scroll_active = false
+	value_label.text = "--"
+	value_label.add_theme_color_override("default_color", colour)
+	value_label.add_theme_font_size_override("normal_font_size", font_size)
+	box.add_child(value_label)
+	return value_label
+
+
+## The caption-over-value stack both cell builders drop their readout into.
+func _cell_box(parent: Control, caption: String) -> VBoxContainer:
 	var box := VBoxContainer.new()
 	box.add_theme_constant_override("separation", 0)
 	parent.add_child(box)
@@ -81,13 +112,7 @@ func _cell(parent: Control, caption: String, colour: Color, font_size: int) -> L
 	caption_label.add_theme_color_override("font_color", CC2Theme.WHITE_DIM)
 	caption_label.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
 	box.add_child(caption_label)
-
-	var value_label := Label.new()
-	value_label.text = "--"
-	value_label.add_theme_color_override("font_color", colour)
-	value_label.add_theme_font_size_override("font_size", font_size)
-	box.add_child(value_label)
-	return value_label
+	return box
 
 
 ## Bind to a controller and start following its state.
@@ -140,3 +165,7 @@ func treasury_label() -> Label:
 
 func research_label() -> Label:
 	return _research_label
+
+
+func net_label() -> RichTextLabel:
+	return _net_label

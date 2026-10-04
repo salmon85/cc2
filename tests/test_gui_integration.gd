@@ -125,6 +125,19 @@ func _first_colony() -> PlanetState:
 	return colonies[0] if not colonies.is_empty() else null
 
 
+## Some system to click on the map, preferring one that does not hold the first colony,
+## so the controller's selection is genuinely "some other body" rather than the colony.
+func _first_body_system(c: SessionController) -> int:
+	var colonies := c.player_colonies()
+	var home := colonies[0].index if not colonies.is_empty() else -1
+	for sys in c.galaxy.systems:
+		if sys.planet_indices.is_empty():
+			continue
+		if sys.planet_indices[0] != home:
+			return sys.index
+	return 0
+
+
 # --- steps ---------------------------------------------------------------
 
 func _step_instantiate() -> void:
@@ -188,6 +201,21 @@ func _step_panels() -> void:
 	sup.ok(_client.top_bar.stardate_label() != null, "top bar exposes the stardate readout")
 	sup.ok(_client.top_bar.treasury_label() != null, "top bar exposes the treasury readout")
 	sup.ok(_client.top_bar.research_label() != null, "top bar exposes the research readout")
+	# Net income is sign-coloured via BBCode, so this readout must be a RichTextLabel.
+	# A plain Label renders the tags literally, which is what the player saw.
+	var net := _client.top_bar.net_label()
+	sup.ok(net is RichTextLabel, "the net readout parses BBCode")
+	if net is RichTextLabel:
+		sup.ok((net as RichTextLabel).bbcode_enabled,
+			"the net readout has bbcode_enabled")
+		sup.ok(_client.top_bar.net_label().text.begins_with("[color="),
+			"the net readout carries colour markup")
+		# The rendered line must be the number, not the markup.
+		sup.ok(not _client.top_bar.net_label().get_parsed_text().contains("[color="),
+			"the parsed net text has no raw tags",
+			"parsed='%s'" % _client.top_bar.net_label().get_parsed_text())
+	else:
+		sup.ok(true, "net readout BBCode checks skipped (not a RichTextLabel)")
 	sup.ok(_client.macros.tax_slider() != null, "macro panel exposes the tax slider")
 	sup.eq(_client.macros.research_sliders().size(), 4, "four research allocation sliders")
 	sup.ok(_client.macros.build_selector() != null, "macro panel exposes the build selector")
@@ -237,8 +265,10 @@ func _step_signals() -> void:
 		"macro panel follows state_changed")
 	sup.ok(c.state_changed.is_connected(_client.fleets.refresh),
 		"fleet panel follows state_changed")
-	sup.ok(c.state_changed.is_connected(_client.map._sync_viewport),
-		"map follows state_changed")
+	# The map view repaints through the redraw the view connects itself in `bind`, so
+	# that is the edge that has to be present; the map node itself only routes input.
+	sup.ok(c.state_changed.is_connected(_client.map.view().queue_redraw),
+		"map view follows state_changed")
 	sup.ok(_client.top_bar.end_turn_pressed.is_connected(_client._on_end_turn),
 		"End Turn button reaches the client")
 	sup.ok(_client.map.system_picked.is_connected(_client._on_system_picked),
@@ -330,7 +360,50 @@ func _step_map_draw() -> void:
 	sup.near(cam.zoom.x, 0.35, 0.001, "zoom clamps at the minimum")
 	cam.zoom = Vector2.ONE * before
 	_client.map.recentre()
-	sup.ok(true, "map recentres")
+	sup.ok(cam.zoom.x >= GalaxyMap.MIN_ZOOM,
+		"map recentres to a legal zoom",
+		"zoom=%f" % cam.zoom.x)
+
+	# The framing is the regression that mattered: the whole galaxy must land inside the
+	# visible rect, or the player opens onto empty space. This ran against the *live*
+	# binding (the layout the player actually sees), not a hand-restored zoom, because the
+	# original defect was that binding happened before the map had any area at all.
+	var area := _client.map.size
+	sup.ok(area.x > 0.0 and area.y > 0.0,
+		"the map is laid out when the session is bound", "%s" % str(area))
+	sup.ok(cam.zoom.x > GalaxyMap.MIN_ZOOM,
+		"the opening zoom is not clamped to the minimum",
+		"zoom=%f" % cam.zoom.x)
+	var on_screen := 0
+	var half := area * 0.5 / cam.zoom.x
+	var rect := PackedVector2Array([
+		cam.position + Vector2(-half.x, -half.y),
+		cam.position + Vector2(half.x, -half.y),
+		cam.position + Vector2(half.x, half.y),
+		cam.position + Vector2(-half.x, half.y),
+	])
+	for framed in _galaxy.systems:
+		if Geometry2D.is_point_in_polygon(framed.position, rect):
+			on_screen += 1
+	sup.ok(on_screen == _galaxy.systems.size(),
+		"every system is inside the framed view",
+		"%d of %d on screen at zoom %f" % [on_screen, _galaxy.systems.size(), cam.zoom.x])
+
+	# Unsurveyed systems must still be *drawn* -- dimly, without their class colour or
+	# ownership. Nearly every system starts unsurveyed, so an invisible marker for them
+	# left the map reading as an empty black field.
+	var unknown := 0
+	for s in _galaxy.systems:
+		if not FowStage.can_see(_galaxy, _client.controller.player_id, s.index):
+			unknown += 1
+	sup.ok(unknown > 0, "the fixture has unsurveyed systems to render",
+		"%d of %d hidden" % [unknown, _galaxy.systems.size()])
+	sup.ok(GalaxyMapView.UNKNOWN_MARKER_COLOUR.a >= 0.4,
+		"the unknown-system marker is visible against the void",
+		"alpha=%f" % GalaxyMapView.UNKNOWN_MARKER_COLOUR.a)
+	sup.ok(GalaxyMapView.UNKNOWN_MARKER_RADIUS >= 5.0,
+		"the unknown-system marker is wide enough to see",
+		"radius=%f" % GalaxyMapView.UNKNOWN_MARKER_RADIUS)
 
 
 func _step_fleet_orders() -> void:
@@ -503,6 +576,19 @@ func _step_macro_build() -> void:
 	if chosen == &"":
 		return
 	sup.ok(_client.macros.select_build(chosen), "the build selector can select it")
+
+	# Regression: browsing the construction dropdown used to be refused with "select one
+	# of your colonies first" because nothing ever moved the controller's selection off
+	# the system/body the player had clicked on the map.
+	c.select_system(_first_body_system(c))
+	_client.macros._on_build_selected(0)
+	sup.ok(c.selected_planet == colony.index or not c.player_colonies().is_empty(),
+		"touching the build selector does not leave a stale selection")
+	sup.ok(c.selected_planet == colony.index,
+		"the build selector adopts the highlighted colony",
+		"selected=%d expected=%d" % [c.selected_planet, colony.index])
+	# Re-selecting through the controller, as the GUI test drives it elsewhere.
+	c.select_planet(colony.index)
 
 	var queued_before := int(colony.building_queue.get(chosen, 0))
 	var staged_before := c.pending_orders().size()

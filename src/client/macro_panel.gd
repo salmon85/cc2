@@ -233,6 +233,12 @@ func _refresh_colonies() -> void:
 			break
 	if _colony_selector.item_count > 0:
 		_colony_selector.select(idx)
+		# `select()` only moves the highlight; it never tells anyone. Deliberately *not*
+		# pushing that choice into the controller here: this runs on every `state_changed`,
+		# so any write would immediately re-enter `refresh` and stomp whatever the player
+		# just selected on the map or in the inspector. The selection is established at the
+		# points where the player actually chose something — `_on_colony_selected` and
+		# `_adopt_selected_colony` before a build is staged.
 	_colony_selector.disabled = _colony_selector.item_count == 0
 	_rebuilding = false
 
@@ -339,11 +345,29 @@ func _on_build_selected(_index: int) -> void:
 	var id := _selected_build_id()
 	if id == &"":
 		return
+	# Touching the structure dropdown must not be rejected just because the controller's
+	# selection is something else — a system the player clicked, or an uncolonised body.
+	# The colony named by the selector above is the intended target, so make it so before
+	# the order is submitted.
+	_adopt_selected_colony()
 	# Selecting a structure is a *request*, not an order: the player still has to press
 	# the build button, so browsing the menu cannot spend the treasury. A refusal here is
 	# not an error — the controller has already reported why on `action_rejected`.
 	_controller.queue_build_structure(id)
 	build_requested.emit(id)
+
+
+## Point the controller at the colony highlighted in the colony selector, unless the
+## player has already selected exactly that body.
+func _adopt_selected_colony() -> void:
+	var sel := _colony_selector.selected
+	if sel < 0:
+		return
+	var colonies := _controller.player_colonies()
+	if sel >= colonies.size():
+		return
+	if colonies[sel].index != _controller.selected_planet:
+		_controller.select_planet(colonies[sel].index)
 
 
 func _selected_build_id() -> StringName:
