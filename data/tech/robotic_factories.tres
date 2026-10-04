@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TechNodeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/tech_node_data.gd" id="1_tnd"]
+
+[resource]
+script = ExtResource("1_tnd")
+id = &"robotic_factories"
+display_name = "Robotic Factories"
+field = 3
+cost = 70.0
+prerequisites = Array[StringName]([&"automated_mining"])
+tier = 3
+description = "Autonomous production lines. Construction and research both accelerate."
+effects = {"construction_bonus": 0.25, "research_bonus": 0.20}

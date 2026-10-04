@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TechNodeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/tech_node_data.gd" id="1_tnd"]
+
+[resource]
+script = ExtResource("1_tnd")
+id = &"gravitic_sensors"
+display_name = "Gravitic Sensors"
+field = 0
+cost = 45.0
+prerequisites = Array[StringName]([&"thruster_boost"])
+tier = 2
+description = "Passive gravity wells extend sensor range across the sector grid."
+effects = {"sensor_range": 1.5}

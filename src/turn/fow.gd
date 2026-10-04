@@ -1,0 +1,145 @@
+extends RefCounted
+class_name FowStage
+## Stage 5 of turn resolution: sensor sweeps and fog-of-war updates.
+##
+## A faction sees a system when any of its colonies, orbital stations or fleets is within
+## sensor range of it. Results are cached per faction in `GalaxyState.visible_systems`,
+## which is what the client renders and what makes scouting a real strategic cost.
+
+## Recompute visible systems for one faction and store the result.
+## Returns the set of visible system indices.
+static func update_visibility(galaxy: GalaxyState, faction_id: int, db: Node) -> Dictionary:
+	var visible: Dictionary = {}
+	var faction: FactionState = galaxy.faction(faction_id)
+	if faction == null:
+		return visible
+
+	# Colonies and stations project the local bubble.
+	var sensor_bonus := faction.tech_effect(&"sensor_range")
+	for planet in galaxy.colonies_of(faction_id):
+		var system: SystemState = galaxy.system(_system_of(galaxy, planet))
+		if system == null:
+			continue
+		var reach: float = float(db.get("COLONY_SENSOR_RANGE")) + sensor_bonus
+		_reveal_within(galaxy, system, reach, visible)
+		visible[system.index] = true
+
+	# Fleets carry their own sensors: a scout finds systems no colony can.
+	for fleet in galaxy.fleets_of(faction_id):
+		if fleet.system < 0:
+			continue
+		var system: SystemState = galaxy.system(fleet.system)
+		if system == null:
+			continue
+		var reach: float = maxf(fleet.base_sensor_range(), float(db.get("FLEET_SENSOR_RANGE")))
+		reach += sensor_bonus
+		_reveal_within(galaxy, system, reach, visible)
+		visible[system.index] = true
+
+	galaxy.visible_systems[faction_id] = visible
+	return visible
+
+
+## Mark systems within `reach` parsecs of `origin` as visible.
+static func _reveal_within(
+	galaxy: GalaxyState, origin: SystemState, reach: float, visible: Dictionary
+) -> void:
+	for other in galaxy.systems:
+		if origin.distance_to(other) <= reach:
+			visible[other.index] = true
+
+
+## Survey every planet in a visible system, so the client can show orbital detail.
+static func survey_system(galaxy: GalaxyState, faction_id: int, system_index: int) -> int:
+	var system: SystemState = galaxy.system(system_index)
+	if system == null:
+		return 0
+	var surveyed: Dictionary = galaxy.surveyed_systems.get(faction_id, {}) as Dictionary
+	var newly := 0
+	for planet_index in system.planet_indices:
+		var planet: PlanetState = galaxy.planet(planet_index)
+		if planet == null or planet.surveyed:
+			continue
+		planet.surveyed = true
+		surveyed[planet_index] = true
+		newly += 1
+	galaxy.surveyed_systems[faction_id] = surveyed
+	return newly
+
+
+## Which system a planet belongs to, or -1. Linear scan is fine: a planet is visited a
+## handful of times per turn and the system list is bounded at 100.
+static func _system_of(galaxy: GalaxyState, planet: PlanetState) -> int:
+	for system in galaxy.systems:
+		if system.planet_indices.has(planet.index):
+			return system.index
+	return -1
+
+
+## Systems `faction_id` can currently see.
+static func visible_systems(galaxy: GalaxyState, faction_id: int) -> PackedInt32Array:
+	var set := galaxy.visible_systems.get(faction_id, {}) as Dictionary
+	var out := PackedInt32Array()
+	for key: int in set:
+		out.append(key)
+	out.sort()
+	return out
+
+
+## Whether `faction_id` can currently see `system_index`.
+static func can_see(galaxy: GalaxyState, faction_id: int, system_index: int) -> bool:
+	var set := galaxy.visible_systems.get(faction_id, {}) as Dictionary
+	return set.has(system_index)
+
+
+## Redact a galaxy snapshot down to what `faction_id` is entitled to see.
+##
+## This is the single place that enforces fog of war on the wire: the server sends each
+## client a copy, so a cheating client cannot see fleets or bodies it has not scouted.
+static func redact(galaxy: GalaxyState, faction_id: int) -> Dictionary:
+	var snapshot := galaxy.to_dict()
+	var visible := visible_systems(galaxy, faction_id)
+	var allowed: Dictionary = {}
+	for index in visible:
+		allowed[index] = true
+
+	var system_entries: Array = snapshot.get("systems", []) as Array
+	for entry: Dictionary in system_entries:
+		if not allowed.has(int(entry.get("index", -1))):
+			# Hide existence: name, position and neighbours are all strategic information.
+			entry["name"] = "Unknown"
+			entry["position"] = [0.0, 0.0]
+			entry["warp_lanes"] = PackedInt32Array()
+			entry["planet_indices"] = PackedInt32Array()
+			entry["owner"] = -1
+			entry["strategic_value"] = 0.0
+
+	var fleet_entries: Array = snapshot.get("fleets", []) as Array
+	var kept: Array = []
+	for entry: Dictionary in fleet_entries:
+		var at := int(entry.get("system", -1))
+		var owner := int(entry.get("owner", -1))
+		if owner == faction_id or (at >= 0 and allowed.has(at)):
+			kept.append(entry)
+		elif owner != faction_id:
+			# Visible contact: position and strength, but not cargo or identity.
+			kept.append({
+				"id": entry.get("id", -1),
+				"owner": owner,
+				"system": at if allowed.has(at) else -1,
+				"destination": -1,
+				"travelled": 0.0,
+				"morale": 0.0,
+				"cargo": {},
+				"ships": entry.get("ships", {}),
+				"name": "Unknown Contact",
+				"active": true,
+			})
+	snapshot["fleets"] = kept
+
+	# Tell the client exactly what it is allowed to draw. Without this the receiving
+	# side has to infer visibility from the redacted payload, which cannot tell an
+	# empty system apart from a hidden one.
+	snapshot["visible"] = visible
+	snapshot["faction"] = faction_id
+	return snapshot

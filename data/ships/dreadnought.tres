@@ -1,0 +1,26 @@
+[gd_resource type="Resource" script_class="ShipHullData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/ship_hull_data.gd" id="1_shd"]
+
+[resource]
+script = ExtResource("1_shd")
+id = &"dreadnought"
+display_name = "Dreadnought"
+role = 5
+cost_metals = 280.0
+cost_rare = 120.0
+cost_energy = 90.0
+hull_points = 80.0
+shield_points = 30.0
+base_speed = 1.8
+weapon_damage = 22.0
+weapon_accuracy = 0.86
+weapon_slots = 4
+shield_slots = 3
+cargo_capacity = 40.0
+troop_capacity = 3.0
+colony_kit = false
+sensor_range = 4.5
+bombardment = 30.0
+upkeep = 14.0
+sprite_variant = 5

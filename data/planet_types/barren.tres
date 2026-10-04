@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="PlanetTypeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/planet_type_data.gd" id="1_ptd"]
+
+[resource]
+script = ExtResource("1_ptd")
+id = &"barren"
+display_name = "Barren"
+planet_class = 5
+base_habitability = 0.04
+colonizable = false
+terraformable = true
+terraform_cost = 480.0
+metals_per_pop = 1.05
+rare_per_pop = 0.18
+energy_per_pop = 0.12
+base_reserve_metals = 320.0
+base_reserve_rare = 50.0
+base_reserve_energy = 30.0
+food_yield = 0.0
+native_sensor_range = 2.5
+sprite_variant = 5
+map_color = Color(0.55, 0.52, 0.50, 1)

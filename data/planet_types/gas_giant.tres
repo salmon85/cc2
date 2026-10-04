@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="PlanetTypeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/planet_type_data.gd" id="1_ptd"]
+
+[resource]
+script = ExtResource("1_ptd")
+id = &"gas_giant"
+display_name = "Gas Giant"
+planet_class = 4
+base_habitability = 0.0
+colonizable = false
+terraformable = true
+terraform_cost = 620.0
+metals_per_pop = 0.10
+rare_per_pop = 0.70
+energy_per_pop = 1.10
+base_reserve_metals = 80.0
+base_reserve_rare = 240.0
+base_reserve_energy = 320.0
+food_yield = 0.0
+native_sensor_range = 4.0
+sprite_variant = 4
+map_color = Color(0.75, 0.55, 0.85, 1)

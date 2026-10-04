@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="BuildingData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/building_data.gd" id="1_bd"]
+
+[resource]
+script = ExtResource("1_bd")
+id = &"garrison"
+display_name = "Garrison"
+kind = 5
+cost_metals = 25.0
+cost_rare = 4.0
+cost_energy = 6.0
+upkeep = 1.5
+build_turns = 1
+yield_amount = 10.0
+yield_secondary = 0.0
+yield_tertiary = 0.0
+requires_colony = true
+max_per_colony = 5
+consumes_land = false
+description = "Ground troops defending against planetary invasion."

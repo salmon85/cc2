@@ -1,0 +1,26 @@
+[gd_resource type="Resource" script_class="ShipHullData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/ship_hull_data.gd" id="1_shd"]
+
+[resource]
+script = ExtResource("1_shd")
+id = &"cruiser"
+display_name = "Cruiser"
+role = 4
+cost_metals = 110.0
+cost_rare = 30.0
+cost_energy = 35.0
+hull_points = 34.0
+shield_points = 12.0
+base_speed = 2.6
+weapon_damage = 9.0
+weapon_accuracy = 0.82
+weapon_slots = 3
+shield_slots = 2
+cargo_capacity = 20.0
+troop_capacity = 1.0
+colony_kit = false
+sensor_range = 4.0
+bombardment = 0.0
+upkeep = 5.0
+sprite_variant = 4

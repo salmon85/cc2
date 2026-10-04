@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="PlanetTypeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/planet_type_data.gd" id="1_ptd"]
+
+[resource]
+script = ExtResource("1_ptd")
+id = &"volcanic"
+display_name = "Volcanic"
+planet_class = 3
+base_habitability = 0.26
+colonizable = true
+terraformable = true
+terraform_cost = 340.0
+metals_per_pop = 0.75
+rare_per_pop = 0.62
+energy_per_pop = 0.78
+base_reserve_metals = 220.0
+base_reserve_rare = 180.0
+base_reserve_energy = 200.0
+food_yield = 0.22
+native_sensor_range = 3.0
+sprite_variant = 3
+map_color = Color(0.85, 0.35, 0.22, 1)

@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="PlanetTypeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/planet_type_data.gd" id="1_ptd"]
+
+[resource]
+script = ExtResource("1_ptd")
+id = &"desert"
+display_name = "Desert"
+planet_class = 1
+base_habitability = 0.48
+colonizable = true
+terraformable = true
+terraform_cost = 220.0
+metals_per_pop = 0.90
+rare_per_pop = 0.26
+energy_per_pop = 0.20
+base_reserve_metals = 260.0
+base_reserve_rare = 85.0
+base_reserve_energy = 55.0
+food_yield = 0.45
+native_sensor_range = 3.0
+sprite_variant = 1
+map_color = Color(0.85, 0.66, 0.32, 1)

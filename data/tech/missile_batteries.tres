@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TechNodeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/tech_node_data.gd" id="1_tnd"]
+
+[resource]
+script = ExtResource("1_tnd")
+id = &"missile_batteries"
+display_name = "Missile Batteries"
+field = 2
+cost = 50.0
+prerequisites = Array[StringName]([&"kinetic_cannon"])
+tier = 2
+description = "Stand-off ordnance. Long-range volleys punch through shields."
+effects = {"weapon_bonus": 0.12, "accuracy_bonus": 0.03}

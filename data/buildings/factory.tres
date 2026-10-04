@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="BuildingData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/building_data.gd" id="1_bd"]
+
+[resource]
+script = ExtResource("1_bd")
+id = &"factory"
+display_name = "Factory"
+kind = 2
+cost_metals = 55.0
+cost_rare = 5.0
+cost_energy = 15.0
+upkeep = 2.0
+build_turns = 3
+yield_amount = 3.0
+yield_secondary = 0.0
+yield_tertiary = 0.0
+requires_colony = true
+max_per_colony = 4
+consumes_land = true
+description = "Converts metals into production points and industrial capacity."

@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TechNodeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/tech_node_data.gd" id="1_tnd"]
+
+[resource]
+script = ExtResource("1_tnd")
+id = &"planetary_shielding"
+display_name = "Planetary Shielding"
+field = 1
+cost = 50.0
+prerequisites = Array[StringName]([&"deflector_array"])
+tier = 2
+description = "Orbital shields over the homeworld. Bombers must strip them first."
+effects = {"energy_bonus": 0.25}

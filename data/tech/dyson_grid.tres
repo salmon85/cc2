@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TechNodeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/tech_node_data.gd" id="1_tnd"]
+
+[resource]
+script = ExtResource("1_tnd")
+id = &"dyson_grid"
+display_name = "Dyson Grid"
+field = 1
+cost = 130.0
+prerequisites = Array[StringName]([&"fusion_beams"])
+tier = 4
+description = "Orbital collectors feed the fleet. Shields and firepower reach their peak."
+effects = {"shield_bonus": 0.25, "weapon_bonus": 0.15, "energy_bonus": 0.30}

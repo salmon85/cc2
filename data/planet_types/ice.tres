@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="PlanetTypeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/planet_type_data.gd" id="1_ptd"]
+
+[resource]
+script = ExtResource("1_ptd")
+id = &"ice"
+display_name = "Ice"
+planet_class = 2
+base_habitability = 0.34
+colonizable = true
+terraformable = true
+terraform_cost = 260.0
+metals_per_pop = 0.40
+rare_per_pop = 0.30
+energy_per_pop = 0.55
+base_reserve_metals = 140.0
+base_reserve_rare = 95.0
+base_reserve_energy = 150.0
+food_yield = 0.30
+native_sensor_range = 3.0
+sprite_variant = 2
+map_color = Color(0.68, 0.85, 0.95, 1)

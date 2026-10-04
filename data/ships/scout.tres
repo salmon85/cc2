@@ -1,0 +1,26 @@
+[gd_resource type="Resource" script_class="ShipHullData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/ship_hull_data.gd" id="1_shd"]
+
+[resource]
+script = ExtResource("1_shd")
+id = &"scout"
+display_name = "Scout"
+role = 0
+cost_metals = 12.0
+cost_rare = 0.0
+cost_energy = 4.0
+hull_points = 6.0
+shield_points = 1.0
+base_speed = 5.0
+weapon_damage = 1.0
+weapon_accuracy = 0.70
+weapon_slots = 1
+shield_slots = 1
+cargo_capacity = 4.0
+troop_capacity = 0.0
+colony_kit = false
+sensor_range = 7.0
+bombardment = 0.0
+upkeep = 0.5
+sprite_variant = 0

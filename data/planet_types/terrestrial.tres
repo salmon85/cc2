@@ -1,0 +1,23 @@
+[gd_resource type="Resource" script_class="PlanetTypeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/planet_type_data.gd" id="1_ptd"]
+
+[resource]
+script = ExtResource("1_ptd")
+id = &"terrestrial"
+display_name = "Terrestrial"
+planet_class = 0
+base_habitability = 0.92
+colonizable = true
+terraformable = false
+terraform_cost = 0.0
+metals_per_pop = 0.55
+rare_per_pop = 0.22
+energy_per_pop = 0.34
+base_reserve_metals = 180.0
+base_reserve_rare = 60.0
+base_reserve_energy = 90.0
+food_yield = 1.4
+native_sensor_range = 3.5
+sprite_variant = 0
+map_color = Color(0.35, 0.72, 0.42, 1)

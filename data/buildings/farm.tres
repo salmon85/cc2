@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="BuildingData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/building_data.gd" id="1_bd"]
+
+[resource]
+script = ExtResource("1_bd")
+id = &"farm"
+display_name = "Farm"
+kind = 1
+cost_metals = 12.0
+cost_rare = 0.0
+cost_energy = 3.0
+upkeep = 0.5
+build_turns = 1
+yield_amount = 1.0
+yield_secondary = 0.0
+yield_tertiary = 0.0
+requires_colony = true
+max_per_colony = 8
+consumes_land = true
+description = "Cultivates the local biome. Output scales with planetary habitability."

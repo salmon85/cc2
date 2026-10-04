@@ -1,0 +1,26 @@
+[gd_resource type="Resource" script_class="ShipHullData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/ship_hull_data.gd" id="1_shd"]
+
+[resource]
+script = ExtResource("1_shd")
+id = &"transport"
+display_name = "Transport"
+role = 2
+cost_metals = 40.0
+cost_rare = 6.0
+cost_energy = 10.0
+hull_points = 14.0
+shield_points = 3.0
+base_speed = 2.0
+weapon_damage = 1.0
+weapon_accuracy = 0.55
+weapon_slots = 1
+shield_slots = 1
+cargo_capacity = 180.0
+troop_capacity = 2.0
+colony_kit = false
+sensor_range = 2.5
+bombardment = 0.0
+upkeep = 2.0
+sprite_variant = 2

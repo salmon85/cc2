@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="BuildingData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/building_data.gd" id="1_bd"]
+
+[resource]
+script = ExtResource("1_bd")
+id = &"mine"
+display_name = "Mine"
+kind = 0
+cost_metals = 20.0
+cost_rare = 0.0
+cost_energy = 5.0
+upkeep = 1.0
+build_turns = 2
+yield_amount = 0.80
+yield_secondary = 0.30
+yield_tertiary = 0.25
+requires_colony = true
+max_per_colony = 8
+consumes_land = true
+description = "Extracts metals, rare elements and energy from the planet's crust."

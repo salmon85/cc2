@@ -1,0 +1,26 @@
+[gd_resource type="Resource" script_class="ShipHullData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/ship_hull_data.gd" id="1_shd"]
+
+[resource]
+script = ExtResource("1_shd")
+id = &"colony_ship"
+display_name = "Colony Ship"
+role = 1
+cost_metals = 30.0
+cost_rare = 8.0
+cost_energy = 12.0
+hull_points = 8.0
+shield_points = 2.0
+base_speed = 1.5
+weapon_damage = 0.0
+weapon_accuracy = 0.0
+weapon_slots = 0
+shield_slots = 1
+cargo_capacity = 60.0
+troop_capacity = 0.0
+colony_kit = true
+sensor_range = 2.5
+bombardment = 0.0
+upkeep = 1.0
+sprite_variant = 1

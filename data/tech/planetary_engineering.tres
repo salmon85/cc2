@@ -1,0 +1,14 @@
+[gd_resource type="Resource" script_class="TechNodeData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/tech_node_data.gd" id="1_tnd"]
+
+[resource]
+script = ExtResource("1_tnd")
+id = &"planetary_engineering"
+display_name = "Planetary Engineering"
+field = 3
+cost = 115.0
+prerequisites = Array[StringName]([&"robotic_factories"])
+tier = 4
+description = "Worlds remade. Even gas giants can be seeded with floating cities."
+effects = {"terraform_power": 0.10, "can_colonize_gas": 1.0, "colonization_cost": 0.30}

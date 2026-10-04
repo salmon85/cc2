@@ -1,0 +1,40 @@
+; Colonial Conquest II — Godot 4 project configuration
+;
+; Engine configuration file.
+; Structure follows the modern Godot 4 project layout with strict static typing.
+
+config_version=5
+
+[application]
+
+config/name="Colonial Conquest II"
+config/description="Turn-based 4X space exploration, colony simulation and fleet warfare."
+config/version="1.0.0"
+run/main_scene="res://src/app.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+boot_splash/show_image=false
+config/icon="res://icon.svg"
+
+[autoload]
+
+RNGService="*res://src/core/rng_service.gd"
+Defs="*res://src/data/defs.gd"
+GameDB="*res://src/data/game_db.gd"
+
+[debug]
+
+gdscript/warnings/untyped_declaration=1
+gdscript/warnings/unsafe_property_access=1
+gdscript/warnings/unsafe_method_access=1
+
+[display]
+
+window/size/viewport_width=1600
+window/size/viewport_height=900
+window/stretch/mode="canvas_items"
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/canvas_textures/default_texture_filter=0

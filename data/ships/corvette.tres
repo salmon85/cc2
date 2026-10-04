@@ -1,0 +1,26 @@
+[gd_resource type="Resource" script_class="ShipHullData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/ship_hull_data.gd" id="1_shd"]
+
+[resource]
+script = ExtResource("1_shd")
+id = &"corvette"
+display_name = "Corvette"
+role = 3
+cost_metals = 45.0
+cost_rare = 8.0
+cost_energy = 12.0
+hull_points = 16.0
+shield_points = 5.0
+base_speed = 3.2
+weapon_damage = 4.0
+weapon_accuracy = 0.78
+weapon_slots = 2
+shield_slots = 1
+cargo_capacity = 10.0
+troop_capacity = 0.5
+colony_kit = false
+sensor_range = 4.0
+bombardment = 0.0
+upkeep = 2.0
+sprite_variant = 3

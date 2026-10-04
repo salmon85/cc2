@@ -1,0 +1,21 @@
+[gd_resource type="Resource" script_class="BuildingData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/building_data.gd" id="1_bd"]
+
+[resource]
+script = ExtResource("1_bd")
+id = &"shield_generator"
+display_name = "Shield Generator"
+kind = 3
+cost_metals = 70.0
+cost_rare = 30.0
+cost_energy = 60.0
+upkeep = 4.0
+build_turns = 4
+yield_amount = 18.0
+yield_secondary = 0.0
+yield_tertiary = 0.0
+requires_colony = true
+max_per_colony = 3
+consumes_land = false
+description = "Projects a planetary deflector field. Draws heavily on planetary energy."
