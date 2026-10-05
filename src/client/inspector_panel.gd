@@ -130,10 +130,17 @@ func _refresh_planet() -> void:
 
 	var lines := PackedStringArray()
 	lines.append(Format.heading("%s  [%s]" % [
-		String(p.type_id).capitalize(),
+		_known_name(p),
 		_ownership_caption(p),
 	]))
-	lines.append(Format.field("HABITABILITY", Format.percent(p.habitability())))
+	# Habitability is a property of the rock, not of whoever holds it, so it survives the
+	# fog. Naming is not: a name is something somebody surveyed and recorded, and it is the
+	# identifier a player reuses across turns.
+	if not _planet_detail_known(p):
+		lines.append(Format.field("HABITABILITY", Format.percent(p.habitability())))
+	else:
+		lines.append(Format.field("TYPE", String(p.type_id).capitalize()))
+		lines.append(Format.field("HABITABILITY", Format.percent(p.habitability())))
 
 	# Everything past habitability is a readout of an economy. A world belonging to
 	# another empire is surveyed rock: its population, farms, reserves and build queue
@@ -189,6 +196,19 @@ func _refresh_planet() -> void:
 		])
 
 	_planet_label.text = "\n".join(lines)
+
+
+## The planet's name, or the fog placeholder.
+##
+## Delegates to `SessionController.knows_name_of`, which is where the rule is written down.
+## The map consults the same function, so a world cannot be nameless on the map and named
+## in the panel two inches to the right of it.
+func _known_name(p: PlanetState) -> String:
+	if _controller == null or not _controller.knows_name_of(p.index):
+		return GalaxyMapView.UNKNOWN_NAME
+	# Same fallback the map uses, so a world with no drawn name still gets a stable
+	# position-derived one rather than a blank heading.
+	return p.name if p.name != "" else "P-%d" % (p.index + 1)
 
 
 ## Whether this player's survey knows a body's economics.

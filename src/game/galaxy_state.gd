@@ -43,6 +43,18 @@ var rng_state: int = 0
 ## Next fleet id to hand out.
 var next_fleet_id: int = 1
 
+## Half-extent of the system's playable disk, in parsecs.
+##
+## Serialised because it is part of the *layout*, not a rendering preference: it decides
+## where fleets may travel and how long that takes, so a save that dropped it would reload
+## onto a map the state does not agree with. Defaults to the `extreme` span, which is what
+## every save written before map sizes existed used.
+var map_radius: float = 0.0
+
+## The span in force, never zero.
+func radius() -> float:
+	return map_radius if map_radius > 0.0 else GalaxyGenerator.GALAXY_RADIUS
+
 const MAX_NEWS_ENTRIES := 400
 
 
@@ -199,6 +211,7 @@ func to_dict() -> Dictionary:
 		"news_log": news_log,
 		"rng_state": rng_state,
 		"next_fleet_id": next_fleet_id,
+		"map_radius": map_radius,
 	}
 
 
@@ -218,6 +231,9 @@ func from_dict(data: Dictionary) -> bool:
 	var raw_state: Variant = data.get("rng_state", 0)
 	rng_state = int(raw_state) if not (raw_state is String) else int(str(raw_state))
 	next_fleet_id = int(data.get("next_fleet_id", 1))
+	# Absent in every save written before map sizes existed, so fall back rather than
+	# leaving it zero: a zero radius would collapse every orbit onto the star.
+	map_radius = float(data.get("map_radius", GalaxyGenerator.GALAXY_RADIUS))
 	# JSON hands back an untyped/Packed array here, so rebuild it element-wise.
 	news_log = PackedStringArray()
 	for entry: Variant in data.get("news_log", []):

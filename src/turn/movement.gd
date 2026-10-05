@@ -7,19 +7,31 @@ class_name MovementStage
 ## replays identically on every client without transmitting a single float.
 
 ## Maximum parsecs a faction's fleets can cover this turn.
+##
+## `GameDB`'s figures are tuned for the `extreme` span. Everything here divides by the
+## game's radius factor and multiplies by the tier's, so a `tiny` map is traversed as fast
+## as an `extreme` one and a fleet always spends the same *number of turns* crossing the
+## system rather than the same number of parsecs. Without this a small map is a game
+## nobody ever moves in and a large one is a game nobody ever finishes.
+static func map_factor(galaxy: GalaxyState) -> float:
+	return GalaxyGenerator.radius_for_scale(galaxy.map_radius) / GalaxyGenerator.GALAXY_RADIUS
+
+
 static func movement_allowance(faction: FactionState) -> float:
 	var base := GameDB.BASE_MOVEMENT + faction.tech_effect(&"movement")
 	return clampf(base, 0.0, GameDB.MAX_MOVEMENT)
 
 
-## Speed of a fleet: the slowest hull, scaled by drive research.
-static func fleet_speed(fleet: FleetState, faction: FactionState) -> float:
+## Speed of a fleet: the slowest hull, scaled by drive research and by the map's span.
+static func fleet_speed(
+	fleet: FleetState, faction: FactionState, map_factor: float = 1.0
+) -> float:
 	var slowest := fleet.base_speed()
 	if slowest <= 0.0:
 		return 0.0
 	# Drive research lifts the slowest hull toward the role cap, not above it.
 	var cap := ShipHullData.role_speed_cap(_dominant_role(fleet))
-	return minf(slowest + faction.tech_effect(&"movement"), cap)
+	return minf(slowest + faction.tech_effect(&"movement"), cap) * map_factor
 
 
 ## Role of the slowest member hull, which is what governs both speed and legal orders.
@@ -69,6 +81,7 @@ static func advance(galaxy: GalaxyState) -> PackedInt32Array:
 	var arrivals := PackedInt32Array()
 	var ids := galaxy.fleets.keys()
 	ids.sort()
+	var span := map_factor(galaxy)
 
 	for id: int in ids:
 		var f: FleetState = galaxy.fleets[id] as FleetState
@@ -81,7 +94,7 @@ static func advance(galaxy: GalaxyState) -> PackedInt32Array:
 			f.destination = -1
 			continue
 
-		var speed := fleet_speed(f, owner_state)
+		var speed := fleet_speed(f, owner_state, span)
 		var from: PlanetState = galaxy.planet(f.system)
 		var to: PlanetState = galaxy.planet(f.destination)
 		if from == null or to == null:

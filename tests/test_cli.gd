@@ -21,6 +21,7 @@ func _initialize() -> void:
 	_test_port_and_seed()
 	_test_validation_and_warnings()
 	_test_slots_get_empires()
+	_test_map_size()
 
 	var code := _t.finish("test_cli")
 	print("---test_cli-exit=%d---" % code)
@@ -244,3 +245,51 @@ func _describe_check() -> void:
 	var text := opts.describe()
 	_t.ok(text.contains("DEDICATED_SERVER"), "describe() names the mode")
 	_t.ok(text.contains("seed=9"), "describe() includes the seed")
+
+## `--map-size`: every documented tier parses, and the default is a real game.
+func _test_map_size() -> void:
+	_t.begin("map size")
+
+	var plain := _parse(["--server"])
+	_t.eq(plain.map_tier, GalaxyGenerator.DEFAULT_TIER,
+		"a launch that says nothing gets the default tier")
+	_t.near(plain.map_scale, GalaxyGenerator.DEFAULT_SCALE, 0.001,
+		"and the default tier's scale")
+
+	# Backwards compatibility is the whole point of a default: an existing launch line
+	# with no --map-size must still start, and must still start a *sensible* game.
+	_t.ok(plain.map_scale > 0.0, "the default span is positive")
+	_t.ok(plain.describe().contains("size=%s" % GalaxyGenerator.DEFAULT_TIER),
+		"describe() names the tier so the log says which map is running")
+
+	for tier: String in GalaxyGenerator.SIZE_TIERS:
+		var opts := _parse(["--server", "--map-size=%s" % tier])
+		_t.eq(opts.map_tier, tier, "--map-size=%s keeps its name" % tier)
+		_t.near(opts.map_scale, float(GalaxyGenerator.SIZE_TIERS[tier]), 0.001,
+			"--map-size=%s resolves to its scale" % tier)
+		_t.ok(opts.warnings.is_empty(),
+			"--map-size=%s parses without complaint" % tier)
+
+	# The space-separated form, matching every other flag here.
+	var spaced := _parse(["--server", "--map-size", "small"])
+	_t.eq(spaced.map_tier, "small", "--map-size takes a separate value")
+
+	# An unknown tier must not take the server down, but must be visible -- a silently
+	# wrong span produces a game that looks subtly wrong with nothing on screen to say so.
+	var bogus := _parse(["--server", "--map-size=enormous"])
+	_t.eq(bogus.map_tier, GalaxyGenerator.DEFAULT_TIER,
+		"an unknown tier falls back to the default")
+	_t.ok(bogus.warnings.size() > 0, "and warns about it",
+		"%s" % str(bogus.warnings))
+	_t.ok(not bogus.describe().contains("(no warnings)"),
+		"the fallback is not silent")
+
+	var dangling := _parse(["--server", "--map-size"])
+	_t.eq(dangling.map_tier, GalaxyGenerator.DEFAULT_TIER,
+		"a --map-size with no value falls back to the default")
+	_t.ok(dangling.warnings.size() > 0, "and says so")
+
+	# The flag reaches clients and single player too. It only sizes a map the server
+	# generates, so a client must parse and carry it without complaint.
+	var client := _parse(["--client", "--map-size=tiny"])
+	_t.eq(client.map_tier, "tiny", "a client parses --map-size without complaint")

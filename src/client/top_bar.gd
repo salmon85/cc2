@@ -103,7 +103,14 @@ func _refresh_ready_button() -> void:
 	# Never report a count below this player's own state: the server's tally arrives by
 	# packet, so for the frame between pressing and hearing back the button would
 	# otherwise read "Ready 0/2" while sitting in its red, pressed-looking state.
-	var shown := maxi(tally.x, 1 if mine else 0)
+	# The server's tally and this client's own flag are cleared by the resolution that
+	# ended the turn they were for. Showing `max(tally.x, mine)` on the frame *after*
+	# that -- before the new tally has arrived -- would keep the button reading "Ready 1/1"
+	# in its red state for a turn no one has committed to, which reads as a stuck button.
+	# Once the client has a galaxy at the current turn, both are authoritative again.
+	var shown := tally.x
+	if galaxy_turn_is_current():
+		shown = maxi(tally.x, 1 if mine else 0)
 	_ready_button.text = "Ready %d/%d" % [shown, total]
 	var tint := CC2Theme.ALERT if mine else CC2Theme.PHOSPHOR
 	_ready_button.add_theme_color_override(&"font_color", tint)
@@ -117,6 +124,16 @@ func _refresh_ready_button() -> void:
 	if _controller.is_awaiting_server():
 		_ready_button.text = TurnSyncClient.WAITING_TEXT
 	_ready_button.disabled = _controller.is_awaiting_server()
+
+
+## Whether the client's local ready flag still refers to the turn it is now on.
+##
+## False in the window between the resolution landing and the server's fresh tally
+## arriving, which is exactly when the local flag is known to be stale.
+func galaxy_turn_is_current() -> bool:
+	if _controller == null or _controller.galaxy == null:
+		return true
+	return not _controller.is_awaiting_server()
 
 
 ## Toggle the lobby ready flag.

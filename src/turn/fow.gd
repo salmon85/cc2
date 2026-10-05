@@ -19,13 +19,19 @@ static func update_visibility(galaxy: GalaxyState, faction_id: int, db: Node) ->
 	if faction == null:
 		return visible
 
+	# Sensor reach is quoted at the `extreme` span and scaled to the game's own, so a
+	# scout covers the same *proportion* of the system at every map size. Otherwise a
+	# `tiny` map would be fully visible from the homeworld and scouting would stop being
+	# a decision, while on an `extreme` map one scout would light up a single orbit ring.
+	var span := MovementStage.map_factor(galaxy)
+
 	# Colonies and stations project the local bubble.
 	var sensor_bonus := faction.tech_effect(&"sensor_range")
 	for planet in galaxy.colonies_of(faction_id):
 		var system: SystemState = galaxy.system(_system_of(galaxy, planet))
 		if system == null:
 			continue
-		var reach: float = float(db.get("COLONY_SENSOR_RANGE")) + sensor_bonus
+		var reach: float = float(db.get("COLONY_SENSOR_RANGE")) * span + sensor_bonus
 		_reveal_within(galaxy, system, reach, visible)
 		visible[system.index] = true
 
@@ -36,7 +42,8 @@ static func update_visibility(galaxy: GalaxyState, faction_id: int, db: Node) ->
 		var system: SystemState = galaxy.system(_system_of(galaxy, galaxy.planet(fleet.system)))
 		if system == null:
 			continue
-		var reach: float = maxf(fleet.base_sensor_range(), float(db.get("FLEET_SENSOR_RANGE")))
+		var reach: float = maxf(
+			fleet.base_sensor_range(), float(db.get("FLEET_SENSOR_RANGE"))) * span
 		reach += sensor_bonus
 		_reveal_within(galaxy, system, reach, visible)
 		visible[system.index] = true

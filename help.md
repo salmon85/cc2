@@ -109,12 +109,13 @@ loopback authority, so offline and networked play run the same turn resolution.
 | `--slots=<int>` | `2` | 1–8, clamped. Empire slots the server admits. Seats are capacity, not a quota: the ready gate counts players who joined. |
 | `--seed=<int>` | random | Integer, **or any string** — `aurora-7` is hashed to a reproducible seed. |
 | `--systems=<int>` | `50` | 30–100, clamped. **Planets** in the single system. |
+| `--map-size=<tier>` | `large` | How big the system is. See [Map size](#map-size-presets). |
 | `--factions=<int>` | `2` | 1–8, clamped. Total empires. Raised to `--slots` if not given explicitly. |
 
 A healthy startup prints:
 
 ```
-[cc2] launch: DEDICATED_SERVER ip=0.0.0.0 port=7777 seed=42 planets=50 factions=2 slots=3 (no warnings)
+[cc2] launch: DEDICATED_SERVER ip=0.0.0.0 port=7777 seed=42 planets=50 size=large factions=2 slots=3 (no warnings)
 [cc2] session: DedicatedServer
 [cc2] dedicated server ready: 0.0.0.0:7777, 3 slots, seed 42, 50 planets, stardate 1
 ```
@@ -144,8 +145,38 @@ movement is a straight line between two worlds.
 - Every empire gets a distinct, colonisable world, so an eight-player game is eight
   empires in one neighbourhood rather than eight private corners of a galaxy.
 
-Sensors and fleet speed are scaled to the 12,000-parsec system, so a scout crosses it
-in tens of turns rather than hundreds.
+Fleet speed and sensor reach scale to whatever span `--map-size` selected, so a ship
+crosses a `tiny` map in as many turns as it takes to cross an `extreme` one.
+
+### Map size presets
+
+`--map-size=<tier>` picks how much room the single system gets. Each tier is a multiple
+of the **original 120-parsec galactic disk**:
+
+| Tier | Scale | Half-extent | Feels like |
+|---|---|---|---|
+| `tiny` | 1x | 120 pc | The whole system on one screen; a knife fight. |
+| `small` | 5x | 600 pc | A tight system. Expansion is a short walk. |
+| `medium` | 15x | 1,800 pc | Room to manoeuvre without long hauls. |
+| `large` | **30x** | 3,600 pc | **The default.** A proper 4X map. |
+| `extreme` | 50x | 6,000 pc | The widest field. Long voyages, slow scouts. |
+
+`large` is the default rather than `extreme` because at 50x a new player's first few
+turns are spent watching a ship cross the screen, and the extra span buys nothing the
+planet count does not already provide. Pass `extreme` when you want the full field.
+
+```bash
+godot --headless --path . --server --map-size=tiny  --slots=2
+godot --headless --path . --server --map-size=extreme --slots=8
+```
+
+An unknown tier falls back to `large` and says so in the log rather than refusing to
+start — a typo should not take a server down, but it should be visible, because a
+wrong span produces a game that looks subtly wrong with nothing on screen to explain it.
+
+The map draws a **white bounds frame** around the playable area and a **black** field:
+planets sit inside the frame, and everything outside it is out of bounds. Scroll to zoom
+in close enough to click a planet; scroll out to fit the whole system.
 
 ### `--slots` vs `--factions`
 

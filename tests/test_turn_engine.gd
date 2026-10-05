@@ -31,6 +31,7 @@ func _initialize() -> void:
 	_test_order_roundtrip()
 	_test_order_queue()
 	_test_movement()
+	_test_map_size_travel()
 	_test_combat()
 	_test_invasion()
 	_test_colony_sim()
@@ -213,6 +214,72 @@ func _test_order_queue() -> void:
 
 
 # --- movement -----------------------------------------------------------
+
+## A fleet crosses every map size in a comparable number of *turns*.
+##
+## This is the substantive claim behind the movement scaling, and it is easy to state and
+## easy to get wrong: the span grows by up to fifty times, so if only the layout scaled and
+## not the speed, a `tiny` map would be a game nobody ever moves in and an `extreme` one a
+## game nobody ever finishes. Asserted as a ratio rather than an exact figure, because the
+## actual turns depend on where the generator happened to put the two planets.
+func _test_map_size_travel() -> void:
+	sup.begin("travel time is comparable across map sizes")
+	var turns := {}
+	for tier: String in GalaxyGenerator.SIZE_TIERS:
+		var g := _sized_galaxy(2024, tier)
+		# Park a scout on the innermost world and send it to the outermost. That is the
+		# longest leg the map offers, so it is the one that has to stay in budget.
+		var inner := 0
+		var outer := 0
+		var inner_r := INF
+		var outer_r := -1.0
+		for p in g.planets:
+			var r := p.position.length()
+			if r < inner_r:
+				inner_r = r
+				inner = p.index
+			if r > outer_r:
+				outer_r = r
+				outer = p.index
+		sup.ok(outer != inner, "%s has two distinct worlds to travel between" % tier)
+
+		var fleet := _place_fleet(g, 0, inner, {&"scout": 1})
+		sup.ok(MovementStage.issue_move(g, fleet.id, 0, outer),
+			"%s: a scout accepts a cross-system move order" % tier)
+		var n := 0
+		while fleet.destination >= 0 and n < 5000:
+			MovementStage.advance(g)
+			n += 1
+		sup.eq(fleet.destination, -1, "%s: the scout arrives" % tier)
+		sup.ok(n > 0 and n < 500, "%s: the crossing took a sane number of turns" % tier,
+			"%d turns across %.0f parsecs" % [n, g.radius() * 2.0])
+		turns[tier] = n
+
+	var lo := 9999
+	var hi := 0
+	for tier: String in turns:
+		lo = mini(lo, int(turns[tier]))
+		hi = maxi(hi, int(turns[tier]))
+	# A fifty-fold difference in span should not produce anything like a fifty-fold
+	# difference in turns. This is a wide band on purpose: the point is to catch a whole
+	# order of magnitude of drift, not to pin an exact balance figure.
+	sup.ok(hi <= lo * 4,
+		"every map size is crossed in a comparable number of turns",
+		"fastest=%d slowest=%d" % [lo, hi])
+
+	# The span really does differ, or the comparison above would be vacuous.
+	sup.ok(MovementStage.map_factor(_sized_galaxy(2024, "extreme"))
+		> MovementStage.map_factor(_sized_galaxy(2024, "tiny")) * 10.0,
+		"the map factor genuinely differs between the smallest and largest")
+
+
+## A galaxy laid out at a named tier.
+func _sized_galaxy(seed_value: int, tier: String) -> GalaxyState:
+	var r := _rng(seed_value)
+	return GalaxyGenerator.generate(
+		_defs, r, 40, 3, _db, null,
+		float(GalaxyGenerator.SIZE_TIERS[tier]))
+
 
 func _test_movement() -> void:
 	sup.begin("movement")

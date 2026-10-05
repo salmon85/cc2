@@ -30,6 +30,7 @@ func _initialize() -> void:
 	_test_every_requested_faction_exists()
 	_test_homeworld_is_random()
 	_test_determinism()
+	_test_map_size_tiers()
 	_test_edge_cases()
 
 	var code := _t.finish("test_galaxy_gen")
@@ -56,7 +57,8 @@ func _singleton(node_name: StringName, script: GDScript) -> Node:
 ## planet is meant to vary. Passing a fixed `home_seed` is how a test asks for the same
 ## opening twice, and passing different values is how it asks for different ones.
 func _generate(
-	seed_value: int, systems: int, factions: int, home_seed: int = -1
+	seed_value: int, systems: int, factions: int, home_seed: int = -1,
+	scale: float = GeneratorScript.SCALE_EXTREME
 ) -> GalaxyState:
 	var rng_service: Node = _singleton(&"RNGService", RngScript)
 	rng_service.call("seed_stream", seed_value)
@@ -68,7 +70,21 @@ func _generate(
 		homes = RandomNumberGenerator.new()
 		homes.seed = home_seed
 		homes.state = home_seed
-	return GeneratorScript.generate(_defs, stream, systems, factions, _db, homes)
+	return GeneratorScript.generate(
+		_defs, stream, systems, factions, _db, homes, scale)
+
+
+## As `_generate`, at a chosen map-size scale.
+func _generate_sized(
+	seed_value: int, systems: int, factions: int, scale: float
+) -> GalaxyState:
+	var rng_service: Node = _singleton(&"RNGService", RngScript)
+	rng_service.call("seed_stream", seed_value)
+	var stream: RandomNumberGenerator = RandomNumberGenerator.new()
+	stream.seed = seed_value
+	stream.state = seed_value
+	return GeneratorScript.generate(
+		_defs, stream, systems, factions, _db, null, scale)
 
 
 # --- Tests ---------------------------------------------------------------------
@@ -426,3 +442,78 @@ func _test_edge_cases() -> void:
 	_t.ok(restored.from_json(text), "a generated galaxy reloads from JSON")
 	_t.ok(restored.call("rebind_definitions", _defs), "definitions rebind after load")
 	_t.eq(restored.fingerprint(), g.fingerprint(), "the round-tripped galaxy is identical")
+
+## `--map-size` presets: the tier table resolves, and the span it selects genuinely changes
+## the layout rather than only changing how the layout is drawn.
+func _test_map_size_tiers() -> void:
+	_t.begin("map size tiers")
+
+	# Every documented tier resolves to a distinct scale, in the documented order.
+	var names := ["tiny", "small", "medium", "large", "extreme"]
+	var seen: Array[float] = []
+	for n in names:
+		_t.ok(GeneratorScript.SIZE_TIERS.has(n), "tier '%s' is defined" % n)
+		seen.append(GeneratorScript.radius_for_tier(n))
+	for i in range(1, seen.size()):
+		_t.ok(seen[i] > seen[i - 1],
+			"tier '%s' is larger than '%s'" % [names[i], names[i - 1]])
+
+	# `tiny` is quoted against the pre-50x disk, so it must be that disk exactly rather
+	# than an approximation of it -- "1x" has to mean one times the thing it says it does.
+	_t.near(GeneratorScript.radius_for_tier("tiny"), 120.0, 0.001,
+		"tiny is the original 120-parsec disk")
+	_t.near(GeneratorScript.radius_for_tier("extreme"), 6000.0, 0.001,
+		"extreme is fifty times that disk")
+
+	# Case and whitespace must not change the game: two spellings of a tier resolve alike.
+	_t.near(GeneratorScript.radius_for_tier("  LARGE "),
+		GeneratorScript.radius_for_tier("large"), 0.001,
+		"a tier name is case- and whitespace-insensitive")
+	# An unknown tier falls back rather than producing a zero-sized or absurd map.
+	_t.near(GeneratorScript.radius_for_tier("enormous"),
+		GeneratorScript.radius_for_tier(GeneratorScript.DEFAULT_TIER), 0.001,
+		"an unknown tier falls back to the default")
+
+	# The span must reach the planets, not just the state: this is the assertion that would
+	# catch a generator that recorded `map_radius` and then laid orbits out on the old
+	# constant, which would produce a `tiny` map with planets scattered 50x past its edge.
+	var tiny_g := _generate_sized(4242, 40, 2, GeneratorScript.SCALE_TINY)
+	_t.near(tiny_g.map_radius, 120.0, 0.001, "a tiny galaxy records its span")
+	var tiny_furthest := 0.0
+	for p in tiny_g.planets:
+		tiny_furthest = maxf(tiny_furthest, p.position.length())
+	_t.ok(tiny_furthest <= tiny_g.radius(),
+		"every planet on a tiny map is inside its own span",
+		"furthest=%.1f radius=%.1f" % [tiny_furthest, tiny_g.radius()])
+
+	var huge_g := _generate_sized(4242, 40, 2, GeneratorScript.SCALE_EXTREME)
+	var huge_furthest := 0.0
+	for p in huge_g.planets:
+		huge_furthest = maxf(huge_furthest, p.position.length())
+	_t.ok(huge_furthest > tiny_furthest * 10.0,
+		"an extreme map spreads its planets much further out",
+		"tiny=%.1f extreme=%.1f" % [tiny_furthest, huge_furthest])
+
+	# Same seed, same tier: identical layout. The tier is part of the game's identity, so
+	# it must not perturb the seed stream.
+	_t.eq(_generate_sized(777, 40, 2, GeneratorScript.SCALE_SMALL).fingerprint(),
+		_generate_sized(777, 40, 2, GeneratorScript.SCALE_SMALL).fingerprint(),
+		"the same seed at the same tier reproduces exactly")
+
+	# The span survives a save. It decides where fleets may travel and how long that
+	# takes, so a save that dropped it would reload onto a map the state disagrees with.
+	var saved := _generate_sized(99, 40, 2, GeneratorScript.SCALE_TINY)
+	var restored := GalaxyState.new()
+	_t.ok(restored.from_json(saved.to_json()), "a sized galaxy reloads from JSON")
+	_t.near(restored.map_radius, saved.map_radius, 0.001,
+		"the map span survives a JSON round-trip")
+	_t.eq(restored.fingerprint(), saved.fingerprint(),
+		"and the round-tripped galaxy is identical")
+
+	# A save written before map sizes existed carries no span at all; it must fall back to
+	# the default rather than collapsing every orbit onto the star.
+	var legacy := saved.to_dict() as Dictionary
+	legacy.erase("map_radius")
+	var old := GalaxyState.new()
+	_t.ok(old.from_dict(legacy), "a save with no map_radius still loads")
+	_t.ok(old.radius() > 0.0, "and gets a usable span rather than zero")

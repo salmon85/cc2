@@ -16,12 +16,71 @@ class_name GalaxyGenerator
 const MIN_SYSTEMS := 30
 const MAX_SYSTEMS := 100
 
-## Half-extent of the single system, in parsecs.
+## The map-size tiers, as multiples of the *pre-50x* 120-parsec disk.
+##
+## The 50x rescale was a single fixed jump, and it left the game with one playable span and
+## no way to choose another: a two-player skirmish and an eight-empire war both got the same
+## 6000-parsec field, which is a lot of empty travel for a small game and not enough room
+## to manoeuvre for a large one. Tiers make the span a launch decision instead.
+##
+## `TINY` is deliberately the old 120-unit disk rather than something smaller -- it is
+## defined as the baseline the other five are quoted against, so "1x" means the exact
+## pre-50x layout rather than an approximation of it.
+const SCALE_TINY := 1.0
+const SCALE_SMALL := 5.0
+const SCALE_MEDIUM := 15.0
+const SCALE_LARGE := 30.0
+const SCALE_EXTREME := 50.0
+
+## The disk the tiers are quoted against, in parsecs. `GALAXY_RADIUS` is this times the
+## active tier.
+const BASE_RADIUS := 120.0
+
+## Half-extent of the single system at `SCALE_EXTREME`, in parsecs.
 ##
 ## Fifty times the old 120-unit galactic disk, because the map no longer shows a galaxy --
 ## it shows one star's neighbourhood, which wants the same physical span the whole galaxy
-## used to occupy so the orbit rings have room to read as orbits.
-const GALAXY_RADIUS := 6000.0
+## used to occupy so the orbit rings have room to read as orbits. This is the ceiling the
+## tiers scale up to, and the default.
+const GALAXY_RADIUS := BASE_RADIUS * SCALE_EXTREME
+
+## Named tiers, in the order they appear in `--help`.
+##
+## A dictionary rather than an enum because the CLI carries the *name* from the command
+## line, and mapping a string through a table keeps the parse in one place instead of a
+## match statement that has to be kept in step with the help text.
+const SIZE_TIERS := {
+	"tiny": SCALE_TINY,
+	"small": SCALE_SMALL,
+	"medium": SCALE_MEDIUM,
+	"large": SCALE_LARGE,
+	"extreme": SCALE_EXTREME,
+}
+
+## The tier a launch gets when nobody asks for one.
+##
+## `large` rather than `extreme`: at 50x a first-time player spends the opening turns
+## watching a ship cross the screen, and the extra span buys nothing that the extra
+## planets of a normal game do not already provide. `extreme` stays one flag away for
+## anyone who wants the full field.
+const DEFAULT_TIER := "large"
+
+## The scale `DEFAULT_TIER` resolves to, read once so the CLI default cannot drift out of
+## step with the tier table.
+const DEFAULT_SCALE := SCALE_LARGE
+
+
+## The half-extent of the system at a given scale multiplier.
+static func radius_for_scale(scale: float) -> float:
+	return BASE_RADIUS * maxf(SCALE_TINY, scale)
+
+
+## The half-extent for a named tier, falling back to the default for an unknown name.
+static func radius_for_tier(tier: String) -> float:
+	var key := tier.strip_edges().to_lower()
+	if not SIZE_TIERS.has(key):
+		key = DEFAULT_TIER
+	return radius_for_scale(float(SIZE_TIERS[key]))
 
 ## Innermost and outermost orbit radii, as a fraction of `GALAXY_RADIUS`. The inner bound
 ## keeps planets clear of the star glyph; the outer one keeps them inside the drawn disk.
@@ -71,7 +130,8 @@ const STAR_NAMES: Array[String] = [
 ## null falls back to `rng`, which is deterministic — what the tests and replays want.
 static func generate(
 	defs: Node, rng: RandomNumberGenerator, system_count: int, faction_count: int,
-	db: Node = null, home_rng: RandomNumberGenerator = null
+	db: Node = null, home_rng: RandomNumberGenerator = null,
+	scale: float = SCALE_EXTREME
 ) -> GalaxyState:
 	if defs == null:
 		push_error("[GalaxyGenerator] generate: definition registry is null")
@@ -98,6 +158,12 @@ static func generate(
 	if db == null:
 		push_error("[GalaxyGenerator] generate: GameDB tuning constants unavailable")
 		return null
+
+	# The span is recorded on the galaxy rather than read from a global, because it is a
+	# property of *this* game: two sessions on the same machine may be running `tiny` and
+	# `extreme` simultaneously, and a client told only the planet positions would otherwise
+	# have to guess the radius from how far apart they are.
+	galaxy.map_radius = radius_for_scale(scale)
 
 	var homes := home_rng if home_rng != null else rng
 	_place_star(galaxy, rng)
@@ -219,7 +285,7 @@ static func _populate_planets(
 		body.type_id = types[chosen_cls].get("id")
 		body.name = _planet_name(rng)
 		body.orbit = i
-		body.position = _orbit_point(rng, i, count)
+		body.position = _orbit_point(rng, i, count, galaxy.map_radius)
 		body.seed_reserves(types[chosen_cls])
 		# Outer orbits are colder and poorer: full penalty by the outermost ring, rather
 		# than the old fixed 8% per body which never accumulated past ~6 bodies.
@@ -259,12 +325,17 @@ static func _designation(rng: RandomNumberGenerator, index: int) -> String:
 
 
 ## A point on orbit ring `ring` of `total`, at a seeded angle.
-static func _orbit_point(rng: RandomNumberGenerator, ring: int, total: int) -> Vector2:
+##
+## `radius` is the game's half-extent rather than the `extreme` constant, so a `tiny`
+## game is genuinely small instead of merely *drawn* small.
+static func _orbit_point(
+	rng: RandomNumberGenerator, ring: int, total: int, radius: float
+) -> Vector2:
 	var t := float(ring) / maxf(1.0, float(maxi(1, total - 1)))
 	# sqrt spreads the rings by area instead of bunching them toward the star.
-	var radius := GALAXY_RADIUS * lerpf(INNER_ORBIT, OUTER_ORBIT, sqrt(t))
+	var r := radius * lerpf(INNER_ORBIT, OUTER_ORBIT, sqrt(t))
 	var angle := rng.randf() * TAU
-	return Vector2(cos(angle), sin(angle)) * radius
+	return Vector2(cos(angle), sin(angle)) * r
 
 
 ## Pick a key from a `{key: weight}` dictionary, proportionally to the weights.

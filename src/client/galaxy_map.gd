@@ -26,11 +26,32 @@ signal interaction_refused(reason: String)
 ## one place a player is already looking when they want to advance.
 signal end_turn_requested
 
-## The field is fifty times wider than it was, so the fit zoom had to drop by roughly the
-## same factor to keep the whole system on screen at startup. The old floor of 0.35 would
-## put the camera nine thousand parsecs out for a 6000-parsec system.
-const MIN_ZOOM := 0.007
-const MAX_ZOOM := 0.6
+## Zoom limits, and the asymmetry between them is deliberate.
+##
+## Smallest useful zoom, as a fraction of the map's own span.
+##
+## This is a runaway guard, not a framing constraint: `frame_galaxy` computes the zoom
+## that fits the whole system, and a floor set *near* that value would clamp the fit and
+## leave the far side of the system off screen -- the exact defect this control was
+## rewritten to fix. A factor well below the fit lets the fit through and still stops the
+## camera being dragged out to where the whole system is a single pixel. It scales with
+## the span so a `tiny` map is not floored at a zoom that would fill the screen with its
+## own star.
+const MIN_ZOOM_FACTOR := 0.01 / 6000.0
+
+## Largest useful zoom, in absolute terms.
+##
+## Deliberately *not* scaled by the map span. Markers are drawn at a fixed size in galaxy
+## units, so what matters is how many pixels a planet covers -- and that is a function of
+## zoom alone. Scaling the ceiling with the radius would give a `tiny` map a ceiling of
+## 0.06, at which a planet is a third of a pixel and cannot be clicked: the small map
+## would have been the one map you could not zoom in on.
+const MAX_ZOOM := 3.0
+
+## Absolute safety net for a degenerate `map_radius` from a corrupt save, which must not
+## be able to produce a zero or negative zoom -- `Camera2D` renders those as nothing.
+const MIN_ZOOM_FLOOR := 0.0002
+
 const ZOOM_STEP := 1.15
 const PAN_BUTTON := MOUSE_BUTTON_MIDDLE
 
@@ -38,10 +59,26 @@ const PAN_BUTTON := MOUSE_BUTTON_MIDDLE
 ## framing computed against it is meaningless -- see `frame_galaxy`.
 const MIN_AREA := 8.0
 
-## Mirrors `GalaxyGenerator.GALAXY_RADIUS`: the system is laid out inside this disk, so it
-## is the half-extent the initial camera has to frame. Fifty times the old value, because
-## the old figure framed a whole galaxy and this frames one star's neighbourhood.
-const GALAXY_RADIUS := GalaxyGenerator.GALAXY_RADIUS
+## The span of the map this control is showing, in parsecs.
+##
+## Read from the galaxy rather than from `GalaxyGenerator.GALAXY_RADIUS`: the radius is a
+## per-game property now that `--map-size` can pick it, and a constant here would frame the
+## wrong amount of a `tiny` map by a factor of fifty. Falls back to the default span when
+## there is no galaxy yet, which is the state the control is built in.
+func map_radius() -> float:
+	if _controller != null and _controller.galaxy != null:
+		return _controller.galaxy.radius()
+	return GalaxyGenerator.radius_for_tier(GalaxyGenerator.DEFAULT_TIER)
+
+
+## Zoom bounds for the current span.
+func min_zoom() -> float:
+	return maxf(MIN_ZOOM_FLOOR, MIN_ZOOM_FACTOR * map_radius())
+
+
+func max_zoom() -> float:
+	return MAX_ZOOM
+
 
 ## Slack left around the disk when fitting, so edge systems are not flush against the
 ## panel border and the crosshair still reads as the galactic centre.
@@ -195,6 +232,8 @@ func _unhandled_key_input(event: InputEvent) -> void:
 		end_turn_requested.emit()
 		return
 	_user_framed = true
+	# A fixed 80px pan step divided by the zoom is the same *screen* distance at every
+	# scale, which is what a player expects from arrow keys; left as-is.
 	var step := 80.0 / _camera.zoom.x
 	match key.keycode:
 		KEY_LEFT, KEY_A:
@@ -223,7 +262,7 @@ func _unhandled_key_input(event: InputEvent) -> void:
 func _zoom_at(screen_pos: Vector2, factor: float) -> void:
 	_user_framed = true
 	var before := _to_galaxy(screen_pos)
-	var next := clampf(_camera.zoom.x * factor, MIN_ZOOM, MAX_ZOOM)
+	var next := clampf(_camera.zoom.x * factor, min_zoom(), max_zoom())
 	if is_equal_approx(next, _camera.zoom.x):
 		return
 	_camera.zoom = Vector2(next, next)
@@ -346,7 +385,7 @@ func frame_galaxy() -> void:
 	# outermost ring sits at OUTER_ORBIT, so fitting the raw radius would waste a tenth of
 	# the viewport on empty space. Camera zoom magnifies, so the fit is the visible area
 	# divided by twice the half-extent it has to cover.
-	var need_x := GALAXY_RADIUS * GalaxyGenerator.OUTER_ORBIT
+	var need_x := map_radius() * GalaxyGenerator.OUTER_ORBIT
 	var need_y := need_x
 	if galaxy != null:
 		need_x = 0.0
@@ -357,7 +396,7 @@ func frame_galaxy() -> void:
 	var zoom := clampf(minf(
 		visible.x / (2.0 * need_x * FIT_MARGIN),
 		visible.y / (2.0 * need_y * FIT_MARGIN)
-	), MIN_ZOOM, MAX_ZOOM)
+	), min_zoom(), max_zoom())
 
 	_camera.position = centre
 	_camera.zoom = Vector2(zoom, zoom)

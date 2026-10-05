@@ -37,13 +37,38 @@ func bind(controller: SessionController) -> void:
 	queue_redraw()
 
 
-## Half-extent of the drawn field, in parsecs. Mirrors `GalaxyGenerator.GALAXY_RADIUS`:
-## every planet sits inside this disk, so this is the span the grid has to cover.
-const WORLD_SIZE := GalaxyGenerator.GALAXY_RADIUS * 1.1
+## Half-extent of the drawn field, in parsecs, as a multiple of the game's own radius.
+##
+## Every planet sits inside the generator's disk, so this is the span the backdrop and the
+## bounds frame have to cover. The factor rather than the absolute value because
+## `--map-size` makes the radius a per-game choice.
+const WORLD_FACTOR := 1.1
 
-## Grid pitch. The field is fifty times wider than the old galactic disk, so the old
-## 200-unit pitch would draw 60 lines across the viewport and read as a solid mesh.
-const GRID_STEP := 1000.0
+## The half-extent actually drawn for a galaxy.
+func world_size(galaxy: GalaxyState) -> float:
+	var radius := GalaxyGenerator.GALAXY_RADIUS
+	if galaxy != null:
+		radius = galaxy.radius()
+	return radius * WORLD_FACTOR
+
+## The playable field is deep space, so it is drawn black.
+##
+## The theme's `BG` carries a green cast for the surrounding CRT chrome. Carrying that
+## into the map made the field read as a lit surface with objects on it rather than as
+## vacuum with objects in it, and the green tint also leaked into the planet colours by
+## contrast -- a white planet on green reads as mint. Pure black is the correct backdrop
+## for both, and it is what makes the amber/phosphor accents carry.
+const FIELD_COLOUR := Color(0.0, 0.0, 0.0, 1.0)
+
+## The bounds indicator: a hairline frame around the playable area, so "where does the
+## system end" is answerable at a glance rather than by panning until the planets stop.
+const BOUNDS_COLOUR := Color(1.0, 1.0, 1.0, 0.55)
+const BOUNDS_WIDTH := 3.0
+
+## How far outside the outermost planet the frame sits, as a fraction of the half-extent.
+## A border drawn exactly on the outer ring would be hidden under the planets sitting on
+## it, so it is pushed out to leave the edge of the system legible as empty space.
+const BOUNDS_PAD := 1.04
 
 ## Glyph for a body the player has not surveyed: a hollow ring, deliberately dimmer and
 ## flatter than a known world so known space still draws the eye first.
@@ -61,38 +86,43 @@ func _draw() -> void:
 		return
 	var galaxy := _controller.galaxy
 
-	_draw_field()
-	_draw_rings()
+	_draw_field(galaxy)
+	_draw_bounds(galaxy)
 	_draw_systems(galaxy)
 	_draw_fleets(galaxy)
 	_draw_order_line(galaxy)
 
 
-## Faint grid so a panned map still reads as a navigable surface rather than void.
-func _draw_field() -> void:
-	var half := WORLD_SIZE * 0.5
-	var grid := Color(0.05, 0.11, 0.08, 0.35)
-	var x := -half
-	while x <= half:
-		draw_line(Vector2(x, -half), Vector2(x, half), grid, 1.0)
-		x += GRID_STEP
-	var y := -half
-	while y <= half:
-		draw_line(Vector2(-half, y), Vector2(half, y), grid, 1.0)
-		y += GRID_STEP
-	# Crosshair and a guide ring at the galactic centre, sized to the system rather than
-	# to the old 120-unit disk so they still sit inside the field.
+## The backdrop: a flat black field with a crosshair at the star.
+##
+## The grid and the concentric orbit rings that used to be here were both removed. The
+## rings were the explicit ask, and they were doing the grid's job too -- at sixty-four
+## circles over a field fifty times wider than the old disk, they read as a bullseye
+## behind every object rather than as the orbits they were meant to depict. Nothing was
+## lost by dropping both: the planets already sit at their orbital radii, so the layout is
+## still legible, and without a mesh behind them the markers are the only thing on screen.
+func _draw_field(galaxy: GalaxyState) -> void:
+	var w := world_size(galaxy)
+	draw_rect(Rect2(-w, -w, w * 2.0, w * 2.0), FIELD_COLOUR)
+	# Crosshair at the star, sized to the system rather than to the old 120-unit disk.
 	draw_line(Vector2(-18.0, 0.0), Vector2(18.0, 0.0), CC2Theme.CYAN_DIM, 1.0)
 	draw_line(Vector2(0.0, -18.0), Vector2(0.0, 18.0), CC2Theme.CYAN_DIM, 1.0)
-	draw_arc(Vector2.ZERO, 1200.0, 0.0, TAU, 64, Color(0.05, 0.11, 0.08, 0.5), 1.0)
 
 
-## Orbit rings, drawn under everything. Each planet gets its own ring, and a faint circle
-## per ring is what makes the layout read as orbits rather than as scattered dots.
-func _draw_rings() -> void:
-	var ring := Color(0.07, 0.17, 0.12, 0.5)
-	for i in 64:
-		draw_arc(Vector2.ZERO, float(i) * WORLD_SIZE * 0.5 / 64.0, 0.0, TAU, 48, ring, 1.0)
+## The bounds indicator: a rectangular frame around the whole playable area.
+##
+## Drawn as a rectangle rather than a circle around the star because the playable area is
+## the square the generator lays planets inside, and a circle would cut off the corners a
+## planet at maximum inclination actually occupies -- telling the player the corner is
+## out of bounds when it is not.
+func _draw_bounds(galaxy: GalaxyState) -> void:
+	var half := world_size(galaxy) * BOUNDS_PAD
+	var lo := Vector2(-half, -half)
+	var hi := Vector2(half, half)
+	draw_line(lo, Vector2(hi.x, lo.y), BOUNDS_COLOUR, BOUNDS_WIDTH)
+	draw_line(Vector2(hi.x, lo.y), hi, BOUNDS_COLOUR, BOUNDS_WIDTH)
+	draw_line(hi, Vector2(lo.x, hi.y), BOUNDS_COLOUR, BOUNDS_WIDTH)
+	draw_line(Vector2(lo.x, hi.y), lo, BOUNDS_COLOUR, BOUNDS_WIDTH)
 
 
 ## The star, the planets, owner rings and labels.
@@ -176,11 +206,23 @@ func _system_of(galaxy: GalaxyState, p: PlanetState) -> SystemState:
 	return null
 
 
-## A planet's display name. Falls back to the catalogue designation, which is unique by
-## construction, so an unnamed body is still identifiable rather than a row of blanks.
+## The placeholder shown in place of a world the player has not named.
+const UNKNOWN_NAME := "Unknown Planet"
+
+
+## A planet's display name, or the placeholder when the player is not entitled to it.
+##
+## The name is filtered, not just the economy. It is the one identifier the player uses to
+## refer to a place, so a map that named every rival world would be handing over a survey
+## nobody performed -- and unlike the economy it is *free* to withhold, since an unnamed
+## world is still perfectly clickable.
 func planet_label(p: PlanetState) -> String:
+	if not _controller.knows_name_of(p.index):
+		return UNKNOWN_NAME
 	if p.name != "":
 		return p.name
+	# The fallback is a position-derived designation rather than a real name, so it leaks
+	# nothing the player could not already count off the planets they can see.
 	return "P-%d" % (p.index + 1)
 
 

@@ -58,6 +58,14 @@ class Options extends RefCounted:
 	var seed_value: int = 0
 	var seed_given: bool = false
 	var system_count: int = 50
+	## `--map-size` as a multiple of the pre-50x 120-parsec disk.
+	##
+	## Stored as the resolved scale rather than the tier *name*: two spellings of the same
+	## tier ("large", "LARGE ") must produce an identical game, and everything downstream --
+	## the generator, the movement tuning, the camera fit -- wants a number.
+	var map_scale: float = GalaxyGenerator.DEFAULT_SCALE
+	## The tier name as typed, kept for the log line and the setup menu.
+	var map_tier: String = GalaxyGenerator.DEFAULT_TIER
 	var faction_count: int = 2
 	## Whether --factions was given explicitly. Without this a derived floor (see
 	## `reconcile_slot_empires`) could not tell "the operator asked for two" from "nobody
@@ -87,8 +95,9 @@ class Options extends RefCounted:
 		var mode_name: String = [
 			"SINGLE_PLAYER", "DEDICATED_SERVER", "CLIENT", "SETUP_MENU"
 		][mode]
-		return "%s ip=%s port=%d seed=%d planets=%d factions=%d slots=%d%s%s" % [
-			mode_name, ip, port, seed_value, system_count, faction_count, slots,
+		return "%s ip=%s port=%d seed=%d planets=%d size=%s factions=%d slots=%d%s%s" % [
+			mode_name, ip, port, seed_value, system_count, map_tier,
+			faction_count, slots,
 			" ready" if auto_ready else "",
 			"" if not warnings.is_empty() else " (no warnings)",
 		]
@@ -136,6 +145,8 @@ static func parse(argv: PackedStringArray) -> Options:
 					# and this is its planet count. Renaming the flag would break every
 					# existing launch script for no gain in clarity -- the help text and
 					# the `planets=` log line say what it means.
+				elif arg.begins_with("--map-size="):
+					_parse_map_size(arg.substr(11), opts)
 				elif arg.begins_with("--factions="):
 					opts.faction_count = _parse_clamped_int(
 						arg.substr(11), opts, 1, 8, "factions", 2)
@@ -144,6 +155,13 @@ static func parse(argv: PackedStringArray) -> Options:
 					opts.slots = _parse_clamped_int(
 						arg.substr(8), opts, MIN_SLOTS, MAX_SLOTS,
 						"slots", DEFAULT_SLOTS)
+				elif arg == "--map-size" or arg == "--size":
+					# Space-separated variant: consume the next token.
+					if i + 1 < argv.size():
+						i += 1
+						_parse_map_size(argv[i], opts)
+					else:
+						opts.warnings.append("flag %s given without a value" % arg)
 				elif arg == "--ip" or arg == "--port" or arg == "--seed" \
 						or arg == "--slots":
 					# Space-separated variant: consume the next token.
@@ -247,6 +265,26 @@ static func _parse_port(value: String, opts: Options) -> int:
 	opts.port_given = true
 	var parsed := _parse_clamped_int(value, opts, 1, 65535, "port", DEFAULT_PORT)
 	return parsed
+
+
+## Resolve `--map-size=<tier>`.
+##
+## An unknown tier falls back to the default *and says so* rather than refusing the launch:
+## a typo in a map size should not stop a server from coming up, but it must be visible,
+## because silently running the wrong span produces a game that looks subtly wrong (fleets
+## either crawl or teleport) with nothing on screen to explain it.
+static func _parse_map_size(value: String, opts: Options) -> void:
+	var raw := value.strip_edges().to_lower()
+	if raw.is_empty():
+		opts.warnings.append("map size '%s' is empty; using %s" % [
+			value, GalaxyGenerator.DEFAULT_TIER])
+		raw = GalaxyGenerator.DEFAULT_TIER
+	elif not GalaxyGenerator.SIZE_TIERS.has(raw):
+		opts.warnings.append("unknown map size '%s'; using %s" % [
+			value, GalaxyGenerator.DEFAULT_TIER])
+		raw = GalaxyGenerator.DEFAULT_TIER
+	opts.map_tier = raw
+	opts.map_scale = float(GalaxyGenerator.SIZE_TIERS[raw])
 
 
 static func _parse_seed(value: String, opts: Options) -> void:

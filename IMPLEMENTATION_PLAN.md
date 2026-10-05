@@ -792,3 +792,110 @@ packet landed, and the clients were correctly behind rather than wrong.
   fixtures colonised `g.systems[0].planet_indices[0]`, which is now faction 0's randomly
   drawn homeworld already sitting at its population cap. A test that "grows a colony" by
   re-colonising someone's homeworld passes for the wrong reason.
+
+
+# Round 9: map presentation, map-size tiers, and the ready reset
+
+## Deliverable 1 & 3: the field went black, and gained a frame
+
+The concentric orbit rings are gone, and so is the grid that was hiding behind them. They
+were doing each other's job: at sixty-four circles over a field fifty times wider than the
+old disk, the rings read as a bullseye behind every object rather than as the orbits they
+were meant to depict, and the grid existed to stop that reading as void. With both removed
+the markers are the only thing on screen, which is the point.
+
+The field is now pure black rather than the theme's green-cast `BG`. The green carried
+into the planet colours by simultaneous contrast — a white planet on green reads as mint —
+so making the backdrop true black also made the planet palette do what it says.
+
+The bounds indicator is a **rectangle**, not a circle around the star. The playable area is
+the square the generator lays planets inside, and a circle would cut off the corners a
+maximum-inclination planet actually occupies — telling a player that corner is out of
+bounds when it is not.
+
+## Deliverable 2: five map sizes, and the scaling that makes them playable
+
+`--map-size=<tier>` picks `tiny`/`small`/`medium`/`large`/`extreme`, quoted as multiples of
+the **original 120-parsec disk** so `tiny` is that disk exactly rather than an
+approximation of it. `large` is the default: at 50x a new player's first turns are spent
+watching a ship cross the screen.
+
+The span is now a property of the *galaxy* (`GalaxyState.map_radius`, serialised) rather
+than a constant. It has to be: two sessions on one machine may run `tiny` and `extreme`
+simultaneously, and a client told only planet positions would otherwise infer the radius
+from how far apart they are.
+
+**The substantive part is that a bigger map must not mean a slower game.** Fleet speed and
+sensor reach are quoted at the `extreme` span and scaled by `radius / GALAXY_RADIUS`, so a
+ship crosses a `tiny` map in as many turns as it takes to cross an `extreme` one.
+`test_turn_engine` asserts this as a ratio rather than an exact figure — it walks a scout
+from the innermost world to the outermost on every tier and requires the turn counts to sit
+within a factor of four of each other. Without the scaling the span grows fifty-fold and
+the turn count grows with it, which is the failure that would not have shown up in any
+assertion about distance.
+
+## Deliverable 4: the zoom bounds are deliberately asymmetric
+
+This is the one place where the obvious implementation is wrong in both directions.
+
+**The floor scales with the map, and sits far below the fit.** `frame_galaxy` computes the
+zoom that fits the whole system; a floor set near that value clamps the fit and leaves the
+far side off screen — the exact defect this control was rewritten to fix last round. The
+first attempt at this (floor at `0.5/6000`) did exactly that and the GUI test caught it:
+`test_gui_integration` reported the opening zoom pinned to the minimum. It is now
+`0.01/6000` — a runaway guard, not a framing constraint.
+
+**The ceiling does *not* scale with the map.** Markers are drawn at a fixed size in galaxy
+units, so what decides whether a planet is clickable is how many *pixels* it covers, and
+that is a function of zoom alone. Scaling the ceiling with the radius would give a `tiny`
+map a ceiling of 0.06 — at which a planet is a third of a pixel — making the small map the
+one map you cannot zoom in on.
+
+## Deliverable 5: ready flags are per-turn
+
+A ready flag belonged to the turn it was raised for and was never cleared. Two consequences,
+both bad: the *next* turn's lobby looked satisfied before anyone committed to it, and the
+button read "already ready" to a player who had done nothing — the one lobby state that
+cannot recover on its own.
+
+Cleared in three places, because the state is genuinely held in three: the server clears
+each peer's flag in the lobby; the client clears its local mirror in `receive_resolution`;
+and the top bar stops inflating the tally from the stale local flag while the client's
+resolution is still in flight. All three were needed — a client that clears its mirror but
+receives a stale tally shows a wrong number, and one that receives a fresh tally while
+keeping its own flag draws the button red for a turn nobody committed to.
+
+## Deliverable 6: names are a fog leak of their own
+
+The name is a free fact about a world the player has never visited, it is stable across
+turns, and it is the identifier a player reuses to refer to a place. A map of named rivals'
+worlds is a map somebody has already scouted.
+
+`SessionController.knows_name_of()` requires ownership or a fleet parked on *that*
+world — deliberately stricter than the economy gate, which also accepts `surveyed`. A
+survey records what a world *is*, not what somebody named it; letting surveys through would
+re-expose every name the moment a scout's sweep lit up a neighbouring orbit. Both the map
+label and the inspector heading consult the one function, so a world cannot be nameless on
+the map and named in the panel beside it.
+
+## A bug the tier tests found immediately
+
+`radius_for_tier("enormous")` returned 120 instead of the default. The lookup was
+`SIZE_TIERS.get(key, DEFAULT_TIER)` — but `SIZE_TIERS` maps *name to scale*, so the
+default it substituted was the string `"large"`, and `float("large")` is `0.0`. Every
+unknown tier silently produced a degenerate map instead of falling back. Caught by the
+first assertion in the new tier block.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 1905 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_galaxy_gen`: 343 (was 321) — the tier table, `tiny` being exactly the 120-parsec
+  disk, `map_radius` surviving a save, and a pre-`map_radius` save falling back rather than
+  collapsing every orbit onto the star.
+- `test_turn_engine`: 410 (was 388) — the cross-tier travel comparison.
+- `test_enet_sync`: 166 (was 152) — a networked scenario that readies both players, resolves
+  the turn, and asserts both the server's flags and each client's local flag are cleared.
+- `test_cli`: 104 (was 78) — every tier, the space-separated form, and the unknown-tier
+  fallback warning.
+- `test_gui_integration`: 250 (was 238) — name fog in both the map and the inspector, the
+  black field, and the bounds frame enclosing every planet.

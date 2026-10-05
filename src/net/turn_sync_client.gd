@@ -117,6 +117,13 @@ func receive_resolution(_turn_num: int, _server_hash: String, payload: Dictionar
 		# orders against a galaxy the server does not have, which is unrecoverable.
 		return false
 	awaiting = false
+	# The flag was raised *for the turn that just resolved*. Carrying it forward would
+	# leave the READY button sitting in its red, pressed-looking state during a turn
+	# nobody has committed to -- and, worse, the button would read "already ready" to a
+	# player who had done nothing, which is the one state the lobby cannot recover from
+	# on its own. The server clears the same flag in its own bookkeeping; this is the
+	# local mirror of it, and both are needed because the button draws from here.
+	_ready_flagged = false
 	turn_resolved.emit(current_turn, payload.get("report", {}) as Dictionary)
 	return true
 

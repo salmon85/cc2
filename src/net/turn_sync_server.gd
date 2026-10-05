@@ -153,8 +153,33 @@ func resolve_if_ready() -> Dictionary:
 	var report := TurnResolver.resolve_turn(galaxy, orders, defs, db, _rng, 0)
 	var payload := build_payload(report)
 	_pending.clear()
+	_reset_lobby_readiness()
 	broadcast(payload)
 	return payload
+
+
+## Clear every peer's ready flag once the turn they were flagging for has resolved.
+##
+## The flags belong to a turn, and that turn is over. Left set, they make the *next* turn's
+## lobby look satisfied before a single player has committed to it: the server would have
+## every flag up, `everyone_ready()` was already true, and the moment a late joiner or an
+## AI-held seat needed a submission the gate would open on stale consent from last turn.
+##
+## Cleared before the broadcast rather than after so the resolution packet and the reset
+## tally reach clients in the same order on every peer -- a client that saw the tally first
+## would briefly show a green button for a turn nobody has agreed to yet.
+func _reset_lobby_readiness() -> void:
+	if lobby == null:
+		return
+	var reset := PackedInt32Array()
+	for slot: int in lobby.occupied_slots():
+		var peer := lobby.peer_of(slot)
+		if peer != 0 and lobby.set_ready(peer, false):
+			reset.append(slot)
+	# Only re-broadcast when something actually changed, so a turn resolved while nobody
+	# was flagged does not wake the wire for a tally that already reads the same.
+	if not reset.is_empty():
+		_broadcast_ready_count()
 
 
 ## The wire form of a resolved turn: the full state, its hash, and the report.

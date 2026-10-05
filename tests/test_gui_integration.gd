@@ -57,7 +57,7 @@ func _initialize() -> void:
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
-		"fog_fleet_markers", "reproducible",
+		"fog_fleet_markers", "fog_planet_names", "map_bounds", "reproducible",
 		"teardown",
 	])
 	# The tree only lays out nodes from `_process` onward; `_initialize` runs before the
@@ -103,6 +103,8 @@ func _process(_delta: float) -> bool:
 		"peer_departure": _step_peer_departure_does_not_quit()
 		"fog_ownership": _step_fog_of_war_ownership()
 		"fog_colony_markers": _step_fog_colony_markers()
+		"fog_planet_names": _step_fog_planet_names()
+		"map_bounds": _step_map_bounds()
 		"fog_fleet_markers": _step_fog_fleet_markers()
 		"reproducible": _step_reproducible()
 		"teardown": _step_teardown()
@@ -485,13 +487,16 @@ func _step_map_draw() -> void:
 	# Camera zoom must clamp rather than run away.
 	var cam := _client.map.camera()
 	var before := cam.zoom.x
+	# The bounds are per-span accessors, not constants: `--map-size` made the radius a
+	# per-game property, so a fixed floor tuned for a 120-parsec disk would put a `tiny`
+	# map's camera inside the star.
 	_client.map._zoom_at(Vector2(400.0, 300.0), 1000.0)
-	sup.near(cam.zoom.x, GalaxyMap.MAX_ZOOM, 0.001, "zoom clamps at the maximum")
+	sup.near(cam.zoom.x, _client.map.max_zoom(), 0.001, "zoom clamps at the maximum")
 	_client.map._zoom_at(Vector2(400.0, 300.0), 0.0001)
-	sup.near(cam.zoom.x, GalaxyMap.MIN_ZOOM, 0.001, "zoom clamps at the minimum")
+	sup.near(cam.zoom.x, _client.map.min_zoom(), 0.001, "zoom clamps at the minimum")
 	cam.zoom = Vector2.ONE * before
 	_client.map.recentre()
-	sup.ok(cam.zoom.x >= GalaxyMap.MIN_ZOOM,
+	sup.ok(cam.zoom.x >= _client.map.min_zoom(),
 		"map recentres to a legal zoom",
 		"zoom=%f" % cam.zoom.x)
 
@@ -502,7 +507,7 @@ func _step_map_draw() -> void:
 	var area := _client.map.size
 	sup.ok(area.x > 0.0 and area.y > 0.0,
 		"the map is laid out when the session is bound", "%s" % str(area))
-	sup.ok(cam.zoom.x > GalaxyMap.MIN_ZOOM,
+	sup.ok(cam.zoom.x > _client.map.min_zoom(),
 		"the opening zoom is not clamped to the minimum",
 		"zoom=%f" % cam.zoom.x)
 	var on_screen := 0
@@ -1342,6 +1347,195 @@ func _inspector_gates_everything() -> bool:
 ## The map drew a diamond for *every* fleet of *every* empire while correctly hiding the
 ## stars those fleets were parked in -- so the fog was on the background and off the
 ## foreground. Enemy ships are now drawn only where a sensor sweep would find them.
+## Planet names are their own fog leak.
+##
+## Separate from ownership and from the economy: a name is a free fact about a world the
+## player has never visited, it is stable across turns, and it is what the player uses to
+## refer to a place. A map of named rivals' worlds is a map somebody has already scouted.
+##
+## The fixture is synthesised because a single-player galaxy has one empire: a rival world
+## would never appear naturally, and the behavioural half of this test would silently
+## never run.
+func _step_fog_planet_names() -> void:
+	sup.begin("planet names respect the fog")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var gal := c.galaxy
+	if gal == null:
+		return
+	var me := c.player_id
+	var view := _client.map.view()
+	var inspector := _client.inspector
+
+	# Find (or manufacture) a rival world with a real, distinctive name.
+	var foreign: PlanetState = null
+	var rival := -1
+	for p in gal.planets:
+		if p.owner != me and p.name != "":
+			foreign = p
+			rival = p.owner
+			break
+	if foreign == null:
+		# Force one: take any unowned world and give it a rival owner and a name that
+		# could not occur by accident, so "did this string leak" is unambiguous.
+		for p in gal.planets:
+			if p.owner != me:
+				foreign = p
+				break
+		if foreign == null:
+			sup.ok(true, "no rival world available; skipped")
+			return
+		# `gal.factions` holds `FactionState` objects, so the rival's *index* is found by
+		# position rather than by comparing ids.
+		var occupied := -1
+		for i in gal.factions.size():
+			if i != me:
+				occupied = i
+				break
+		if occupied < 0:
+			sup.ok(true, "no rival empire available; skipped")
+			return
+		var saved_owner := foreign.owner
+		var saved_name := foreign.name
+		var saved_colonized := foreign.colonized
+		rival = occupied
+		foreign.owner = occupied
+		foreign.colonized = true
+		foreign.name = "Zzzqx Probe"
+
+		# Park no fleet there, and make sure none is en route: a fleet merely heading to
+		# the world must not earn the name, or the test would pass for the wrong reason.
+		var parked := []
+		for key: int in gal.fleets:
+			var f: FleetState = gal.fleets[key]
+			if f.owner == me and f.active:
+				parked.append(f)
+
+		sup.ok(not c.knows_name_of(foreign.index),
+			"an unvisited rival world has no name the player may use")
+		sup.eq(view.planet_label(foreign), GalaxyMapView.UNKNOWN_NAME,
+			"the map labels it with the placeholder, not its real name")
+		c.select_planet(foreign.index)
+		inspector.refresh()
+		var hidden := inspector.planet_label().text
+		sup.ok(not hidden.contains("Zzzqx Probe"),
+			"the inspector does not print its name")
+		sup.ok(hidden.contains(GalaxyMapView.UNKNOWN_NAME),
+			"and headings it with the placeholder instead")
+
+		# A fleet merely sailing there must not unlock it.
+		if not parked.is_empty():
+			parked[0].system = foreign.index
+			parked[0].destination = (foreign.index + 1) % maxi(1, gal.planets.size())
+			sup.ok(not c.knows_name_of(foreign.index),
+				"a fleet under way to a world does not reveal its name")
+			# Parking it there does.
+			parked[0].destination = -1
+			sup.ok(c.knows_name_of(foreign.index),
+				"parking a fleet on the world reveals its name")
+			sup.eq(view.planet_label(foreign), "Zzzqx Probe",
+				"and the map then labels it with the real name")
+			inspector.refresh()
+			sup.ok(inspector.planet_label().text.contains("Zzzqx Probe"),
+				"the inspector names it too -- the two panels agree")
+		else:
+			sup.ok(true, "the player has no fleet to park; name reveal not exercised")
+
+		# Own world: the player always knows what they settled.
+		var own: PlanetState = null
+		for p in gal.planets:
+			if p.owner == me:
+				own = p
+				break
+		if own != null:
+			sup.ok(c.knows_name_of(own.index),
+				"a world the player owns always has a usable name")
+			sup.ne(view.planet_label(own), "P-%d" % (own.index + 1) if own.name == "" else own.name,
+				"and the map shows it")
+
+		foreign.owner = saved_owner
+		foreign.name = saved_name
+		foreign.colonized = saved_colonized
+		return
+
+	# A rival world exists naturally. Clear the player's fleets off it first: an earlier
+	# step in this suite parks ships, and a world with one of ours sitting on it is
+	# *legitimately* named. Picking one at random and asserting it is hidden would be
+	# testing the fixture, not the rule.
+	var displaced := {}
+	for f_key: int in gal.fleets:
+		var f: FleetState = gal.fleets[f_key]
+		if f.owner == me and f.active:
+			displaced[f_key] = [f.system, f.destination]
+			f.destination = -1
+			if f.system == foreign.index:
+				f.system = (foreign.index + 1) % maxi(1, gal.planets.size())
+
+	sup.ok(not c.knows_name_of(foreign.index),
+		"an unvisited rival world has no name the player may use",
+		"world=%d name=%s" % [foreign.index, foreign.name])
+	sup.eq(view.planet_label(foreign), GalaxyMapView.UNKNOWN_NAME,
+		"the map labels it with the placeholder, not its real name")
+	sup.ok(foreign.name != GalaxyMapView.UNKNOWN_NAME,
+		"which is not simply its real name")
+
+	c.select_planet(foreign.index)
+	inspector.refresh()
+	sup.ok(not inspector.planet_label().text.contains(foreign.name),
+		"the inspector does not print its name either")
+
+	# Restore: every one of these worlds is shared with later steps.
+	for f_key: int in displaced:
+		var f4: FleetState = gal.fleets[f_key]
+		var prior: Array = displaced[f_key]
+		f4.system = int(prior[0])
+		f4.destination = int(prior[1])
+
+
+## The map's backdrop and bounds frame.
+##
+## The orbit rings and grid are gone and the field is black; the frame marks the edge of
+## the playable area. Asserted on the drawing constants and the geometry rather than by
+## reading pixels -- a headless run has no rasteriser to sample, and the thing that
+## actually matters is that the frame encloses every planet.
+func _step_map_bounds() -> void:
+	sup.begin("map backdrop and bounds")
+	if _client == null or _client.controller == null:
+		return
+	var view := _client.map.view()
+	var gal := _client.controller.galaxy
+
+	sup.eq(view.FIELD_COLOUR, Color(0.0, 0.0, 0.0, 1.0),
+		"the map field is solid black")
+	sup.ok(view.BOUNDS_COLOUR.a > 0.0, "the bounds frame is visible",
+		"alpha=%f" % view.BOUNDS_COLOUR.a)
+	sup.ok(view.BOUNDS_WIDTH >= 1.0, "and thick enough to see at a distance")
+
+	# The frame must contain the system, or "where does it end" is answered wrongly.
+	var half := view.world_size(gal) * view.BOUNDS_PAD
+	var outside := 0
+	for p in gal.planets:
+		if absf(p.position.x) > half or absf(p.position.y) > half:
+			outside += 1
+	sup.eq(outside, 0, "every planet is inside the bounds frame")
+
+	# The frame must sit outside the outermost planet, or planets on the rim are drawn on
+	# top of the line that is supposed to mark them as the edge.
+	var furthest := 0.0
+	for p in gal.planets:
+		furthest = maxf(furthest, maxf(absf(p.position.x), absf(p.position.y)))
+	sup.ok(half > furthest, "the frame clears the outermost planet",
+		"half=%.1f furthest=%.1f" % [half, furthest])
+
+	# Zooming in far enough to click a planet is the point of the ceiling.
+	sup.ok(_client.map.max_zoom() >= 1.0,
+		"the camera can zoom in past 1:1 on any map size")
+	sup.ok(_client.map.min_zoom() > 0.0, "and the floor is positive")
+	sup.ok(_client.map.max_zoom() > _client.map.min_zoom(),
+		"the zoom range is not inverted")
+
+
 func _step_fog_fleet_markers() -> void:
 	sup.begin("enemy fleets respect sensor range")
 	if _client == null or _client.controller == null:

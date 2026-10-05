@@ -299,6 +299,7 @@ const _SCENARIOS := {
 	3: "join handshake",
 	4: "network equals local",
 	5: "lobby ready sync",
+	6: "ready resets each turn",
 }
 
 ## Phase to begin on the frame after a settle.
@@ -528,6 +529,116 @@ func _step_ready_sync() -> void:
 	_next()
 
 
+## Turn-resolution ready reset.
+##
+## A ready flag belongs to the turn it was raised for. Carried forward, it makes the next
+## turn's lobby look satisfied before anybody has committed to it -- and the button would
+## read "already ready" to a player who has done nothing, which is the one lobby state that
+## cannot recover on its own.
+var _rr_submitted: bool = false
+var _rr_checked: bool = false
+
+
+func _start_ready_reset() -> void:
+	_rr_submitted = false
+	_rr_checked = false
+
+	var port := NetworkManager.reserve_ephemeral_port()
+	var harness := Harness.new()
+	_harnesses.append(harness)
+
+	harness.server_net = NetworkManagerScript.new() as NetworkManager
+	root.add_child(harness.server_net)
+	_t.eq(harness.server_net.host_game(port, 2), OK, "the reset server is listening")
+
+	_rr_galaxy = _make_galaxy(3131)
+	harness.server_sync = harness.server_net.add_sync_endpoint(TurnSyncServer) \
+		as TurnSyncServer
+	harness.server_sync.net = harness.server_net
+	_t.ok(harness.server_sync.begin(_rr_galaxy, PackedInt32Array([0, 1])),
+		"the reset server bound its galaxy and is waiting on both empires")
+
+	var lobby := SessionLobby.new(2)
+	harness.server_sync.lobby = lobby
+	harness.server_sync.ready_changed.connect(harness.server_sync.apply_ready)
+	lobby.match_start_requested.connect(func() -> void:
+		harness.server_sync.try_start_match())
+
+	harness.server_net.peer_joined.connect(func(peer_id: int, slot: int) -> void:
+		lobby.join(peer_id)
+		harness.server_sync.add_active_slot(slot)
+		harness.server_sync.send_welcome(peer_id, slot))
+
+	for i in 2:
+		var c := NetworkManagerScript.new() as NetworkManager
+		root.add_child(c)
+		_t.eq(c.join_game(CC2CLI.DEFAULT_LOOPBACK, port), OK, "reset client %d dials" % i)
+		harness.client_nets.append(c)
+		var sync := c.add_sync_endpoint(TurnSyncClient) as TurnSyncClient
+		sync.net = c
+		harness.client_syncs.append(sync)
+
+
+## The galaxy the reset scenario resolved.
+var _rr_galaxy: GalaxyState = null
+
+
+func _step_ready_reset() -> void:
+	if _frames < 40:
+		return
+	var harness := _harnesses[_index]
+
+	var seated := 0
+	for sync in harness.client_syncs:
+		var cs := sync as TurnSyncClient
+		if cs.slot >= 0:
+			seated += 1
+	if seated < 2 and _frames < 150:
+		return
+
+	if not _rr_submitted:
+		_rr_submitted = true
+		_t.begin("readiness resets when the turn resolves")
+		var lobby: SessionLobby = harness.server_sync.lobby
+		# Raise both flags the way the buttons do, then resolve. The resolution is driven
+		# directly rather than from `_process` so the assertions read against a known
+		# instant instead of racing the server's own turn pump.
+		for sync in harness.client_syncs:
+			var cs := sync as TurnSyncClient
+			harness.server_sync.stage_orders(cs.slot, [] as Array)
+		# `set_ready` is keyed by *peer*, not by slot -- the lobby has no slot-addressed
+		# ready flag. Asking the server who is in which slot is the only way to name a
+		# player from out here without assuming array order matches seating order.
+		var seated_peer := harness.server_net.peer_of(1)
+		lobby.set_ready(seated_peer, true)
+		_t.eq(lobby.ready_count(), 1, "one player readied before the resolution")
+		var payload := harness.server_sync.resolve_if_ready()
+		_t.ok(not payload.is_empty(), "the turn resolved")
+		_t.eq(lobby.ready_count(), 0,
+			"the server's own ready flags are cleared once the turn is done")
+		for slot in 2:
+			var peer := harness.server_net.peer_of(slot)
+			_t.ok(not lobby.is_ready(peer),
+				"no peer is left flagged for a turn nobody committed to")
+		_t.eq(_rr_galaxy.turn, 1, "and the galaxy really did advance")
+		return
+
+	if not _rr_checked:
+		_rr_checked = true
+		# The client's flag is local, mirrored from what the player asked for. It has to be
+		# cleared by the resolution that ended the turn the flag was raised for, or the
+		# READY button sits in its red state through a turn nobody has committed to.
+		for sync in harness.client_syncs:
+			var cs := sync as TurnSyncClient
+			if cs.slot < 0:
+				continue
+			_t.ok(not cs.is_ready_flagged(),
+				"client %d dropped its own ready flag when the turn resolved" % cs.slot)
+			_t.ok(not cs.awaiting, "and is no longer waiting on the server")
+
+	_next()
+
+
 ## Whether the server broadcasts the readiness tally instead of calling it locally.
 ##
 ## The denominator is the *connected* player count, not `total_slots`: a --slots=4 server
@@ -593,6 +704,8 @@ func _process(_delta: float) -> bool:
 				_start_parity()
 			"lobby ready sync":
 				_start_ready_sync()
+			"ready resets each turn":
+				_start_ready_reset()
 		return false
 	_frames += 1
 	match _phase:
@@ -608,6 +721,8 @@ func _process(_delta: float) -> bool:
 			_step_parity()
 		"lobby ready sync":
 			_step_ready_sync()
+		"ready resets each turn":
+			_step_ready_reset()
 	if _phase == "done":
 		_finish()
 		return true

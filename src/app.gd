@@ -93,7 +93,8 @@ func _start_dedicated_server(opts: CC2CLI.Options) -> bool:
 	else:
 		rng.randomize()
 	var galaxy := GalaxyGenerator.generate(
-		defs, rng, opts.system_count, opts.faction_count, db)
+		defs, rng, opts.system_count, opts.faction_count, db,
+		null, opts.map_scale)
 	if galaxy == null:
 		push_error("[cc2] dedicated server failed to generate a galaxy")
 		return false
@@ -451,7 +452,7 @@ func _start_local_client(opts: CC2CLI.Options) -> void:
 	else:
 		rng.randomize()
 	var galaxy := GalaxyGenerator.generate(
-		defs, rng, opts.system_count, opts.faction_count, db
+		defs, rng, opts.system_count, opts.faction_count, db, null, opts.map_scale
 	)
 	if galaxy == null:
 		push_error("[cc2] galaxy generation failed")

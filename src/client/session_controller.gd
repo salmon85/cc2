@@ -195,6 +195,35 @@ func knows_owner_of(system_index: int) -> bool:
 	return false
 
 
+## Whether the player is entitled to a planet's *catalogue name*.
+##
+## Separate from `knows_owner_of`, which asks who owns a world, and from the inspector's
+## economy gate, which asks what is built on it. The name is its own leak: it is a free
+## fact about a world the player has never visited, it is stable across turns, and it is
+## what a player uses to refer to a place before they know anything about it. A map of
+## named rivals' worlds is a map somebody has already scouted.
+##
+## So the bar is deliberately the strictest of the three: the player owns the world, or has
+## a fleet parked on that specific world. `surveyed` does not count here even though it
+## counts for the economy -- a survey records what the world *is*, not what somebody named
+## it, and letting a survey through would re-expose every name the moment a scout's sweep
+## lit up a neighbouring orbit.
+func knows_name_of(planet_index: int) -> bool:
+	if galaxy == null or planet_index < 0:
+		return false
+	var p := galaxy.planet(planet_index)
+	if p == null:
+		return false
+	if p.owner == player_id:
+		return true
+	for key: int in galaxy.fleets:
+		var f: FleetState = galaxy.fleets[key]
+		if f.active and f.owner == player_id and f.destination < 0 \
+				and f.system == planet_index:
+			return true
+	return false
+
+
 ## The lowest-indexed body in `system_index`, or -1. With one system this is planet 0.
 func _first_planet_of(system_index: int) -> int:
 	var sys := galaxy.system(system_index) if galaxy != null else null
