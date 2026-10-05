@@ -284,11 +284,16 @@ reach 560px and the check fails.
 - [x] F.2 `godot --headless --editor --quit` import + no parser errors
 - [x] F.3 Determinism replay: same seed + same orders ⇒ byte-identical state hash
 
-## Out of Scope (Phase 7+)
+## Out of Scope
 
-Phase 7 AI faction brain. The GUI is already written against `SessionController`, so
+The AI faction *brain*. The GUI is already written against `SessionController`, so
 Phase 6 replaced that class's internals with a network authority and left the panels
 untouched.
+
+> Phase 7 delivered the session lifecycle instead. An AI seat now exists — a dropped
+> client's empire stops holding the turn open and is handed to the AI after its grace
+> period — but nothing plays it yet. The brain remains out of scope; see the Phase 7
+> section at the end of this file.
 
 ---
 
@@ -395,3 +400,85 @@ server sitting there looking healthy:
 `godot --path . --client --ip=127.0.0.1 --port=7777` windows: each client prints
 `joined as empire N`, and pressing End Turn in both advances them together. See
 `help.md`.
+
+# Phase 7: Session Lifecycle & Multiplayer Lobby
+
+## Delivered
+
+- **`src/net/session_lobby.gd`** (`SessionLobby`) — slot assignment, ready flags,
+  grace periods, and the match-start decision, as pure bookkeeping. Deliberately *not*
+  folded into `TurnSyncServer`: a lobby whose rules can only be exercised through a
+  live socket cannot be tested at all, and these are exactly the rules most likely to
+  be wrong.
+- **Slot assignment.** Each peer takes the lowest free slot; a full lobby refuses rather
+  than overlapping. A slot is a faction id, so two players sharing one would file orders
+  into each other's treasury.
+- **Ready flags**, per peer and retractable, with a latching start so a caller polling
+  every frame cannot announce two matches.
+- **Grace periods.** A departing peer's slot is *held*, not deleted: it stops holding the
+  turn open at once, but stays claimed so a reconnecting player gets their own empire
+  back rather than a stranger's. On expiry the empire passes to the AI.
+- **`--ready` / `--auto-ready`** — a headless client has no lobby UI to click, so this
+  is how it is ever counted.
+- **A **READY** button in the top bar** — the GUI equivalent, and the control that makes
+  `--client` usable at all now that a match waits for its players.
+- **`tests/test_session_lifecycle.gd`** — 139 checks: the rules as pure functions, the
+  CLI surface, a real join/ready/start conversation over loopback, a client dropped
+  mid-turn, and the real `--server` + `--client` command lines driven through `App`.
+
+## The two waits, which are easy to conflate
+
+Starting waits for every *configured* slot. Each *turn* waits only for *connected*
+players. `turn_slots()` returning `occupied_slots()` rather than `claimed_slots()` is
+the whole anti-stall property: the resolver can only wait for someone who can answer,
+so a departed — or AI-held — empire must never hold the turn open. This is asserted
+directly, and confirmed to fail when the rule is reverted.
+
+## Properties proven rather than asserted
+
+- A match does **not** start on connect alone, nor with one of two players ready.
+- Both clients hold a galaxy whose hash is byte-identical to the server's, and were given
+  *different* empires.
+- A client dropped mid-turn does not stall the resolver: its order is on the wire, it
+  never submits, and the turn still resolves.
+- The abandoned empire is held for exactly its grace period, is not AI-managed during it,
+  and passes to the AI on expiry — while still not holding the turn open.
+- `--slots=2` with one ready client does not start; a second `--client --ready` does.
+
+## Defects the self-verification loop caught in Phase 7
+
+1. **A disconnect instantly stole the player's empire.** `remove_active_slot()` called
+   `mark_ai_managed()` on its way through, which cancelled the grace period the lobby had
+   *just* started — so every disconnect was an immediate hand-over, and a player about to
+   reconnect lost their empire to the AI. The AI decision belongs to the lobby, on grace
+   expiry, and only there.
+2. **The GUI had no way to ready up.** The ready gate went in with no control behind it,
+   which silently broke the documented manual workflow: two GUI clients would sit in the
+   lobby forever. Found by *running* the Quick Start from `help.md` and watching it hang,
+   not by any test. The READY button and `--ready` are the two faces of the same feature
+   for the two kinds of client.
+3. **The 30s grace period is not shorter than the disconnect it is compensating for.**
+   Verified by killing a client and timing it: ENet takes roughly 30 seconds to conclude a
+   peer is gone, which is why the grace period is what it is. Documented rather than
+   "fixed" — the lag is the transport's.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 2173 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_session_lifecycle` alone: 139 checks.
+- `test_gui_integration` alone: 184 checks, including 11 on the READY button.
+- Every new test was confirmed to fail with its fix reverted: the anti-stall rule (2),
+  the grace/AI ordering (3), the match-start gate (6), `--ready` being ignored (2), the
+  ready button's visibility (2) and its toggle (1).
+
+## Manual session
+
+`--server --port=7777 --slots=2 --seed=42` plus two `--client` windows: both press
+**READY** in the top bar, the server prints `match started`, and End Turn advances them
+together. Headless clients substitute `--ready` for the button. See `help.md`.
+
+## Still out of scope
+
+The AI empire is a *seat*, not a mind: its slot stops holding the turn open and it is
+marked AI-managed, but nothing yet plays it. An AI faction brain remains future work, as
+does lobby re-admission (a player returning after their grace expires has expired).

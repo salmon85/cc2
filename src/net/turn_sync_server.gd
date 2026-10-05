@@ -17,6 +17,12 @@ signal turn_broadcast(turn_num: int, state_hash: String)
 ## The `NetworkManager` hosting this server. Supplies the peer-to-slot table.
 var net: NetworkManager = null
 
+## Slot assignment, ready flags, and the match-start decision.
+##
+## Optional: a server built without one is a bare authority (which is what the Phase 6
+## integration test drives), and falls back to whatever slots it was `begin()`ed with.
+var lobby: SessionLobby = null
+
 ## Clients told the server is full are dropped rather than left hanging.
 const REFUSAL_FULL := "server is full"
 
@@ -90,9 +96,30 @@ func add_active_slot(slot_id: int) -> void:
 ##
 ## Its queued orders are discarded with it: resolving a turn containing orders from an
 ## empire that has left the game would let a disconnect change the simulation's outcome.
+##
+## The slot itself stops holding the turn open. That is the difference between a dropped
+## client stalling the match and a dropped client being replaced by the AI: the empire's
+## colonies stay on the map either way, but the resolver stops waiting for orders that
+## are never going to arrive. `keep_ai_managed` exists so the lobby can decide when that
+## happens -- within its grace period an empire is *held*, not deleted.
 func remove_active_slot(slot_id: int) -> void:
 	_active_slots.erase(slot_id)
 	_pending.erase(slot_id)
+	# Deliberately *not* `mark_ai_managed()`: this slot has just gone quiet, which says
+	# nothing about whether its player is coming back. The lobby starts a grace period
+	# when the peer leaves and is the only thing entitled to hand the empire to the AI --
+	# once the grace actually expires. Marking it AI-managed here made every disconnect
+	# an immediate hand-over, silently cancelling the grace period the lobby had just
+	# begun and stealing the empire from a player who was about to reconnect.
+
+
+## Hand a slot back to the authority (a player returned during its grace period).
+func restore_active_slot(slot_id: int) -> void:
+	if slot_id < 0 or _active_slots.has(slot_id):
+		return
+	add_active_slot(slot_id)
+	if lobby != null:
+		lobby.cancel_grace(slot_id)
 
 
 ## Look up the submitting peer's slot. Overrides the client's stub, which is what makes
@@ -142,6 +169,37 @@ func build_payload(report: Dictionary) -> Dictionary:
 		"state_hash": str(galaxy.state_hash()),
 		"report": report,
 	}
+
+
+## The readiness report from a client. Applies it to the lobby and, if the lobby is now
+## full and ready, starts the match.
+func apply_ready(peer_id: int, is_ready: bool) -> void:
+	if lobby == null:
+		return
+	lobby.set_ready(peer_id, is_ready)
+	try_start_match()
+
+
+## Start the match if the lobby says everyone is ready.
+##
+## Returns true only on the transition, so a caller polling this every frame broadcasts
+## exactly one start. A server with no lobby has nothing to wait for and reports true
+## immediately -- it is already in the game.
+func try_start_match() -> bool:
+	if lobby == null:
+		return false
+	if not lobby.try_start():
+		return false
+	_broadcast_match_start()
+	return true
+
+
+func _broadcast_match_start() -> void:
+	var payload := build_payload({})
+	if not is_inside_tree():
+		return
+	var hash := str(payload.get("state_hash", ""))
+	rpc_match_started.rpc(hash, payload.get("state", {}) as Dictionary)
 
 
 ## Hand the current game state to one peer, and tell it which empire it holds.

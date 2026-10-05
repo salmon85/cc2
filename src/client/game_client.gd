@@ -160,6 +160,7 @@ func _wire() -> void:
 	_wired = true
 
 	top_bar.end_turn_pressed.connect(_on_end_turn)
+	top_bar.ready_pressed.connect(_on_ready_pressed)
 	top_bar.orders_pressed.connect(_on_orders_pressed)
 	map.system_picked.connect(_on_system_picked)
 	map.interaction_refused.connect(_on_refused)
@@ -169,6 +170,25 @@ func _wire() -> void:
 	controller.turn_resolved.connect(_on_turn_resolved)
 	controller.state_changed.connect(_refresh)
 	controller.action_rejected.connect(_on_action_rejected)
+
+
+## Pass the lobby ready flag to the server.
+##
+## A refusal is reported rather than swallowed: the player pressed a control and
+## nothing happened, and the honest reason ("no server to tell") is far more useful than
+## a button that silently does nothing.
+func _on_ready_pressed(is_ready: bool) -> void:
+	if controller == null or not controller.set_ready(is_ready):
+		_log_line("[color=#%s]not connected: ready flag not sent[/color]" % CC2Theme.AMBER.to_html(false))
+		return
+	_log_line("ready" if is_ready else "no longer ready")
+	_refresh_ready_button()
+
+
+## Redraw the top bar's ready button after the flag changed.
+func _refresh_ready_button() -> void:
+	if top_bar != null:
+		top_bar.refresh()
 
 
 func _refresh() -> void:

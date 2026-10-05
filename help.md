@@ -56,14 +56,22 @@ Each client should print:
 [cc2] peer 368699998 joined as empire 1
 ```
 
+> **The match does not start yet.** A game waits for every empire `--slots`
+> admits to be connected *and* ready. With `--slots=2` you now have two
+> windows, and both must press **READY** in the top bar before turn 1 exists.
+> The server prints `[cc2] match started` when the gate opens. Headless
+> clients pass `--ready` instead of pressing anything — see
+> [The lobby](#the-lobby).
+
 Note the clients do **not** print a `launch:` line showing `slots`, and they ignore
 `--seed`: the galaxy belongs to the server, so a client that seeded its own would be
 playing a different universe. Whatever `--seed` the server used is what both clients
 get, which is why `seed 42` appears in their output.
 
-Play a turn: stage orders in a client, press **END TURN**. That client's top bar
-shows `Awaiting other players...` until every connected player has submitted; then
-the server resolves, both windows advance a stardate together, and the server logs:
+Play a turn: once **READY** has been pressed in both windows, stage orders and press
+**END TURN**. That client's top bar shows `Awaiting other players...` until every
+connected player has submitted; then the server resolves, both windows advance a
+stardate together, and the server logs:
 
 ```
 [cc2] turn 1 resolved, hash 1789442519
@@ -131,6 +139,12 @@ humans plus two AI factions competing for the same systems.
 ---
 
 ## Client flags
+
+| flag | meaning |
+|---|---|
+| `--ip=<addr>` | server address. Defaults to loopback. |
+| `--port=<int>` | server port. Defaults to 27015. |
+| `--ready`, `--auto-ready` | declare yourself ready on arrival, without a lobby UI. |
 
 | Flag | Default | Notes |
 |---|---|---|
@@ -208,6 +222,66 @@ generator and turn resolver still behave.
 
 ---
 
+## The lobby
+
+A multiplayer game does not begin the moment a client connects. It begins when the
+server has enough players, and the rules for that live in one place
+(`src/net/session_lobby.gd`).
+
+### Who gets which empire
+
+Each connecting peer is handed the lowest free slot. A slot is a faction id, so
+`--slots` cannot exceed the factions that exist — asking for more warns and
+seats only what it can:
+
+```
+WARNING: [cc2] 4 slots requested but only 2 factions exist; seating 2
+```
+
+A **full** lobby refuses further peers rather than overlapping slots. Two players
+sharing one faction id would file orders into each other's treasury, and the
+result would look like a desync rather than the double-booking it is.
+
+### Readying up
+
+The match starts when every slot the lobby was sized for is connected and ready.
+Readiness is per-player and retractable: a second press of **READY** takes the
+flag back, and the match waits again if it had not started yet.
+
+| | GUI client | headless client |
+|---|---|---|
+| declare ready | press **READY** in the top bar | `--ready` (or `--auto-ready`) |
+| take it back | press **NOT READY** | — |
+
+`--ready` exists because a headless client has no button to press. Without it,
+`--server --slots=2` plus one headless client is a lobby that waits forever —
+correctly, because a second empire was advertised and nobody claimed it.
+
+Once the gate opens, the server announces the match to everyone:
+
+```
+[cc2] match started
+```
+
+### Losing a player
+
+If a client disconnects, its empire is **held**, not deleted:
+
+- The empire stops holding the turn open immediately. The resolver can only wait
+  for someone who can answer, so a departed player must not be able to stall the
+  match. **This is the important part** — a drop never wedges the turn loop.
+- The slot stays claimed for 30 seconds, so a player who reconnects gets *their
+  own* empire back rather than being handed a stranger's.
+- If they do not return, the empire passes to the AI. Its colonies are still on
+  the map; it simply stops being a human turn.
+- An AI empire never satisfies the *start* gate. A match cannot begin with a
+  human-less seat pretending someone pressed ready.
+
+A server with `--slots=1` is the degenerate case: nobody can drop, because there
+is nobody to drop on your behalf.
+
+---
+
 ## What a client actually does now
 
 `--client` dials the server and plays the game the server sends:
@@ -251,16 +325,21 @@ during Phase 6:
 To test across machines, on the server:
 
 ```bash
-~/.local/godot/godot --headless --path . --server --port=7777 --slots=2 --seed=42
+~/.local/godot/godot --headless --path . --server --port=7777 --slots=1 --seed=42
 ```
+
+`--slots=1` because the remote side is a single headless client: advertising two
+empires would leave the match waiting for a player that is not coming.
 
 Open `7777/udp` in the firewall. On the client machine:
 
 ```bash
-~/.local/godot/godot --headless --path . --client --ip=<server-ip> --port=7777
+~/.local/godot/godot --headless --path . --client --ip=<server-ip> --port=7777 --ready
 ```
 
-Remember `--port` on both sides. A client takes no `--seed`; it plays the server's
+Remember `--port` on both sides, and `--ready`: this is a headless client, so
+nothing presses the lobby button for it and the server would otherwise wait for
+a second player forever. A client takes no `--seed`; it plays the server's
 galaxy whatever seed that was.
 
 ---
@@ -270,19 +349,33 @@ galaxy whatever seed that was.
 1. Server up, listening line printed, port visible in `ss -ulnp`.
 2. Clients launched with an explicit `--port` matching the server.
 3. Server logs a join per client: `peer <id> joined as empire <slot>`.
-4. On disconnect, the slot is returned: `peer <id> left (empire <slot> dropped)`.
+4. Both windows press **READY**; the server prints `match started`. Until this
+   happens turn 1 does not exist.
 5. Each client prints `joined as empire <n>`, and **no two clients share an empire**.
 6. Press **END TURN** in one window: it shows `Awaiting other players...` and the
    stardate does *not* move yet.
 7. Press **END TURN** in the other window. Both windows advance together and the
    server logs `turn 1 resolved, hash <n>`.
-8. Close a window: the server logs `peer <id> left (empire <n> dropped)` and the
-   remaining player's next turn is no longer held up by the departed empire.
+8. Close a window: the server eventually logs
+   `peer <id> left (empire <n> held for 30s)` and the remaining player's next turn
+   is no longer held up by the departed empire. **Expect a delay** — ENet only
+   concludes a peer is gone when its own timeout expires, so a hard kill takes
+   around half a minute to notice. That lag is the transport's, and it is exactly
+   why the grace period is 30 seconds: it has to outlast the disconnect itself.
+9. Wait out the grace period and the server logs
+   `[cc2] empire <n> passed to the AI (player did not return)`.
 
-A turn waits for every *connected* player, so with `--slots=2` and only one client
-connected, pressing END TURN resolves immediately. Raising `--slots` above the
-number of players who actually connect would stall turn 1 waiting for someone who
-never arrives — use the number you intend to play with.
+Two different things wait, and it is worth keeping them apart:
+
+- **Starting** waits for every *configured* slot: `--slots=2` needs two clients
+  connected and ready before turn 1 exists at all.
+- **Each turn** then waits only for *connected* players. A client that drops
+  stops holding the turn open, so its absence never wedges the resolver.
+
+So `--slots=2` with one client is a lobby that waits (correct — a second empire
+was advertised and nobody claimed it), while `--slots=2` with two clients where
+one disconnects mid-game is a game that keeps running. If you want one player
+against one server, launch it with `--slots=1`.
 
 ---
 
@@ -297,6 +390,7 @@ never arrives — use the number you intend to play with.
 | `--ip=<host>` | hostname or IP | client (also selects client mode) |
 | `--port=<int>` | 1–65535 | both |
 | `--slots=<int>` | 1–8 | server |
+| `--ready`, `--auto-ready` | — | client |
 | `--seed=<int\|str>` | any | both |
 | `--systems=<int>` | 30–100 | server, local |
 | `--factions=<int>` | 1–8 | server, local |

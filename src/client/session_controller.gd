@@ -330,6 +330,30 @@ func is_awaiting_server() -> bool:
 	return turn_submitter != null and turn_submitter.awaiting
 
 
+## Signal the lobby ready flag (or take it back).
+##
+## Only meaningful in a networked session: single player has no lobby to be ready *for*.
+## Returns false when there is no server to tell, which the caller reports rather than
+## silently doing nothing -- a player who presses READY and sees no change needs to know
+## whether the button is broken or the flag simply does not apply here.
+func set_ready(is_ready: bool) -> bool:
+	if turn_submitter == null:
+		return false
+	return turn_submitter.set_ready(is_ready)
+
+
+## Whether this client has told the server it is ready. False in a local session.
+func is_ready_flagged() -> bool:
+	if turn_submitter == null:
+		return false
+	return turn_submitter.is_ready_flagged()
+
+
+## True when this session is bound to a remote authority.
+func is_networked() -> bool:
+	return turn_submitter != null
+
+
 ## The orders this player has staged, ready for the wire.
 func orders_to_submit() -> Array[Order]:
 	if queue == null:

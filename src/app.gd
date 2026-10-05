@@ -27,6 +27,9 @@ var server_galaxy: GalaxyState = null
 ## Empire slots a dedicated server waits on, derived from `--slots`.
 var server_slots: PackedInt32Array = PackedInt32Array()
 
+## Slot/ready/match-start state for a dedicated server. Null in client and local modes.
+var lobby: SessionLobby = null
+
 
 func _ready() -> void:
 	options = CC2CLI.parse_os()
@@ -123,8 +126,13 @@ func _start_dedicated_server(opts: CC2CLI.Options) -> bool:
 			opts.port, error_string(err)])
 		return false
 
+	lobby = SessionLobby.new(opts.slots)
 	turn_sync = net.add_sync_endpoint(TurnSyncServer) as TurnSyncServer
 	turn_sync.net = net
+	turn_sync.lobby = lobby
+	turn_sync.ready_changed.connect(turn_sync.apply_ready)
+	lobby.match_start_requested.connect(func() -> void:
+		turn_sync.try_start_match())
 	# Start with an *empty* wait set. `begin()` treats its argument as "slots to hold the
 	# turn for", and seeding it with every advertised slot would block turn 1 on a second
 	# player who may never connect. Real joins populate it via `_on_peer_joined`.
@@ -150,6 +158,17 @@ func _start_dedicated_server(opts: CC2CLI.Options) -> bool:
 func _on_peer_joined(peer_id: int, slot: int) -> void:
 	if slot < 0:
 		return
+	# The lobby is the authority on who holds what; `NetworkManager` only routes peers.
+	if lobby != null:
+		var assigned := lobby.join(peer_id)
+		if assigned < 0:
+			turn_sync.refuse(peer_id, TurnSyncServer.REFUSAL_FULL)
+			print("[cc2] refused peer %d: server is full" % peer_id)
+			return
+		if assigned != slot:
+			print("[cc2] peer %d routed to slot %d by the lobby (net said %d)" % [
+				peer_id, assigned, slot])
+		slot = assigned
 	print("[cc2] peer %d joined as empire %d" % [peer_id, slot])
 	turn_sync.add_active_slot(slot)
 	if not turn_sync.send_welcome(peer_id, slot):
@@ -159,7 +178,12 @@ func _on_peer_joined(peer_id: int, slot: int) -> void:
 func _on_peer_left(peer_id: int, slot: int) -> void:
 	if slot < 0:
 		return
-	print("[cc2] peer %d left (empire %d dropped)" % [peer_id, slot])
+	print("[cc2] peer %d left (empire %d held for %.0fs)" % [
+		peer_id, slot, lobby.grace_seconds if lobby != null else 0.0])
+	if lobby != null:
+		# Starts the grace clock rather than freeing the slot outright, so a player who
+		# reconnects inside the window gets their empire back.
+		lobby.leave(peer_id)
 	turn_sync.remove_active_slot(slot)
 
 
@@ -167,14 +191,32 @@ func _on_peer_left(peer_id: int, slot: int) -> void:
 ##
 ## Nothing else calls `resolve_if_ready()`. Without this the server accepts connections and
 ## collects orders forever and no turn ever advances, which reads exactly like a hang.
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if turn_sync == null:
+		return
+	if lobby != null:
+		_pump_lobby(delta)
+	# A match that has not started yet has no turns to resolve, and resolving one would
+	# advance the galaxy before every player is in it.
+	if lobby != null and not lobby.started:
 		return
 	var payload := turn_sync.resolve_if_ready()
 	if payload.is_empty():
 		return
 	var turn := int(payload.get("turn", 0))
 	print("[cc2] turn %d resolved, hash %s" % [turn + 1, payload.get("state_hash", "")])
+
+
+## Advance grace periods and start the match once the lobby is satisfied.
+func _pump_lobby(delta: float) -> void:
+	for slot: int in lobby.tick(delta):
+		# The grace period ran out: the empire is now the AI's. The slot already stopped
+		# holding the turn open when the peer left, so nothing stalls in the meantime.
+		lobby.mark_ai_managed(slot)
+		print("[cc2] empire %d passed to the AI (player did not return)" % slot)
+	lobby.try_start()
+	if lobby.started:
+		turn_sync.try_start_match()
 
 
 ## Fetch an autoload by name without hard-referencing it, so this file stays usable in
@@ -236,6 +278,7 @@ func _start_network_client(opts: CC2CLI.Options) -> void:
 	client_sync.welcomed.connect(_on_client_welcomed)
 	client_sync.turn_resolved.connect(_on_client_turn_resolved)
 	client_sync.desync_detected.connect(_on_client_desync)
+	client_sync.match_started.connect(_on_client_match_started)
 	client_sync = null
 
 	var err := net.join_game(opts.ip, opts.port)
@@ -290,10 +333,35 @@ func _on_client_welcomed(assigned_slot: int, payload: Dictionary) -> void:
 	# Route the GUI's End Turn through the network from now on: the controller would
 	# otherwise resolve a turn locally against a galaxy the server does not hold.
 	game_client.controller.turn_submitter = sync
+	# Re-bind the top bar now that the session is known to be networked. `start()` ran
+	# `bind()` while `turn_submitter` was still null, so the READY button would have been
+	# hidden -- leaving a networked player with no way to satisfy the lobby.
+	game_client.top_bar.refresh()
 
 	print("[cc2] joined as empire %d: seed %d, %d systems, stardate %d" % [
 		assigned_slot, sync.galaxy.seed_value,
 		sync.galaxy.systems.size(), sync.galaxy.turn + 1])
+	_declare_ready(sync)
+
+
+## Tell the server this player is in, if the launch asked for it.
+##
+## Headless clients have no lobby UI to click, so `--ready` is how they ever get counted.
+## A failure here is not fatal on its own -- the player can still be seated and wait --
+## but it must be visible, because otherwise the server sits in the lobby forever with no
+## indication of why.
+func _declare_ready(sync: TurnSyncClient) -> void:
+	if options == null or not options.auto_ready:
+		return
+	if sync.set_ready(true):
+		print("[cc2] ready; waiting for the other players")
+	else:
+		push_warning("[cc2] could not send the ready flag to the server")
+
+
+## The server has started the match. Everything the client needs is already bound.
+func _on_client_match_started(_payload: Dictionary) -> void:
+	print("[cc2] match started")
 
 
 ## Adopt a resolved turn: the controller holds the *same* GalaxyState object the sync

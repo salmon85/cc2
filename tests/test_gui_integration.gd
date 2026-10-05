@@ -50,7 +50,7 @@ func _initialize() -> void:
 	_steps = PackedStringArray([
 		"instantiate", "scene_tree", "panels", "theme", "signals", "selection",
 		"map_draw", "fleet_orders", "illegal_orders", "macro_tax", "macro_research",
-		"macro_build", "macro_map_stable", "end_turn", "networked_end_turn",
+		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"reproducible", "teardown",
 	])
@@ -89,6 +89,7 @@ func _process(_delta: float) -> bool:
 		"macro_research": _step_macro_research()
 		"macro_build": _step_macro_build()
 		"macro_map_stable": _step_macro_does_not_move_the_map()
+		"ready_button": _step_ready_button()
 		"end_turn": _step_end_turn()
 		"networked_end_turn": _step_networked_end_turn()
 		"end_turn_again": _step_end_turn_again()
@@ -194,6 +195,88 @@ func _step_scene_tree() -> void:
 	sup.ok(_client.inspector.is_inside_tree(), "inspector is inside the tree")
 	sup.ok(_client.macros.is_inside_tree(), "macro panel is inside the tree")
 	sup.ok(_client.fleets.is_inside_tree(), "fleet panel is inside the tree")
+
+
+## The lobby ready button: only for a networked session, and it toggles.
+##
+## This is the control that makes `--client` usable at all now that a match waits for
+## every connected player to ready up. It has two failure modes worth pinning: showing in
+## single player, where there is no lobby and pressing it does nothing; and staying hidden
+## in a network session, which leaves a GUI player stuck in the lobby with no way forward.
+func _step_ready_button() -> void:
+	sup.begin("lobby ready button")
+	if _client == null or _client.top_bar.ready_button() == null:
+		sup.ok(false, "top bar exposes its ready button")
+		return
+	var button := _client.top_bar.ready_button()
+
+	# This suite plays single player, where there is no server to be ready to.
+	sup.ok(not _client.controller.is_networked(), "the local session is not networked")
+	sup.ok(not button.visible, "and the ready button is hidden with no server to tell")
+
+	# Drive it through a stand-in submitter: what the button actually needs is a session
+	# that reports itself networked and records the flag, not a live socket.
+	var recorder := RecordingSubmitter.new()
+	recorder.slot = 0
+	_client.controller.turn_submitter = recorder
+	_client.top_bar.refresh()
+	sup.ok(_client.top_bar.ready_button().visible,
+		"the ready button appears once the session is networked")
+	sup.eq(_client.top_bar.ready_button().text, "READY",
+		"and offers to set the flag")
+
+	var seen: Array[bool] = []
+	# The callable is kept, not re-typed at disconnect: a fresh lambda is a *different*
+	# Callable, so disconnecting one you did not connect is an engine error rather than a
+	# silent no-op.
+	var record := func(want: bool) -> void:
+		seen.append(want)
+	_client.top_bar.ready_pressed.connect(record)
+	_client.top_bar.press_ready()
+	sup.eq(seen.size(), 1, "pressing it asks for a ready flag")
+	if seen.size() == 1:
+		sup.ok(seen[0], "the first press asks to become ready")
+	_client.top_bar.press_ready()
+	sup.eq(seen.size(), 2, "pressing it again is not ignored")
+	if seen.size() == 2:
+		sup.ok(not seen[1], "the second press takes the flag back, so it toggles")
+
+	# And the label follows the flag, so the player can see which state they are in.
+	recorder.flagged = true
+	_client.top_bar.refresh()
+	sup.eq(_client.top_bar.ready_button().text, "NOT READY",
+		"the button says so once the flag is set")
+	recorder.flagged = false
+	_client.top_bar.refresh()
+	sup.eq(_client.top_bar.ready_button().text, "READY", "and returns when it is cleared")
+
+	_client.top_bar.ready_pressed.disconnect(record)
+	# Released, not just nulled: `recorder` is a RefCounted that stays reachable from the
+	# closure the button's own signal handler runs, and a leaked one is reported as
+	# "resources still in use" at exit -- which fails the whole suite for a reason that
+	# has nothing to do with what it is checking.
+	_client.controller.turn_submitter = null
+	_client.top_bar.refresh()
+	sup.ok(not _client.top_bar.ready_button().visible,
+		"the button is hidden again in a local session")
+	recorder.free()
+
+
+## A `TurnSyncClient` that records ready flags instead of sending them.
+##
+## Subclassed rather than faked with a plain object because `is_ready_flagged()` and
+## `set_ready()` have to behave the way the real endpoint does -- the button reads the
+## flag back through the controller, so a stub that answered differently would test
+## nothing.
+class RecordingSubmitter extends TurnSyncClient:
+	var flagged: bool = false
+
+	func set_ready(is_ready: bool = true) -> bool:
+		flagged = is_ready
+		return true
+
+	func is_ready_flagged() -> bool:
+		return flagged
 
 
 func _step_panels() -> void:

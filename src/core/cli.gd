@@ -63,6 +63,12 @@ class Options extends RefCounted:
 	var port_given: bool = false
 	var headless: bool = false
 	var log_turns: bool = false
+	## Declare the local player ready without a lobby UI to click.
+	##
+	## A headless client has nobody at a button, and an interactive one would otherwise
+	## have no way to say "I am here" other than a keypress. Either way the flag has to
+	## reach the server, and it is the server that decides when the match starts.
+	var auto_ready: bool = false
 	## Non-fatal notes (unknown flags, clamped values) surfaced to the player.
 	var warnings: PackedStringArray = PackedStringArray()
 
@@ -73,8 +79,9 @@ class Options extends RefCounted:
 		var mode_name: String = [
 			"SINGLE_PLAYER", "DEDICATED_SERVER", "CLIENT", "SETUP_MENU"
 		][mode]
-		return "%s ip=%s port=%d seed=%d systems=%d factions=%d slots=%d%s" % [
+		return "%s ip=%s port=%d seed=%d systems=%d factions=%d slots=%d%s%s" % [
 			mode_name, ip, port, seed_value, system_count, faction_count, slots,
+			" ready" if auto_ready else "",
 			"" if not warnings.is_empty() else " (no warnings)",
 		]
 
@@ -102,6 +109,8 @@ static func parse(argv: PackedStringArray) -> Options:
 				opts.headless = true
 			"--log-turns":
 				opts.log_turns = true
+			"--ready", "--auto-ready":
+				opts.auto_ready = true
 			_:
 				# --key=value forms
 				if arg.begins_with("--ip="):

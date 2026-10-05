@@ -29,6 +29,10 @@ var game_client: GameClient = null
 ## the server has already closed.
 var awaiting: bool = false
 
+## Whether this client has sent a ready flag, so the interface can draw the button
+## without asking the server every frame.
+var _ready_flagged: bool = false
+
 ## Orders staged locally for the coming turn, in submission order.
 var staged: Array[Order] = []
 
@@ -120,6 +124,38 @@ func apply_broadcast(turn_num: int, state_hash: String, payload: Dictionary) -> 
 ## The player's own orders staged for the coming turn, for the order queue UI.
 func staged_orders() -> Array[Order]:
 	return staged.duplicate()
+
+
+## Tell the server this player is ready to begin.
+##
+## Returns false when the client is not in the tree or has no seat yet -- both of which
+## mean the packet would go nowhere, and reporting success for a send that never left
+## would leave the lobby waiting on a ready flag nobody can see.
+func set_ready(is_ready: bool = true) -> bool:
+	if not is_inside_tree() or slot < 0:
+		return false
+	rpc_set_ready.rpc_id(1, is_ready)
+	_ready_flagged = is_ready
+	return true
+
+
+## Whether this client has sent a ready flag the server has not retracted.
+##
+## Local rather than authoritative: it records what *we* asked for, which is what the
+## button needs to draw itself. The server's own view can lag by a packet, and a button
+## that flickers between two states waiting for the round trip is worse than one that
+## shows what this client last did.
+func is_ready_flagged() -> bool:
+	return _ready_flagged
+
+
+## Emitted by the server's start announcement. Carries the authoritative state.
+func apply_match_start(payload: Dictionary) -> void:
+	var state_hash := str(payload.get("state_hash", ""))
+	var applied := apply_snapshot({"state": payload.get("state", {}), "state_hash": state_hash})
+	if applied < 0:
+		return
+	match_started.emit(payload)
 
 
 ## The RPC entry point for the handshake. Inherited signature, overridden body.

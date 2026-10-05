@@ -12,6 +12,10 @@ signal end_turn_pressed
 ## Emitted when the pending-order count is clicked (also acts as a "ready" toggle).
 signal orders_pressed
 
+## Emitted when the lobby ready button is pressed. Carries the state being asked for, so
+## the button toggles rather than only ever setting.
+signal ready_pressed(is_ready: bool)
+
 var _controller: SessionController = null
 
 var _stardate_label: Label = null
@@ -23,6 +27,7 @@ var _research_label: Label = null
 var _net_label: RichTextLabel = null
 var _pending_label: Label = null
 var _end_turn_button: Button = null
+var _ready_button: Button = null
 
 
 func _ready() -> void:
@@ -64,12 +69,47 @@ func _build() -> void:
 	_pending_label.add_theme_font_size_override("font_size", CC2Theme.FONT_HEAD)
 	row.add_child(_pending_label)
 
+	# Present only in a networked session. A match now waits for every connected player
+	# to ready up, so without this a GUI client would sit in the lobby forever with no way
+	# forward and no indication of why -- the one control that makes `--client` usable at
+	# all. Headless clients pass `--ready` instead; this is the equivalent for a window.
+	_ready_button = Button.new()
+	_ready_button.text = "READY"
+	_ready_button.tooltip_text = "Tell the server you are in. The match starts when everyone is"
+	_ready_button.focus_mode = Control.FOCUS_NONE
+	_ready_button.custom_minimum_size = Vector2(96, 0)
+	_ready_button.pressed.connect(_on_ready_pressed)
+	row.add_child(_ready_button)
+
 	_end_turn_button = Button.new()
 	_end_turn_button.text = "END TURN"
 	_end_turn_button.tooltip_text = "Commit staged orders and advance one stardate"
 	_end_turn_button.custom_minimum_size = Vector2(130, 0)
 	_end_turn_button.pressed.connect(func() -> void: end_turn_pressed.emit())
 	row.add_child(_end_turn_button)
+
+
+## Show the ready button only when there is a server to be ready to, and label it with
+## whatever it would do next.
+func _refresh_ready_button() -> void:
+	if _ready_button == null:
+		return
+	var networked := _controller != null and _controller.is_networked()
+	_ready_button.visible = networked
+	if not networked:
+		return
+	_ready_button.text = "NOT READY" if _controller.is_ready_flagged() else "READY"
+	_ready_button.disabled = false
+
+
+## Toggle the lobby ready flag.
+##
+## The button is pressed, so the new state is the *opposite* of the current one. Reading
+## it back through the controller rather than tracking it here keeps the button honest
+## if anything else changes the flag.
+func _on_ready_pressed() -> void:
+	var want := not _controller.is_ready_flagged()
+	ready_pressed.emit(want)
 
 
 ## One labelled readout. Returns the value label so the caller can update it.
@@ -122,11 +162,16 @@ func bind(controller: SessionController) -> void:
 		return
 	if not _controller.state_changed.is_connected(refresh):
 		_controller.state_changed.connect(refresh)
+	_refresh_ready_button()
 	refresh()
 
 
 ## Pull the current numbers into the HUD. Safe to call before the panel enters the tree.
 func refresh() -> void:
+	# Refreshed before the galaxy check, not after it: the ready button has to be correct
+	# during the window *before* the server sends an opening state, which is precisely
+	# when a player needs to press it.
+	_refresh_ready_button()
 	if _controller == null or _controller.galaxy == null:
 		return
 	var me := _controller.player()
@@ -162,6 +207,17 @@ func press_end_turn() -> void:
 
 func end_turn_button() -> Button:
 	return _end_turn_button
+
+
+## The lobby ready button, for the automated GUI test and for hiding it in a local game.
+func ready_button() -> Button:
+	return _ready_button
+
+
+## Programmatic click path for the ready button.
+func press_ready() -> void:
+	if _ready_button != null:
+		_ready_button.emit_signal(&"pressed")
 
 
 func stardate_label() -> Label:

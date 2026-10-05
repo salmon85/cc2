@@ -40,6 +40,12 @@ signal welcomed(assigned_slot: int, payload: Dictionary)
 ## Emitted on the server when a peer is told the game is full and dropped.
 signal peer_refused(peer_id: int, reason: String)
 
+## Emitted on the client when the server announces the match has begun.
+signal match_started(payload: Dictionary)
+
+## Emitted on the server when a peer reports readiness. The lobby consumes this.
+signal ready_changed(peer_id: int, is_ready: bool)
+
 ## The empire slot this peer was assigned, or -1 before the handshake completes.
 var slot: int = -1
 
@@ -135,6 +141,44 @@ func rpc_refuse(reason: String) -> void:
 	if _is_authority():
 		return
 	push_error("[TurnSyncPeer] refused by server: %s" % reason)
+
+
+## Client -> server: mark yourself ready (or un-ready) in the lobby.
+##
+## Sent by the client when the player confirms they are ready to play. The server is the
+## only party that decides whether the match starts: a client cannot start one, and the
+## RPC is refused from a peer the server has not seated.
+@rpc("any_peer", "call_remote", "reliable")
+func rpc_set_ready(is_ready: bool) -> void:
+	if not _is_authority():
+		return
+	# The sender, not the payload, decides whose readiness this is.
+	var sender := multiplayer.get_remote_sender_id()
+	if slot_of_peer(sender) < 0:
+		return
+	ready_changed.emit(sender, is_ready)
+
+
+## Role hook for a readiness report. The base reports it; the server applies it to its
+## lobby.
+func apply_ready(_peer_id: int, _is_ready: bool) -> void:
+	pass
+
+
+## Server -> clients: the match is starting. Carries the same shape as a welcome, so a
+## client's first state arrives by the same code path whether it joined early or the
+## lobby filled later.
+@rpc("authority", "call_remote", "reliable")
+func rpc_match_started(state_hash: String, full_state_or_diff: Dictionary) -> void:
+	if _is_authority():
+		return
+	apply_match_start({"state_hash": state_hash, "state": full_state_or_diff})
+
+
+## Role hook for the match-start announcement. The base reports it; the client adopts
+## the authoritative state.
+func apply_match_start(_payload: Dictionary) -> void:
+	match_started.emit(_payload)
 
 
 ## Client -> server: hand in this slot's orders for `turn_num`.
