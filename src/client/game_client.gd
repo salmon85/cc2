@@ -184,6 +184,14 @@ func _wire() -> void:
 	map.interaction_refused.connect(_on_refused)
 	fleets.fleet_selected.connect(_on_fleet_selected)
 	fleets.order_mode_changed.connect(_on_order_mode_changed)
+	# The proposal round trip: the map owns it (it knows what was clicked), the panel owns
+	# the prompt and the buttons. Neither may decide alone, so the panel's buttons are
+	# forwarded to the map rather than queueing anything themselves.
+	map.order_proposed.connect(_on_order_proposed)
+	map.order_confirmed.connect(_on_order_confirmed)
+	map.order_cancelled.connect(_on_order_cancelled)
+	fleets.order_confirmed.connect(func(_i: int) -> void: map.confirm_order())
+	fleets.order_cancelled.connect(func() -> void: map.cancel_order())
 	macros.build_requested.connect(_on_build_requested)
 	controller.turn_resolved.connect(_on_turn_resolved)
 	controller.state_changed.connect(_refresh)
@@ -289,6 +297,21 @@ func _on_system_picked(index: int) -> void:
 ## detail the same way, while the log -- which is what a player actually reads to confirm
 ## what they just clicked -- printed the real name in plain text. Fog that a player can
 ## switch off by clicking harder is not fog.
+## A destination was proposed. Open the prompt; the order is not queued yet.
+func _on_order_proposed(index: int) -> void:
+	fleets.show_proposal(index)
+
+
+func _on_order_confirmed(index: int) -> void:
+	fleets.hide_proposal()
+	_log_line("ORDER STAGED -> %s" % controller.display_name(index))
+
+
+func _on_order_cancelled() -> void:
+	fleets.hide_proposal()
+	_log_line("ORDER DISCARDED")
+
+
 func _on_planet_picked(index: int) -> void:
 	if controller.galaxy.planet(index) == null:
 		return

@@ -1005,3 +1005,112 @@ the bug is present. Reverting each fix in turn confirmed the new assertions catc
 - `test_gui_integration`: 274 (was 250) — the renderer-grounded hit-testing sweep across
   span-derived zooms, pans and camera offsets; culling and camera bounds; label rules; fog
   across the map, inspector, log and fleet registry.
+
+---
+
+# Camera bounds, dot-based travel, and order confirmation
+
+## Panning was blocked upward by one mistyped argument
+
+`camera_bounds()` built its rectangle from a single span:
+
+```gdscript
+var span := _axis_bounds(-w, w, half.length())
+return Rect2(span.x, span.y, span.y - span.x, span.y - span.x)
+```
+
+`Rect2(position, size)` takes two values, and both were `span`'s members: the **origin**
+came from `span.y` — the upper bound — and the size came from `span.y` again. So the Y
+range came out as `[+inset, +inset + span]`, a band entirely above the star, and the X
+range was silently truncated because the rect's width was measured from the wrong axis.
+
+That is the reported "panning freezes upward", and it is why the bug was asymmetric: `y`
+happened to be the member that landed in the position slot. Panning down worked, panning
+up hit a bound the camera could not satisfy and stopped.
+
+Each axis now gets its own `_axis_bounds` call and supplies both its own position and its
+own size. The insets are per-axis too — the field is square but the window is not, and a
+shared diagonal inset over-restricts the axis with room to spare while under-restricting
+the other.
+
+### Why the old test missed it
+
+Every existing assertion asked whether the bounds rect *contained* the planets. A rect
+whose Y range was entirely positive still contains them whenever the map happens to fit on
+screen — which is the default framing. The new checks assert that the rect is *symmetric
+about the star* and that each axis's size is its own range, both swept across several
+zooms. A single-zoom check passes vacuously at exactly the zoom a player reports the bug
+at.
+
+### The camera's own `limit_*` are gone
+
+They were defended as holding "under every route into the camera". Two reasons that is
+wrong:
+
+1. They are applied while the camera **renders**, which is after `position` has been read
+   by the hit test and the drawn order line. The value the game reasoned about and the
+   value on screen were different numbers.
+2. A fixed axis-aligned box cannot describe a viewport that is not square. Tight enough to
+   hold on the short axis and the long axis dies; loose enough for the long axis and the
+   map falls off the short one.
+
+`clamp_camera()` already has the bound that is right for the *actual* viewport and applies
+it immediately, so it is now the only authority.
+
+## Travel is counted in dots, at one rate
+
+Distances were in parsecs and speed was the slowest hull's, scaled by drive research and
+the map's span. Transit time was a product of three independent figures, which is why it
+could not be quoted to the player before committing.
+
+A **dot** is now 1% of the map radius, and every fleet covers `DOTS_PER_TURN = 10` of them
+per turn. A full-width crossing is ~200 dots — the same on every tier — so ~20 turns. The
+brief's "10 dots per turn" needed a finer dot than first appeared: at 10% of the radius a
+crossing is 20 dots and takes two turns, which is the multi-turn property disappearing.
+
+`travelled` is stored in dots to match, so the map's interpolation is a plain ratio. It was
+dividing dots by a parsec leg — off by the dot size, which made every fleet crawl then
+jump.
+
+`transit_turns()` is what the prompt quotes and what the resolver spends; a test drives a
+real crossing and asserts the two agree, because a prediction that disagrees with the
+resolver is worse than no prediction.
+
+## A click proposes; only CONFIRM dispatches
+
+Clicking a world with a fleet selected used to queue the order immediately. There was
+nothing to undo it. Now the click sets a *proposal* held on the map — not on the fleet,
+because putting a pending target in `fleet.destination` would both draw a flight as
+already under way and let `advance()` move the fleet before anything confirmed it.
+
+The fleet panel opens a CONFIRM / CANCEL prompt quoting `Estimated Transit: N turns (M
+dots)`. Clicking elsewhere discards it. `can_queue_move()` is split out from
+`queue_move()` so an order that could never be committed never reaches the prompt — showing
+CONFIRM on a guaranteed refusal teaches the player the button is broken.
+
+## A test step that was registered in one list but not the other
+
+The GUI suite drives its steps from a `_steps` array *and* a `match`. A new step added to
+only the `match` silently never ran — the suite reported green at 276 checks with a whole
+step skipped. Both are now registered, and the step selects a fleet first: with none
+selected the flow is unreachable and the guard returned early, again green.
+
+## STAGED ORDERS removed
+
+The readout was the only control in the UI whose height was driven by its own contents, so
+staging an order grew the `SIZE_EXPAND_FILL` map beside it and re-framed a view the player
+never touched. Removing it fixes that by removal; the slack goes to the construction
+section.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 1979 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_turn_engine`: 421 (was 410) — uniform dot rate across four hull compositions, the
+  dot scale being tier-independent, and the resolver spending exactly the quoted turns.
+- `test_gui_integration`: 309 (was 274) — the camera-bounds sweep and directional pan, the
+  proposal/cancel/confirm round trip, the transit quote, and the absent staged-orders
+  section.
+
+Each fix was reverted in turn to confirm the new assertions catch it: the camera bounds
+(3 failures), the confirmation prompt (9), the uniform speed (6), and the staged-orders
+section (2).

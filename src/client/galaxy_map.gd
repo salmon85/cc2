@@ -16,6 +16,18 @@ signal planet_picked(planet_index: int)
 ## Emitted when empty space is picked.
 signal background_picked
 
+## Emitted when a destination is *proposed* for the selected fleet, with its planet index.
+##
+## A proposal is not an order: nothing is queued and the fleet does not move until the
+## player confirms. The fleet panel listens for this to open its CONFIRM / CANCEL prompt.
+signal order_proposed(planet_index: int)
+
+## Emitted when a proposal is committed to the queue.
+signal order_confirmed(planet_index: int)
+
+## Emitted when a proposal is discarded, by the player or by clicking elsewhere.
+signal order_cancelled
+
 ## Emitted with an error string when an interaction is refused.
 signal interaction_refused(reason: String)
 
@@ -136,48 +148,52 @@ const FIT_MARGIN := 1.25
 const CAMERA_MARGIN_FACTOR := 1.1
 
 
-## Keep the camera over the map, and keep the SubViewport black behind it.
+## Keep the SubViewport black behind the map, and leave the camera's bounds to
+## `clamp_camera()`.
 ##
-## `limit_*` are applied by the camera itself, in world units, so they hold under every
-## route into the camera -- wheel, arrow keys, drag, `frame_galaxy`, `recentre` -- rather
-## than only the ones whose clamping we remembered to write. The widest of the four is
-## used for all four because the map is a square; a limit derived from the viewport's own
-## aspect would be reshaped under the player on every resize, and a rule that changes shape
-## is one that cannot be reasoned about.
+## `limit_*` used to be set here, on the reasoning that they hold under every route into
+## the camera without each handler having to remember to clamp. That reasoning is wrong in
+## two ways, and both of them are the reported bug:
 ##
-## The clear colour is the other half of "the map must not vanish". Outside the drawn
-## field the viewport fell back to the project's clear colour, which is not black, so
-## panning past the edge produced a panel of foreign colour -- readable as a rendering
-## fault even on the frames when the map behind it was drawn correctly.
+## 1. **They are not a centre constraint the caller can read.** The engine applies them
+##    while the camera *renders*, which is after `position` has been read by the hit test,
+##    the drawn order line and `camera_bounds()` itself. So the value the game reasons
+##    about and the value on screen were different numbers, and anything that read
+##    `position` between a move and the next frame disagreed with the picture.
+## 2. **They are a fixed axis-aligned box, so they cannot express a viewport that is wider
+##    than it is tall.** The field is square; the window is not. A limit tight enough to hold
+##    the screen inside the map on the short axis stops the long axis dead, and a limit loose
+##    enough for the long axis lets the map fall off the short one. There is no single box
+##    that is right for both, and the asymmetry is exactly the "panning blocks upward"
+##    report.
+##
+## `clamp_camera()` already has the bound that is correct for the *actual* viewport, is
+## applied immediately, and is the same function the tests assert on -- so it is the only
+## authority. The limits are cleared rather than left at their defaults: Godot's default is
+## a huge rectangle, which would be harmless, but an explicitly disabled limit is a statement
+## rather than an accident waiting for a future `limit_*` assignment.
+##
+## The clear mode is the other half of "the map must not vanish". Outside the drawn field
+## the viewport fell back to the project's clear colour, which is not black, so panning past
+## the edge produced a panel of foreign colour -- readable as a rendering fault even on the
+## frames when the map behind it was drawn correctly.
 func _apply_camera_limits() -> void:
 	if _camera == null or _sub_viewport == null:
 		return
-	var w := _view.world_size(
-		_controller.galaxy if _controller != null else null
-	) * CAMERA_MARGIN_FACTOR
-	_camera.limit_left = int(-w)
-	_camera.limit_top = int(-w)
-	_camera.limit_right = int(w)
-	_camera.limit_bottom = int(w)
+	# `INT_MAX`/`INT_MIN` is how Godot spells "no limit"; a small sentinel would reintroduce
+	# exactly the hardcoded boundary this is removing.
+	_camera.limit_left = -INF_INT
+	_camera.limit_top = -INF_INT
+	_camera.limit_right = INF_INT
+	_camera.limit_bottom = INF_INT
 	_sub_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
 	_sub_viewport.canvas_item_default_texture_filter = \
 		Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_LINEAR
 
 
-## Whether the camera limits currently enclose the whole drawn field, with margin.
-##
-## Exposed so a test asserts the real constraint instead of re-deriving it. A limit tight
-## to the outermost planet still lets the centre of the screen drift off the map at the
-## corner of the window, which is where a player ends up after zooming out to see
-## everything.
-func camera_limits_cover_map() -> bool:
-	if _camera == null or _controller == null or _controller.galaxy == null:
-		return false
-	var w := _view.world_size(_controller.galaxy) * CAMERA_MARGIN_FACTOR
-	return is_equal_approx(float(_camera.limit_left), -w) \
-		and is_equal_approx(float(_camera.limit_right), w) \
-		and is_equal_approx(float(_camera.limit_top), -w) \
-		and is_equal_approx(float(_camera.limit_bottom), w)
+## Sentinel for an unbounded camera limit, in a type that cannot overflow when the
+## camera adds its own extent to it.
+const INF_INT := 0x3FFFFFFF
 
 
 ## Keep the camera's centre inside `camera_bounds()`.
@@ -203,9 +219,7 @@ func clamp_camera() -> void:
 ##
 ## The field, shrunk by the visible half-extent of the viewport in galaxy units: the
 ## constraint is on the centre, so letting the centre reach the field's edge would put
-## half the screen outside it. By the *diagonal*, not per-axis -- a pan is diagonal, and a
-## bound that only holds per axis lets the screen hang off the very corner the player
-## pushed it towards.
+## half the screen outside it.
 func camera_bounds() -> Rect2:
 	var w := _view.world_size(
 		_controller.galaxy if _controller != null else null
@@ -215,8 +229,21 @@ func camera_bounds() -> Rect2:
 	var view := _sub_viewport.size if _sub_viewport != null else Vector2i(640, 480)
 	var z := maxf(0.0001, _camera.zoom.x)
 	var half := Vector2(float(view.x), float(view.y)) * 0.5 / z
-	var span := _axis_bounds(-w, w, half.length())
-	return Rect2(span.x, span.y, span.y - span.x, span.y - span.x)
+	# Per-axis, not one inset for both. The bounds frame is square but the viewport
+	# generally is not, and on a wide window the screen is far wider than the map is tall
+	# -- so a shared diagonal inset over-restricts the axis that has room to spare and
+	# under-restricts the other. Each axis gets the extent that is actually visible there.
+	#
+	# The ranges are built by position and *size on the same axis*. They used to share a
+	# single span, so the rect's origin came from the upper bound on one axis while its
+	# size came from the upper bound on the other. The result was a rectangle whose Y range
+	# was entirely positive -- `[+inset, +inset + span]` instead of `[-inset, +inset]` --
+	# which is the reported "panning freezes upward": clamping Y into a band that only
+	# exists above the star, and quietly truncating X at the same time, because the width
+	# was measured from the wrong span.
+	var sx := _axis_bounds(-w, w, half.x)
+	var sy := _axis_bounds(-w, w, half.y)
+	return Rect2(sx.x, sy.x, sx.y - sx.x, sy.y - sy.x)
 
 
 ## The camera centre's range on one axis, given a half-extent of `inset`.
@@ -497,44 +524,107 @@ func _to_screen(galaxy_pos: Vector2) -> Vector2:
 	return _to_local(_sub_viewport.get_canvas_transform() * galaxy_pos)
 
 
-## Route a click: to a planet's owner as a move destination if a fleet is selected and
-## the shift key is held, otherwise to selection.
+## Route a click: to a planet as a proposed destination when a fleet is selected and
+## staging is armed, otherwise to selection.
+##
+## A proposal is *not* an order. Clicking a world with a fleet selected draws the flight
+## path and opens the confirmation prompt; only `confirm_order()` turns it into something
+## the resolver will execute. Dispatching on the click that chose the destination was how a
+## mis-click sent a fleet across the map with nothing to undo it, and the undo is the whole
+## point of the prompt.
 ##
 ## `GalaxyMapView.pick` returns whatever is under the cursor, which is now a *planet* index
 ## for every body and the star's system index only when the star itself was hit. A star is
 ## not a move destination -- there is nowhere to put a fleet that is not a planet -- so a
-## click on it always selects rather than staging an order.
+## click on it always selects rather than proposing an order.
 func _click_at(screen_pos: Vector2) -> void:
 	var gal := _to_galaxy(screen_pos)
 	var hit: int = _view.pick(gal)
 	if hit < 0:
-		# Clicking empty space with no intent deselects the fleet, which is the fastest
-		# way out of order mode.
+		# Clicking empty space discards a pending proposal and deselects the fleet, which
+		# is both the fastest way out of order mode and the "clicking elsewhere discards
+		# the staged path" affordance.
+		cancel_order()
 		interaction_refused.emit("empty space")
 		background_picked.emit()
 		return
 
 	if _is_planet(hit) and (_order_mode or Input.is_key_pressed(KEY_SHIFT)):
-		var f := _controller.fleet()
-		if f == null:
-			interaction_refused.emit("select a fleet before issuing a move")
-			planet_picked.emit(hit)
+		if propose_order(hit):
 			return
-		if not _controller.queue_move(hit):
-			# The controller has already explained the refusal; mirror it once so the
-			# map is not silently unresponsive.
-			interaction_refused.emit("move refused")
-			return
-		planet_picked.emit(hit)
+		interaction_refused.emit("move refused")
 		return
 
 	if _is_planet(hit):
+		# Selecting a different world while a proposal is open discards it: the click that
+		# opened the prompt was the answer to it.
+		if _pending_destination >= 0 and _pending_destination != hit:
+			cancel_order()
 		planet_picked.emit(hit)
 		_controller.select_planet(hit)
 		return
 
 	system_picked.emit(hit)
 	_controller.select_system(hit)
+
+
+## Planet a flight is proposed for, or -1 when nothing is pending.
+##
+## A proposal lives on the map, not on the fleet: the fleet's own `destination` is an order
+## that will execute, and putting a pending target in that field would make the map draw a
+## flight that is already under way and would make `advance()` move the fleet before
+## anything confirmed it.
+var _pending_destination := -1
+
+
+## Propose a destination for the selected fleet. Returns false when the order is illegal.
+##
+## The legality check is the controller's, and it is the same check `queue_move` makes --
+## so a proposal that the player could never have committed is never shown in the first
+## place. What is deferred is only the *commit*.
+func propose_order(target_planet: int) -> bool:
+	var f := _controller.fleet()
+	if f == null:
+		interaction_refused.emit("select a fleet before issuing a move")
+		return false
+	if not _controller.can_queue_move(target_planet):
+		interaction_refused.emit("move refused")
+		return false
+	_pending_destination = target_planet
+	_view.preview_destination = target_planet
+	_view.queue_redraw()
+	order_proposed.emit(target_planet)
+	return true
+
+
+## Commit the pending proposal. Returns false when there is nothing to commit.
+func confirm_order() -> bool:
+	if _pending_destination < 0:
+		return false
+	var target := _pending_destination
+	_pending_destination = -1
+	_view.preview_destination = -1
+	_view.queue_redraw()
+	if _controller.queue_move(target):
+		planet_picked.emit(target)
+		order_confirmed.emit(target)
+		return true
+	order_cancelled.emit()
+	return false
+
+
+## Discard the pending proposal, leaving the fleet where it is.
+func cancel_order() -> void:
+	if _pending_destination < 0:
+		return
+	_pending_destination = -1
+	_view.preview_destination = -1
+	_view.queue_redraw()
+	order_cancelled.emit()
+
+
+func pending_destination() -> int:
+	return _pending_destination
 
 
 ## Whether a pick index refers to a planet rather than to the star.

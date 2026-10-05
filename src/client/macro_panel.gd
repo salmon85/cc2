@@ -20,7 +20,6 @@ var _research_values: Array[Label] = []
 
 var _build_selector: OptionButton = null
 var _build_info: Label = null
-var _queue_label: RichTextLabel = null
 var _colony_selector: OptionButton = null
 
 const RESEARCH_NAMES: Array[String] = ["ENG", "PROP", "BIOL", "PSYC"]
@@ -55,23 +54,28 @@ func _build() -> void:
 	col.add_child(_separator())
 	_build_construction(col)
 
+	# The "STAGED ORDERS" readout used to sit here, in a scrolling label that filled the
+	# slack below. It is gone: it was the only control in the UI whose height was driven
+	# by its own contents, so staging an order made this panel taller, which grew the
+	# `SIZE_EXPAND_FILL` galaxy map beside it and re-framed a view the player never
+	# touched. The slack now goes to the sections above, so what is left fills the column
+	# instead of a list of orders the player can already read in the session log.
+	_build_fleet_order_note(col)
+
+
+## Takes the space the staged-orders readout used to occupy.
+##
+## Construction is the section that had the least room for its own controls, and it is the
+## one a player reads most often once they are managing an empire rather than exploring --
+## so the freed space is given to it rather than left as a gap.
+func _build_fleet_order_note(col: Control) -> void:
 	var spacer := Control.new()
 	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	spacer.custom_minimum_size = Vector2(0, 12)
 	col.add_child(spacer)
 
-	col.add_child(_heading("STAGED ORDERS"))
-	_queue_label = RichTextLabel.new()
-	_queue_label.bbcode_enabled = true
-	# `fit_content` sizes the label to its text, so staging one more order made this panel
-	# taller, pushed the whole column, and resized the galaxy map beside it -- which
-	# re-framed the camera and shifted the view the player never touched. A fixed-height
-	# scrolling readout keeps this panel's minimum size constant however many orders are
-	# staged, which is the same treatment the event log gets.
-	_queue_label.fit_content = false
-	_queue_label.scroll_active = true
-	_queue_label.scroll_following = true
-	_queue_label.custom_minimum_size = Vector2(0, 80)
-	col.add_child(_queue_label)
+	_build_info.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_build_info.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 
 
 func _heading(text: String) -> Label:
@@ -204,7 +208,6 @@ func refresh() -> void:
 	_refresh_research(me)
 	_refresh_colonies()
 	_refresh_buildings()
-	_refresh_queue()
 
 
 func _refresh_research(me: FactionState) -> void:
@@ -298,19 +301,6 @@ func _refresh_build_info() -> void:
 		"font_color", CC2Theme.ALERT if (planet == null or not _controller.can_afford(def))
 		else CC2Theme.WHITE_DIM
 	)
-
-
-func _refresh_queue() -> void:
-	var orders := _controller.pending_orders()
-	if orders.is_empty():
-		_queue_label.text = "[color=#%s]No orders staged.[/color]" % CC2Theme.WHITE_DIM.to_html(false)
-		return
-	var lines := PackedStringArray()
-	for o in orders:
-		lines.append("[color=#%s]  %s[/color]" % [
-			CC2Theme.PHOSPHOR.to_html(false), o.describe()
-		])
-	_queue_label.text = "\n".join(lines)
 
 
 # --- Control handlers ------------------------------------------------------
@@ -411,8 +401,16 @@ func colony_selector() -> OptionButton:
 	return _colony_selector
 
 
+## The staged-orders readout, now always null.
+##
+## Kept as an accessor returning null so a caller that still asks gets a definite answer
+## rather than a crash -- the panel no longer has one, and the tests assert exactly that.
 func queue_label() -> RichTextLabel:
-	return _queue_label
+	return null
+
+
+func build_info() -> Label:
+	return _build_info
 
 
 func select_build(building_id: StringName) -> bool:

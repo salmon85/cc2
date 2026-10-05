@@ -306,24 +306,79 @@ func _draw_fleets(galaxy: GalaxyState) -> void:
 			draw_arc(here, 11.0, 0.0, TAU, 20, CC2Theme.PHOSPHOR, 1.5)
 
 
-## The cyan line drawn from the selected fleet to a star the player has clicked as a
-## destination — the visible confirmation that a move order has been staged.
+## The cyan line drawn from the selected fleet to its destination — the visible
+## confirmation that a move order is in flight, and the *preview* of one being staged.
+##
+## A staged-but-unconfirmed path draws from `preview_destination` rather than the fleet's
+## own `destination`, so the two are never the same thing: one is an order that will execute
+## at the end of the turn, the other is a proposal waiting on a button press. Drawing the
+## committed line for a proposal would show the player a flight that is already under way.
 func _draw_order_line(galaxy: GalaxyState) -> void:
 	var f := _controller.fleet()
-	if f == null or f.destination < 0:
+	if f == null:
 		return
-	var dest := galaxy.planet(f.destination)
+	var target := f.destination
+	var staged := false
+	if target < 0 and preview_destination >= 0:
+		target = preview_destination
+		staged = true
+	if target < 0:
+		return
+	var dest := galaxy.planet(target)
 	if dest == null:
 		return
 	var origin := galaxy.planet(f.system)
 	if origin == null:
 		return
-	var colour := CC2Theme.CYAN
+	# A proposal is drawn in the theme's dim colour: it is on screen waiting for an answer,
+	# not yet a thing that will happen.
+	var colour := CC2Theme.WHITE_DIM if staged else CC2Theme.CYAN
 	draw_dashed_line(origin.position, dest.position, Color(colour.r, colour.g, colour.b, 0.9), 2.0)
 	var dir := (dest.position - origin.position).normalized()
 	var tip := origin.position + dir * 26.0
 	var perp := Vector2(-dir.y, dir.x) * 5.0
 	draw_colored_polygon(PackedVector2Array([tip + dir * 9.0, tip + perp, tip - perp]), colour)
+
+	# Waypoint dots along the line, one per DOT_FRACTION of the crossing. They are the
+	# units transit time is quoted in, so showing the units the number is counted in is
+	# what makes "18 dots, 2 turns" checkable against the map rather than a claim in a
+	# panel.
+	_draw_waypoints(galaxy, origin, dest, staged)
+
+
+## The waypoint dots for a planned crossing.
+func _draw_waypoints(
+	galaxy: GalaxyState, origin: PlanetState, dest: PlanetState, staged: bool
+) -> void:
+	var span := dest.position - origin.position
+	var dots := MovementStage.orbit_dots(galaxy, origin, dest)
+	if dots <= 0.0 or span.length_squared() <= 0.0:
+		return
+	var dir := span / span.length()
+	var perp := Vector2(-dir.y, dir.x)
+	var colour := CC2Theme.WHITE_DIM if staged else CC2Theme.CYAN
+	var step := MovementStage.dot_size(galaxy)
+	var alpha := 0.45 if staged else 0.8
+	var travelled := 0.0
+	var n := 0
+	while travelled < span.length() and n < 256:
+		travelled += step
+		n += 1
+		# The terminal dot is the destination's own marker; drawing it twice is noise.
+		if travelled >= span.length():
+			break
+		var at := origin.position + dir * travelled
+		# A tick rather than a round dot: it reads as a ruler marking, which is what it is,
+		# and stays legible when the dots are a pixel apart at low zoom.
+		draw_line(at - perp * 3.0, at + perp * 3.0,
+			Color(colour.r, colour.g, colour.b, alpha), 1.0)
+
+
+## Planet a staged-but-unconfirmed flight is proposed for, or -1.
+##
+## Set by the map while the confirmation prompt is open; -2 is never assigned, so a default
+## of -1 is meaningful rather than a coincidence.
+var preview_destination: int = -1
 
 
 ## Interpolated map position of a fleet, which may be between planets.
@@ -339,14 +394,19 @@ func _fleet_position(galaxy: GalaxyState, f: FleetState) -> Vector2:
 	return here.position.lerp(dest.position, clampf(_travel_fraction(galaxy, f), 0.0, 1.0))
 
 
-## How far along its journey a fleet is. `travelled` accumulates distance, and the stage
-## derives the leg length from the same `orbit_distance` the movement code uses.
+## How far along its journey a fleet is, 0..1.
+##
+## `travelled` and the leg are both in *dots*, so this is a plain ratio -- but the leg has
+## to come from `orbit_dots` rather than `orbit_distance`. Dividing dots travelled by
+## parsecs of leg was off by the dot size, which put every travelling fleet at a fraction
+## of its actual position and made a fleet appear to crawl for the first few turns and
+## then jump.
 func _travel_fraction(galaxy: GalaxyState, f: FleetState) -> float:
 	var here := galaxy.planet(f.system)
 	var dest := galaxy.planet(f.destination)
 	if here == null or dest == null:
 		return 0.0
-	var leg := MovementStage.orbit_distance(here, dest)
+	var leg := MovementStage.orbit_dots(galaxy, here, dest)
 	if leg <= 0.0:
 		return 1.0
 	return clampf(f.travelled / leg, 0.0, 1.0)

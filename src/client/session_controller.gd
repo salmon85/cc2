@@ -331,6 +331,27 @@ func select_fleet(id: int) -> void:
 
 # --- Player actions --------------------------------------------------------
 
+## Whether `queue_move` would accept this destination for the selected fleet.
+##
+## Split out because the map asks this *before* offering to confirm. A proposal the player
+## could never commit should never reach the prompt -- showing "CONFIRM" on an order that
+## is guaranteed to be refused teaches the player that the button does not work.
+##
+## Silent by design: this is a question, not an action, and emitting `action_rejected` here
+## would fire the log's refusal message for a click the player is still in the middle of.
+func can_queue_move(target_planet: int) -> bool:
+	var f := fleet()
+	if f == null:
+		return false
+	if galaxy == null or galaxy.planet(target_planet) == null:
+		return false
+	if not f.active:
+		return false
+	if f.destination >= 0:
+		return false
+	return target_planet != f.system
+
+
 ## Queue a move for the selected fleet. Returns false and explains when refused.
 ##
 ## `target_planet` is a planet index. Fleets used to move between star systems; there is one

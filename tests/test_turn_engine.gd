@@ -293,6 +293,46 @@ func _test_movement() -> void:
 	sup.ok(MovementStage.movement_allowance(g.faction(0)) >= 0.0,
 		"movement allowance is non-negative")
 
+	# Every fleet moves at the uniform dot rate. `fleet_speed` used to return the slowest
+	# hull's speed scaled by drive research, so a scout and a dreadnought crossed the same
+	# map in different numbers of turns and neither number could be quoted to the player
+	# before committing. These three fleets differ in exactly the composition that used to
+	# matter, so if speed ever varies with hulls again these fail.
+	for hulls: Dictionary in [
+		{&"scout": 1}, {&"colony_ship": 1}, {&"dreadnought": 1}, {&"scout": 4},
+	]:
+		var probe := _place_fleet(g, 0, 0, hulls)
+		sup.eq(MovementStage.fleet_speed(probe, g.faction(0)), MovementStage.DOTS_PER_TURN,
+			"%s travels at the uniform dot rate" % str(hulls))
+	sup.eq(speed, MovementStage.DOTS_PER_TURN,
+		"and the rate is the one the turn count is quoted in")
+
+	# A dot is a fixed fraction of the radius, so the same crossing is the same number of
+	# dots on every map size. This is what makes a quoted turn count meaningful across a
+	# `--map-size` flag the player chose before the game started.
+	var dot := MovementStage.dot_size(g)
+	sup.ok(is_equal_approx(dot, g.radius() * MovementStage.DOT_FRACTION),
+		"a dot is a fixed fraction of the radius", "%.1f parsecs" % dot)
+	var tiny := _sized_galaxy(7, "tiny")
+	var extreme := _sized_galaxy(7, "extreme")
+	# A dot is a fraction of *this* map's radius, so the same parsec distance is the same
+	# number of dots everywhere and a full crossing is identical on every tier. That is the
+	# property that lets a quoted turn count survive a `--map-size` flag chosen before the
+	# game started.
+	sup.ok(is_equal_approx(
+			MovementStage.to_dots(g, 2.0 * g.radius()),
+			MovementStage.to_dots(extreme, 2.0 * extreme.radius())),
+		"a full crossing is the same dot count on every tier",
+		"large=%.0f extreme=%.0f" % [
+			MovementStage.to_dots(g, 2.0 * g.radius()),
+			MovementStage.to_dots(extreme, 2.0 * extreme.radius())])
+	# The dot itself is bigger on a bigger map, which is what makes the parsec figures
+	# mean something different per tier while the dot figures do not.
+	sup.ok(MovementStage.dot_size(extreme) > MovementStage.dot_size(tiny) * 10.0,
+		"the parsec size of a dot scales with the map",
+		"tiny=%.1f extreme=%.1f" % [
+			MovementStage.dot_size(tiny), MovementStage.dot_size(extreme)])
+
 	sup.expect_guard("issue_move rejects a fleet the faction does not own", func() -> Variant:
 		return MovementStage.issue_move(g, fleet.id, 1, 5)
 	)
@@ -326,6 +366,10 @@ func _test_movement() -> void:
 
 		# A long hop must take more than one turn; a short one may take several. Either
 		# way, the fleet ends up where it was sent and nowhere else.
+		#
+		# The turn count is checked against `transit_turns` as well as against a floor,
+		# because that is the number the map quotes to the player before they commit. A
+		# prediction that disagreed with the resolver would be worse than no prediction.
 		var turns := 0
 		while fleet.destination >= 0 and turns < 500:
 			MovementStage.advance(g)
@@ -333,6 +377,46 @@ func _test_movement() -> void:
 		sup.eq(fleet.system, far, "the fleet arrives at the target planet")
 		sup.eq(fleet.destination, -1, "the destination clears on arrival")
 		sup.ok(turns > 0, "the fleet did not teleport", "%d turns of travel" % turns)
+		sup.eq(turns, MovementStage.transit_turns(g, origin, far),
+			"the resolver spends exactly the turn count the map quotes")
+		# The brief's rebalance: movements take multiple turns across the map. Asserted on
+		# the map's own outermost worlds, which is the longest crossing available.
+		var inner := -1
+		var outer := -1
+		var span := 0.0
+		for p in g.planets:
+			var r := p.position.length()
+			if inner < 0 or r < span:
+				span = r
+				inner = p.index
+			if outer < 0 or r > span:
+				span = r
+				outer = p.index
+		if inner >= 0 and outer >= 0 and inner != outer:
+			var widest := MovementStage.transit_turns(g, inner, outer)
+			sup.ok(widest >= 3,
+				"the longest crossing on this map takes several turns",
+				"%d turns over %.0f dots" % [
+					widest, MovementStage.orbit_dots(
+						g, g.planet(inner), g.planet(outer))])
+			# And it is the same on the biggest map the game can be launched on, which is
+			# the whole reason distances are in dots.
+			var big := _sized_galaxy(2024, "extreme")
+			var b_inner := -1
+			var b_outer := -1
+			var b_span := 0.0
+			for p in big.planets:
+				var r := p.position.length()
+				if b_inner < 0 or r < b_span:
+					b_span = r
+					b_inner = p.index
+				if b_outer < 0 or r > b_span:
+					b_span = r
+					b_outer = p.index
+			if b_inner >= 0 and b_outer >= 0 and b_inner != b_outer:
+				sup.ok(MovementStage.transit_turns(big, b_inner, b_outer) > 1,
+					"and on the largest map too",
+					"%d turns" % MovementStage.transit_turns(big, b_inner, b_outer))
 
 		# A neighbour on the next ring out is reachable and must not be instant.
 		var near := -1

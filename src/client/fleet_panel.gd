@@ -19,6 +19,18 @@ var _order_button: Button = null
 var _order_hint: Label = null
 var _rebuilding := false
 
+## The CONFIRM / CANCEL prompt, hidden until a destination is proposed.
+var _confirm_row: HBoxContainer = null
+var _confirm_button: Button = null
+var _cancel_button: Button = null
+var _transit_label: Label = null
+
+## Emitted when the player commits a proposed flight.
+signal order_confirmed(planet_index: int)
+
+## Emitted when the player discards a proposed flight.
+signal order_cancelled
+
 
 func _ready() -> void:
 	_build()
@@ -73,6 +85,8 @@ func _build() -> void:
 	_order_hint.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
 	col.add_child(_order_hint)
 
+	_build_confirm_row(col)
+
 	_detail = RichTextLabel.new()
 	_detail.bbcode_enabled = true
 	_detail.fit_content = true
@@ -88,6 +102,84 @@ func bind(controller: SessionController) -> void:
 	if not _controller.state_changed.is_connected(refresh):
 		_controller.state_changed.connect(refresh)
 	refresh()
+
+
+## The confirmation prompt.
+##
+## A proposal the player has not yet accepted, so it is out of the way until there is one.
+## `visible = false` rather than a rebuild, because the panel is rebuilt on every refresh
+## and a rebuild would drop the prompt the instant the mouse moved.
+func _build_confirm_row(col: Control) -> void:
+	_confirm_row = HBoxContainer.new()
+	_confirm_row.add_theme_constant_override("separation", 6)
+	_confirm_row.visible = false
+	col.add_child(_confirm_row)
+
+	_confirm_button = Button.new()
+	_confirm_button.text = "CONFIRM"
+	_confirm_button.tooltip_text = "Send this fleet to the proposed destination"
+	_confirm_button.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_confirm_button.focus_mode = Control.FOCUS_NONE
+	_confirm_button.pressed.connect(_on_confirm_pressed)
+	_confirm_row.add_child(_confirm_button)
+
+	_cancel_button = Button.new()
+	_cancel_button.text = "CANCEL"
+	_cancel_button.tooltip_text = "Discard this flight"
+	_cancel_button.focus_mode = Control.FOCUS_NONE
+	_cancel_button.pressed.connect(_on_cancel_pressed)
+	_confirm_row.add_child(_cancel_button)
+
+	_transit_label = Label.new()
+	_transit_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_transit_label.add_theme_color_override("font_color", CC2Theme.PHOSPHOR)
+	_transit_label.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
+	_transit_label.visible = false
+	col.add_child(_transit_label)
+
+
+## Show the prompt for a proposed destination, quoting what the flight will cost.
+##
+## `planet_index` is the proposal; the transit figure comes from the same `transit_turns`
+## the resolver will effectively execute, so the number on screen is the number of turns
+## the fleet will spend. Quoting anything else -- a rounded estimate, a per-hull speed --
+## would make the one number the player has to decide on the one number they cannot trust.
+func show_proposal(planet_index: int) -> void:
+	if _controller == null or _controller.galaxy == null or planet_index < 0:
+		hide_proposal()
+		return
+	var f := _controller.fleet()
+	if f == null:
+		hide_proposal()
+		return
+	var dest := _controller.galaxy.planet(planet_index)
+	if dest == null:
+		hide_proposal()
+		return
+	var turns := MovementStage.transit_turns(_controller.galaxy, f.system, planet_index)
+	var dots := MovementStage.orbit_dots(_controller.galaxy, _controller.galaxy.planet(f.system), dest)
+	_transit_label.text = "ESTIMATED TRANSIT\n%d turn%s  (%d dots)" % [
+		turns, "" if turns == 1 else "s", int(round(dots))]
+	_transit_label.visible = true
+	_confirm_row.visible = true
+
+
+func hide_proposal() -> void:
+	if _confirm_row != null:
+		_confirm_row.visible = false
+	if _transit_label != null:
+		_transit_label.visible = false
+
+
+func _on_confirm_pressed() -> void:
+	# The map owns the proposal; the panel just forwards the intent and lets the map decide
+	# whether it can still be honoured.
+	order_confirmed.emit(-1)
+
+
+func _on_cancel_pressed() -> void:
+	hide_proposal()
+	order_cancelled.emit()
 
 
 func refresh() -> void:
@@ -163,7 +255,9 @@ func _refresh_detail() -> void:
 	var f := _controller.fleet()
 	if f == null:
 		_detail.text = "[color=#%s]NO FLEET SELECTED[/color]" % CC2Theme.WHITE_DIM.to_html(false)
-		_order_hint.text = "Select a fleet, then enable STAGE MOVE and click a planet on the map."
+		if _confirm_row != null and not _confirm_row.visible:
+			_order_hint.text = \
+				"Select a fleet, then enable STAGE MOVE and click a planet on the map."
 		return
 
 	var lines := PackedStringArray()
@@ -187,8 +281,10 @@ func _refresh_detail() -> void:
 		lines.append(Format.field("IN TRANSIT TO",
 			_controller.display_name(f.destination) if dest != null else "?"))
 		lines.append("[color=#%s]  ordered - awaiting resolution[/color]" % CC2Theme.CYAN.to_html(false))
-	else:
-		_order_hint.text = "STAGE MOVE armed. Click a planet on the map to queue the order."
+	elif _confirm_row == null or not _confirm_row.visible:
+		# Only overwrite the hint when no proposal is open: the prompt's own line is the
+		# answer the player is reading, and `refresh` runs on every `state_changed`.
+		_order_hint.text = "STAGE MOVE armed. Click a planet on the map to plan a flight."
 	_detail.text = "\n".join(lines)
 
 
@@ -230,7 +326,30 @@ func visible_text() -> String:
 			parts.append(_list.get_item_text(i))
 	if _detail != null:
 		parts.append(_detail.text)
+	if _order_hint != null:
+		parts.append(_order_hint.text)
+	if _transit_label != null and _transit_label.visible:
+		parts.append(_transit_label.text)
+	if _confirm_row != null and _confirm_row.visible:
+		parts.append(_confirm_button.text)
+		parts.append(_cancel_button.text)
 	return "\n".join(parts)
+
+
+func confirm_button() -> Button:
+	return _confirm_button
+
+
+func cancel_button() -> Button:
+	return _cancel_button
+
+
+func confirm_row() -> HBoxContainer:
+	return _confirm_row
+
+
+func transit_label() -> Label:
+	return _transit_label
 
 
 func detail() -> RichTextLabel:

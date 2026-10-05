@@ -5,6 +5,35 @@ class_name MovementStage
 ##
 ## Travel is on the authoritative RNG-free path — distance arithmetic only — so movement
 ## replays identically on every client without transmitting a single float.
+##
+## Distances are counted in **dots**, not parsecs. A dot is a fixed fraction of the map's
+## span, so a crossing is the same *number of dots* on every map size and a dot is the
+## same *distance* every fleet covers in a turn. That makes transit time a function of
+## distance alone -- legible to the player as "12 dots, 6 turns" -- rather than a product
+## of three independent per-hull speeds that has to be estimated on the client and
+## happened to disagree with what the resolver did.
+
+## How far one dot is, as a fraction of the map radius.
+##
+## The outermost planet sits at `GalaxyGenerator.OUTER_ORBIT` of the radius, so a
+## point-to-point hop of one dot lands just outside the rim on a straight crossing and
+## inside it on a short one. Dots are a *scale*, not a grid: nothing snaps to them, they
+## only have to make a distance legible.
+##
+## A hundredth of the radius, which makes a full-width crossing about two hundred dots on
+## *every* map size -- the scale is what makes the turn count below independent of the tier.
+## Coarser than this and ten dots per turn crosses the whole map in two turns, which is
+## the "movements take multiple turns" property disappearing.
+const DOT_FRACTION := 0.01
+
+## Dots a fleet covers in one turn.
+##
+## Uniform across every hull and every role by design. A scout and a dreadnought used to
+## move at different rates, which made transit time depend on what a fleet happened to be
+## built from and made it impossible to quote a number to the player before committing.
+## Ten dots per turn puts a full-width crossing at roughly twenty turns and a short hop at
+## one or two, which is the range where a player plans.
+const DOTS_PER_TURN := 10.0
 
 ## Maximum parsecs a faction's fleets can cover this turn.
 ##
@@ -22,31 +51,54 @@ static func movement_allowance(faction: FactionState) -> float:
 	return clampf(base, 0.0, GameDB.MAX_MOVEMENT)
 
 
-## Speed of a fleet: the slowest hull, scaled by drive research and by the map's span.
-static func fleet_speed(
-	fleet: FleetState, faction: FactionState, map_factor: float = 1.0
-) -> float:
-	var slowest := fleet.base_speed()
-	if slowest <= 0.0:
+## Parsecs per dot on this map.
+static func dot_size(galaxy: GalaxyState) -> float:
+	return maxf(galaxy.radius() * DOT_FRACTION, 0.0001)
+
+
+## A distance in parsecs expressed in dots.
+static func to_dots(galaxy: GalaxyState, parsecs: float) -> float:
+	return parsecs / dot_size(galaxy)
+
+
+## A dot count back into parsecs.
+static func from_dots(galaxy: GalaxyState, dots: float) -> float:
+	return dots * dot_size(galaxy)
+
+
+## Dots between two planets, along the straight line between them.
+static func orbit_dots(galaxy: GalaxyState, from: PlanetState, to: PlanetState) -> float:
+	if from == null or to == null:
 		return 0.0
-	# Drive research lifts the slowest hull toward the role cap, not above it.
-	var cap := ShipHullData.role_speed_cap(_dominant_role(fleet))
-	return minf(slowest + faction.tech_effect(&"movement"), cap) * map_factor
+	return to_dots(galaxy, orbit_distance(from, to))
 
 
-## Role of the slowest member hull, which is what governs both speed and legal orders.
-static func _dominant_role(fleet: FleetState) -> int:
-	var worst := 5
-	var slowest := INF
-	for key: StringName in fleet.ships:
-		var def: Resource = fleet.hulls().get(key, null) as Resource
-		if def == null:
-			continue
-		var speed := float(def.get("base_speed"))
-		if speed < slowest:
-			slowest = speed
-			worst = int(def.get("role"))
-	return worst
+## Turns a fleet would take to cross to `to_planet`, at the uniform rate.
+##
+## Rounded *up*: a fleet that is already in range arrives at the end of the next turn
+## rather than instantly, and a fraction of a turn never rounds the other way -- the
+## player is quoted the same number the resolver will take.
+static func transit_turns(galaxy: GalaxyState, from_planet: int, to_planet: int) -> int:
+	var a := galaxy.planet(from_planet)
+	var b := galaxy.planet(to_planet)
+	if a == null or b == null:
+		return 0
+	var dots := orbit_dots(galaxy, a, b)
+	if dots <= 0.0:
+		return 0
+	return maxi(1, ceili(dots / DOTS_PER_TURN))
+
+
+## Dots a fleet covers per turn. The same for every fleet, by design.
+##
+## `faction` is accepted so the signature survives the per-hull model and so a future
+## speed research has somewhere to go, but it deliberately does not change the result: a
+## tech tree that made one fleet twice as fast as another would reintroduce exactly the
+## "cannot quote a number before committing" problem this replaced.
+static func fleet_speed(
+	_fleet: FleetState, _faction: FactionState, _map_factor: float = 1.0
+) -> float:
+	return DOTS_PER_TURN
 
 
 ## Issue a move order. Returns false (and changes nothing) when the order is illegal.
@@ -102,7 +154,10 @@ static func advance(galaxy: GalaxyState) -> PackedInt32Array:
 			f.travelled = 0.0
 			continue
 
-		var distance := orbit_distance(from, to)
+		# `travelled` is in dots, matching `orbit_dots` and `DOTS_PER_TURN`, so the stored
+		# progress is directly comparable to the leg it is covering and the map's
+		# interpolation needs no separate conversion.
+		var distance := orbit_dots(galaxy, from, to)
 
 		f.travelled += speed
 		if f.travelled + 0.0001 >= distance:

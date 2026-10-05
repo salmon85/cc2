@@ -53,12 +53,14 @@ func _initialize() -> void:
 
 	_steps = PackedStringArray([
 		"instantiate", "scene_tree", "panels", "theme", "signals", "selection",
-		"map_draw", "hit_testing", "view_culling", "fleet_orders", "illegal_orders",
+		"map_draw", "hit_testing", "view_culling", "order_confirmation", "fleet_orders",
+		"illegal_orders",
 		"macro_tax", "macro_research",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
-		"fog_fleet_markers", "fog_planet_names", "map_bounds", "reproducible",
+		"fog_fleet_markers", "fog_planet_names", "no_staged_orders", "map_bounds",
+		"reproducible",
 		"teardown",
 	])
 	# The tree only lays out nodes from `_process` onward; `_initialize` runs before the
@@ -92,6 +94,7 @@ func _process(_delta: float) -> bool:
 		"map_draw": _step_map_draw()
 		"hit_testing": _step_hit_testing()
 		"view_culling": _step_view_culling()
+		"order_confirmation": _step_order_confirmation()
 		"fleet_orders": _step_fleet_orders()
 		"illegal_orders": _step_illegal_orders()
 		"macro_tax": _step_macro_tax()
@@ -107,6 +110,7 @@ func _process(_delta: float) -> bool:
 		"fog_ownership": _step_fog_of_war_ownership()
 		"fog_colony_markers": _step_fog_colony_markers()
 		"fog_planet_names": _step_fog_planet_names()
+		"no_staged_orders": _step_no_staged_orders()
 		"map_bounds": _step_map_bounds()
 		"fog_fleet_markers": _step_fog_fleet_markers()
 		"reproducible": _step_reproducible()
@@ -556,6 +560,144 @@ func _step_map_draw() -> void:
 		"radius=%f" % GalaxyMapView.UNKNOWN_MARKER_RADIUS)
 
 
+## Deliverables 3 and 4: transit is quoted in dots and turns, and a click proposes rather
+## than dispatches.
+##
+## The order of these assertions is the whole point -- each one checks the state the player
+## is *in* at that moment, so a click that dispatched immediately would fail at "nothing is
+## staged yet" before the confirm button was ever reached.
+func _step_order_confirmation() -> void:
+	sup.begin("flight proposal, transit estimate and confirmation")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var gal := c.galaxy
+	var map := _client.map
+	var panel := _client.fleets
+	# The panel has to be given a fleet first: with none selected the whole flow is
+	# unreachable, and a step that quietly returns would leave the proposal assertions
+	# unexercised while still reporting green.
+	var mine := c.player_fleets()
+	if mine.is_empty():
+		sup.ok(true, "the player has no fleet; proposal flow not exercised")
+		return
+	c.select_fleet(mine[0].id)
+	var f := c.fleet()
+	sup.ok(f != null, "a fleet is selected for the proposal", "selected=%d" % c.selected_fleet)
+	if f == null:
+		return
+	# Start from a fleet that is not already under way, so the proposal is a legal one.
+	if f.destination >= 0:
+		f.destination = -1
+		f.travelled = 0.0
+
+	var dest := -1
+	var dots := 0.0
+	for p in gal.planets:
+		if p.index == f.system:
+			continue
+		var d := MovementStage.orbit_dots(gal, gal.planet(f.system), p)
+		if dest < 0 or d > dots:
+			dest = p.index
+			dots = d
+	if dest < 0:
+		sup.ok(true, "no second world to fly to; proposal flow not exercised")
+		return
+
+	var turns := MovementStage.transit_turns(gal, f.system, dest)
+
+	# --- the estimate ---------------------------------------------------------
+	sup.ok(dots > 0.0, "a flight has a dot distance", "%.1f dots" % dots)
+	sup.ok(turns >= 1, "and takes at least one turn", "%d turns" % turns)
+	sup.ok(turns == maxi(1, ceili(dots / MovementStage.DOTS_PER_TURN)),
+		"the quoted turns are the distance in dots over the uniform rate",
+		"%d dots / %.0f per turn" % [dots, MovementStage.DOTS_PER_TURN])
+	# Every fleet moves at the same rate, so a second fleet over a longer leg takes
+	# strictly more turns. Speed varying with hull composition is what made this
+	# unquotable before.
+	sup.eq(MovementStage.fleet_speed(f, c.player()), MovementStage.DOTS_PER_TURN,
+		"fleet speed is the uniform dot rate")
+
+	# --- clicking proposes, and nothing more ------------------------------------
+	var queued_before := c.pending_orders().size()
+	map.set_order_mode(true)
+	map.click_at_galaxy(gal.planet(dest).position)
+	sup.eq(map.pending_destination(), dest,
+		"clicking a destination with a fleet selected proposes it")
+	sup.eq(c.pending_orders().size(), queued_before,
+		"but nothing is queued yet -- the click did not dispatch")
+	sup.eq(f.destination, -1,
+		"and the fleet is not yet in transit")
+	sup.ok(panel.confirm_row().visible, "the confirmation prompt is open")
+	sup.ok(panel.transit_label().visible, "and quotes the transit time")
+	sup.ok(panel.visible_text().contains("ESTIMATED TRANSIT"),
+		"the prompt shows the transit heading", "shown=%s" % panel.visible_text())
+	sup.ok(panel.visible_text().contains("%d turn" % turns),
+		"quoting the number of turns the flight will take",
+		"want %d turns; shown=%s" % [turns, panel.visible_text()])
+	sup.ok(panel.visible_text().contains("%d dots" % int(round(dots))),
+		"and the dot distance it is counted in")
+
+	# --- cancel discards --------------------------------------------------------
+	map.cancel_order()
+	sup.eq(map.pending_destination(), -1, "cancelling clears the proposal")
+	sup.eq(c.pending_orders().size(), queued_before, "and queues nothing")
+	sup.eq(f.destination, -1, "the fleet has not moved")
+	sup.ok(not panel.confirm_row().visible, "and the prompt closes")
+
+	# --- clicking elsewhere discards -------------------------------------------
+	map.click_at_galaxy(gal.planet(dest).position)
+	sup.eq(map.pending_destination(), dest, "the proposal is open again")
+	map.click_at_galaxy(Vector2(999999.0, -999999.0))
+	sup.eq(map.pending_destination(), -1, "clicking empty space discards it")
+	sup.eq(c.pending_orders().size(), queued_before, "without queueing anything")
+
+	# --- confirm commits ----------------------------------------------------------
+	map.click_at_galaxy(gal.planet(dest).position)
+	sup.ok(map.confirm_order(), "CONFIRM commits the order")
+	sup.eq(c.pending_orders().size(), queued_before + 1, "exactly one order is queued")
+	sup.eq(f.destination, dest, "and the fleet is in transit to the proposed world")
+	sup.eq(map.pending_destination(), -1, "the proposal is consumed")
+	sup.ok(not panel.confirm_row().visible, "and the prompt closes")
+
+	# --- the flight really takes that many turns ---------------------------------
+	# Stepped here rather than trusting `transit_turns`: the number on the prompt is only
+	# worth showing if the resolver actually spends it.
+	f.destination = -1
+	f.travelled = 0.0
+	c.pending_orders().clear()
+	sup.ok(MovementStage.issue_move(gal, f.id, f.owner, dest), "a fresh order is accepted")
+	var spent := 0
+	while f.destination >= 0 and spent < 500:
+		MovementStage.advance(gal)
+		spent += 1
+	sup.eq(spent, turns, "the fleet spends exactly the quoted number of turns")
+	sup.eq(f.system, dest, "and arrives where it was sent")
+
+	# --- multi-turn travel --------------------------------------------------------
+	# The brief's "movements take multiple turns across the map": a full-width crossing of
+	# the largest map has to be more than one turn at the uniform rate.
+	var inner := -1
+	var outer := -1
+	var span := 0.0
+	for p in gal.planets:
+		var r := p.position.length()
+		if inner < 0 or r < span:
+			span = r
+			inner = p.index
+		if outer < 0 or r > span:
+			span = r
+			outer = p.index
+	if inner >= 0 and outer >= 0 and inner != outer:
+		var wide := MovementStage.transit_turns(gal, inner, outer)
+		sup.ok(wide > 1,
+			"the longest crossing on this map takes more than one turn",
+			"%d turns over %.0f dots" % [
+				wide, MovementStage.orbit_dots(gal, gal.planet(inner), gal.planet(outer))])
+
+	map.set_order_mode(false)
+
+
 func _step_fleet_orders() -> void:
 	sup.begin("fleet move orders")
 	if _client == null or _client.controller == null:
@@ -662,39 +804,83 @@ func _step_macro_does_not_move_the_map() -> void:
 		return
 	var m := _client.map
 	var cam := m.camera()
+	var macros := _client.macros
 
 	# The defect: dragging a slider staged an order, the staged-orders label was sized to
 	# its text with `fit_content`, so the right column got taller, the row's minimum grew,
 	# and the `SIZE_EXPAND_FILL` map beside it resized -- which re-framed the camera and
 	# moved a view the player never touched.
+	#
+	# The readout that caused it is gone (see `_step_no_staged_orders`), so what is checked
+	# now is the property that outlived it: the macro panel's minimum height does not
+	# depend on anything the player does to it, and the map is untouched throughout.
 	var cam_before := cam.position
 	var zoom_before := cam.zoom
 	var map_before := m.size
+	var height_before := macros.get_combined_minimum_size().y
 
-	# Stage far more orders than the readout has height for. The map is sampled every step
+	# Stage far more orders than any readout has height for. The map is sampled every step
 	# rather than only at the end: it is `SIZE_EXPAND_FILL`, so it grows the instant the
 	# column beside it does, and a check taken after the fact could miss a transient.
-	var queue := _client.macros.queue_label()
-	var tallest := queue.custom_minimum_size.y
+	var tallest := macros.get_combined_minimum_size().y
 	for i in 24:
-		_client.macros.tax_slider().value = 0.02 + 0.03 * i
-		tallest = maxf(tallest, queue.get_combined_minimum_size().y)
+		macros.tax_slider().value = 0.02 + 0.03 * i
+		tallest = maxf(tallest, macros.get_combined_minimum_size().y)
 	sup.ok(_client.controller.pending_orders().size() >= 12,
 		"the drag staged a stack of orders",
 		"%d pending" % _client.controller.pending_orders().size())
 
-	# The readout is the control whose size the order text used to drive.
-	sup.ok(not queue.fit_content,
-		"the staged-orders readout is not sized by its text")
-	sup.ok(queue.scroll_active, "the staged-orders readout scrolls instead of growing")
-	sup.near(tallest, queue.custom_minimum_size.y, 0.5,
-		"the readout never outgrows its own height (%f vs cap %f)" % [
-			tallest, queue.custom_minimum_size.y])
+	sup.near(tallest, height_before, 0.5,
+		"the macro panel does not grow with the order queue (%f vs %f)" % [
+			tallest, height_before])
 
 	# And the map, which is what the player actually noticed, is untouched.
 	sup.eq(m.size, map_before, "the map did not resize when sliders were dragged")
 	sup.eq(cam.position, cam_before, "the camera did not move when sliders were dragged")
 	sup.eq(cam.zoom, zoom_before, "the camera did not re-zoom when sliders were dragged")
+
+
+## The staged-orders readout is gone from the right-hand panel.
+##
+## It was the one control in the UI whose height was driven by its own contents, which is
+## what let a slider drag resize the map beside it. Removing it is a layout fix as much as a
+## clutter one, so it gets a test: a panel that can grow with its text is exactly the
+## defect that was just removed, and nothing else in the right column has that property.
+func _step_no_staged_orders() -> void:
+	sup.begin("no staged-orders section in the right panel")
+	if _client == null or _client.macros == null:
+		return
+	var macros := _client.macros
+	sup.eq(macros.queue_label(), null, "the macro panel has no staged-orders readout")
+
+	# No node anywhere in the right column may carry the removed heading.
+	var offenders := PackedStringArray()
+	_collect_text(macros, offenders)
+	var all := "\n".join(offenders)
+	sup.ok(not all.contains("STAGED ORDERS"),
+		"no control in the right panel is labelled STAGED ORDERS",
+		"labels=%s" % all.replace("\n", " | "))
+
+	# The freed space goes to the controls that remain: the construction section is the
+	# one that had the least room, and it should now be able to take the slack.
+	sup.ok(macros.build_info().get_combined_minimum_size().y > 0.0,
+		"the construction readout still occupies its section")
+	sup.ok(macros.colony_selector().item_count >= 0,
+		"and the colony selector is still wired up")
+
+
+## Every piece of user-visible text under `node`, one per line.
+##
+## Reading the labels a panel actually built is the only way to assert a section is gone:
+## searching the source for the string would also pass while the label is still on screen,
+## and `queue_label()` returning null would pass while a stray `Label` survived.
+func _collect_text(node: Node, into: PackedStringArray) -> void:
+	if node is Label or node is Button or node is CheckBox or node is CheckButton:
+		into.append(String((node as Control).text))
+	elif node is RichTextLabel:
+		into.append(String((node as RichTextLabel).text))
+	for child in node.get_children():
+		_collect_text(child, into)
 
 
 func _step_macro_research() -> void:
@@ -1494,6 +1680,11 @@ func _step_hit_testing() -> void:
 ## control's rect, so a camera panned past that rect skipped the layer entirely and the
 ## player got an empty panel. Both halves of the fix are asserted here -- a custom draw
 ## rect covering the world, and camera limits that keep the view over it.
+## The two ends of a rect's range on one axis, given its position and size.
+func _range_of(position: float, size: float) -> Vector2:
+	return Vector2(position, position + size)
+
+
 func _step_view_culling() -> void:
 	sup.begin("map survives pan and zoom")
 	if _client == null or _client.controller == null:
@@ -1503,27 +1694,124 @@ func _step_view_culling() -> void:
 	var cam := map.camera()
 	var gal := _client.controller.galaxy
 
-	# The camera may not leave the map. The engine's own `limit_*` is a *centre*
-	# constraint -- it holds the middle of the screen over the map while still letting the
-	# edges hang off it -- so the bound that has to hold is `camera_bounds()`, which insets
-	# the field by the viewport's half-extent. Both are checked: the limits because they
-	# are what the camera applies to itself, the bounds because they are what the input
-	# handlers clamp to.
-	sup.ok(map.camera_limits_cover_map(), "camera limits enclose the drawn field",
-		"limits=[%d,%d,%d,%d]" % [
-			cam.limit_left, cam.limit_top, cam.limit_right, cam.limit_bottom])
-	# With margin, not merely flush: a limit tight to the outermost planet still lets the
-	# centre of the screen drift off the map at the corner of the window.
+	# The camera may not leave the map. The bound that has to hold is `camera_bounds()`,
+	# which insets the field by the visible half-extent, and `clamp_camera()` is the only
+	# thing enforcing it -- the engine's `limit_*` are gone, because they are applied while
+	# the camera renders and cannot express a viewport that is not square.
+	#
+	# The regression this guards is the reported one, and it was invisible to the old
+	# assertions because they only asked whether the rect *contained* the planets: a rect
+	# whose Y range was entirely positive still contains them whenever the map happens to
+	# fit on screen. What has to hold is that the rect's two axes agree with each other and
+	# are symmetric about the star, which is the only way "pan freely in all four
+	# directions" is a checkable claim.
+	#
+	# Swept across zooms rather than asserted at whatever the map happened to be framed at.
+	# The two regimes are genuinely different -- a map that fits on screen has only one
+	# legal centre and collapses to a point -- and the Y-axis defect only shows in the
+	# zoomed-in regime, so a single-zoom check would pass vacuously at exactly the zoom a
+	# player reports the bug at.
+	var saved_z := cam.zoom
 	var half := map._view.world_size(gal)
 	var furthest := 0.0
 	for p in gal.planets:
 		furthest = maxf(furthest, maxf(absf(p.position.x), absf(p.position.y)))
-	sup.ok(float(cam.limit_right) > furthest,
-		"the limits clear the outermost planet",
-		"limit=%.1f furthest=%.1f" % [cam.limit_right, furthest])
-	sup.ok(float(cam.limit_right) > half,
-		"and clear the drawn field itself",
-		"limit=%.1f field=%.1f" % [cam.limit_right, half])
+	var zooms_seen := 0
+	var asymmetric := 0
+	var wrong_size := 0
+	var stranded := 0
+	for zoom in [map.max_zoom(), 1.0, map.max_zoom() * 0.5, 0.25, 0.1]:
+		cam.zoom = Vector2(zoom, zoom)
+		var b := map.camera_bounds()
+		zooms_seen += 1
+		# Every legal centre range is symmetric about the star: pan up as far as pan down.
+		if not is_equal_approx(b.position.y, -b.end.y) \
+				or not is_equal_approx(b.position.x, -b.end.x):
+			asymmetric += 1
+		# The size on an axis is that axis's own range. Borrowing the other axis's span
+		# is what truncated X while Y went positive-only.
+		var sx := _range_of(b.position.x, b.size.x)
+		var sy := _range_of(b.position.y, b.size.y)
+		if not is_equal_approx(sx.x, b.position.x) or not is_equal_approx(sx.y, b.end.x) \
+				or not is_equal_approx(sy.x, b.position.y) \
+				or not is_equal_approx(sy.y, b.end.y):
+			wrong_size += 1
+		# The bound is deliberately *smaller* than the field -- it is the field inset by the
+		# visible half-extent, so that the whole screen stays over the map. So the property
+		# to check is not "clears the field" but "no planet is stranded": for every planet,
+		# there must be a reachable camera position that brings it on screen. A collapsed
+		# axis (size 0) means the whole map is on screen at once, where pinning the centre to
+		# the origin is correct and every planet is visible by definition.
+		if b.size.x > 0.0 and b.size.y > 0.0:
+			var view_half: Vector2 = Vector2(map.sub_viewport().size) * 0.5 / zoom
+			for pl in gal.planets:
+				# Can the centre sit where this planet fills the screen?
+				var want := pl.position
+				if want.x < b.position.x - view_half.x or want.x > b.end.x + view_half.x \
+						or want.y < b.position.y - view_half.y \
+						or want.y > b.end.y + view_half.y:
+					stranded += 1
+	sup.ok(zooms_seen >= 3, "the bounds were swept across several zooms", "%d zooms" % zooms_seen)
+	sup.eq(stranded, 0,
+		"every planet is reachable at every zoom -- none is stranded off the bounds")
+	sup.eq(asymmetric, 0,
+		"the camera's range is symmetric about the star at every zoom")
+	sup.eq(wrong_size, 0,
+		"each axis's size is its own range, not the other axis's")
+	cam.zoom = saved_z
+
+	# Panning must actually move in all four directions at a zoom where the map does *not*
+	# fit. At the default framing the map is smaller than the window, every direction is
+	# correctly pinned to the origin, and the loop would pass for entirely the wrong
+	# reason -- so it starts from the middle and pans in each direction in turn, counting
+	# how far the camera actually got.
+	#
+	# This is the assertion the old suite never made. Every previous check was about the
+	# bounds being *some* rectangle; none of them drove the camera and watched it move, so a
+	# bound that only permitted one direction -- the reported bug -- passed all of them.
+	var pan_blocked := 0
+	for zoom in [map.max_zoom(), 1.0, 0.5]:
+		cam.zoom = Vector2(zoom, zoom)
+		cam.position = Vector2.ZERO
+		map.clamp_camera()
+		var centre := cam.position
+		var moved := {"up": 0.0, "down": 0.0, "left": 0.0, "right": 0.0}
+		for dir: Vector2 in [
+			Vector2(-1.0, 0.0), Vector2(1.0, 0.0), Vector2(0.0, -1.0), Vector2(0.0, 1.0)
+		]:
+			cam.position = centre
+			map.clamp_camera()
+			var before := cam.position
+			# A far bigger push than the field: any direction with room to move will move,
+			# and only a genuinely clamped one will not.
+			cam.position += dir * (half * 4.0)
+			map.clamp_camera()
+			var delta := cam.position - before
+			if dir.y < 0.0:
+				moved["up"] = delta.y
+			elif dir.y > 0.0:
+				moved["down"] = delta.y
+			elif dir.x < 0.0:
+				moved["left"] = delta.x
+			else:
+				moved["right"] = delta.x
+		# Up must go as far as down, and left as far as right: a bound that clamps one axis
+		# asymmetrically is the bug, regardless of the absolute numbers.
+		if moved["up"] > -0.01 and moved["down"] > 0.01:
+			pan_blocked += 1
+		if moved["left"] > -0.01 and moved["right"] > 0.01:
+			pan_blocked += 1
+	sup.eq(pan_blocked, 0,
+		"no zoom lets one direction travel while its opposite is pinned")
+
+	# No hardcoded camera limits left to clamp the viewport against a box that cannot
+	# describe a non-square window.
+	cam.zoom = saved_z
+	sup.ok(cam.limit_left <= -GalaxyMap.INF_INT or cam.limit_left < -half * 4.0,
+		"no hardcoded camera limit bounds the left edge",
+		"limit_left=%d" % cam.limit_left)
+	sup.ok(cam.limit_right >= GalaxyMap.INF_INT or cam.limit_right > half * 4.0,
+		"nor the right edge", "limit_right=%d" % cam.limit_right)
 
 	# The draw layer must tell the renderer where it actually draws, or the cull follows
 	# the widget's rect instead of the world's.
