@@ -159,10 +159,10 @@ func _wire() -> void:
 		return
 	_wired = true
 
-	top_bar.end_turn_pressed.connect(_on_end_turn)
 	top_bar.ready_pressed.connect(_on_ready_pressed)
-	top_bar.orders_pressed.connect(_on_orders_pressed)
 	map.system_picked.connect(_on_system_picked)
+	map.planet_picked.connect(_on_planet_picked)
+	map.end_turn_requested.connect(_on_end_turn)
 	map.interaction_refused.connect(_on_refused)
 	fleets.fleet_selected.connect(_on_fleet_selected)
 	fleets.order_mode_changed.connect(_on_order_mode_changed)
@@ -229,8 +229,14 @@ func _controller_news() -> PackedStringArray:
 
 # --- Handlers --------------------------------------------------------------
 
+## Commit a turn from the keyboard (Space/Enter on the map).
+##
+## Single player only. A networked player commits by pressing READY, which ships the
+## staged orders and raises the flag in one action; resolving here as well would let a
+## networked client advance the turn on its own authority, which is the one thing the
+## client must never be able to do.
 func _on_end_turn() -> void:
-	if controller == null:
+	if controller == null or controller.is_networked():
 		return
 	var before := controller.galaxy.turn
 	var report := controller.end_turn()
@@ -239,22 +245,21 @@ func _on_end_turn() -> void:
 	_log_line("STARDATE %d -> %d" % [before + 1, controller.galaxy.turn + 1])
 
 
-func _on_orders_pressed() -> void:
-	var orders := controller.pending_orders()
-	if orders.is_empty():
-		status_message.emit("no orders staged")
-		return
-	var lines := PackedStringArray()
-	for o in orders:
-		lines.append(o.describe())
-	_log_line("STAGED: " + "; ".join(lines))
-
-
 func _on_system_picked(index: int) -> void:
 	controller.select_system(index)
 	var sys := controller.galaxy.system(index)
 	if sys != null:
 		_log_line("SELECTED %s" % sys.name)
+
+
+## A body was clicked. The map already selected it before emitting, so this is the log
+## line and nothing else -- the inspector redraws through `state_changed`.
+func _on_planet_picked(index: int) -> void:
+	var p := controller.galaxy.planet(index)
+	if p == null:
+		return
+	var name := p.name if p.name != "" else "P-%03d" % (p.index + 1)
+	_log_line("SELECTED %s" % name)
 
 
 func _on_refused(reason: String) -> void:
@@ -272,7 +277,7 @@ func _on_fleet_selected(fleet_id: int) -> void:
 func _on_order_mode_changed(on: bool) -> void:
 	map.set_order_mode(on)
 	status_message.emit(
-		"move order mode ON - click a star" if on else "move order mode OFF"
+		"move order mode ON - click a planet" if on else "move order mode OFF"
 	)
 
 
@@ -296,8 +301,15 @@ func _on_action_rejected(reason: String) -> void:
 
 ## Programmatic End-Turn path used by the automated GUI test. Goes through the button so
 ## the test exercises the same signal chain a click does.
+## Advance a single-player turn.
+##
+## The END TURN button is gone. A networked player commits by pressing READY, which ships
+## their staged orders with the flag; a single player has no lobby and therefore no READY,
+## so the turn is advanced from here. The map emits `end_turn_requested` on Space/Enter,
+## and this is the programmatic equivalent of that keypress -- the same path, not a
+## parallel one, so a bug in one is a bug in both.
 func press_end_turn() -> void:
-	top_bar.press_end_turn()
+	map.end_turn_requested.emit()
 
 
 ## Select a colony by planet index, as the macro panel's colony selector would.

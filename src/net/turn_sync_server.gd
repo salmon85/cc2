@@ -185,10 +185,23 @@ func apply_ready(peer_id: int, is_ready: bool) -> void:
 
 
 ## Push the current readiness tally to every seated client.
+##
+## The denominator is the number of *connected players*, not `total_slots`: a four-slot
+## server with two people in it is a two-player lobby, and the button that says so is the
+## one that stops a game looking broken while it waits for players who are never coming.
 func _broadcast_ready_count() -> void:
 	if lobby == null or not is_inside_tree():
 		return
-	rpc_lobby_ready_count.rpc(lobby.ready_count(), lobby.total_slots)
+	rpc_lobby_ready_count.rpc(lobby.ready_count(), lobby.player_count())
+
+
+## Public form of `_broadcast_ready_count`, for the disconnect path.
+##
+## A peer leaving has to re-send the tally, not just change the lobby: the count it left
+## behind is still on every connected client's button until something tells them otherwise,
+## so a departure would otherwise leave "Ready 2/2" showing with one player in the lobby.
+func broadcast_ready_count() -> void:
+	_broadcast_ready_count()
 
 
 ## Start the match if the lobby says everyone is ready.
@@ -229,7 +242,12 @@ func send_welcome(peer_id: int, assigned_slot: int) -> bool:
 	# Told on arrival, not only on the next toggle, so a client is never sitting on a
 	# button reading "Ready 0/2" while somebody else has already pressed theirs.
 	if lobby != null:
-		rpc_lobby_ready_count.rpc_id(peer_id, lobby.ready_count(), lobby.total_slots)
+		# Broadcast, not just to the newcomer. The denominator is the number of players
+		# connected, so the arrival changes it for *everyone* -- the players already in the
+		# lobby were told "Ready 1/1" and would otherwise keep waiting for an opponent who
+		# has in fact just turned up, which is the same dead-end as the seat-count version
+		# this replaced.
+		_broadcast_ready_count()
 	return true
 
 

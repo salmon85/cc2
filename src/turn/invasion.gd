@@ -188,47 +188,43 @@ static func _consume_transports(fleet: FleetState, losses: float) -> void:
 		fleet.active = false
 
 
-## Scan every contested system and attempt an invasion on each hostile colony.
+## Scan every contested planet and attempt an invasion on each hostile colony.
 ## Returns news lines.
+##
+## Contested means a fleet is *parked on the world*, not merely in the same system. That
+## distinction did not exist before: with one star, "somewhere in this system" spanned the
+## entire map, and a fleet on the far side of a 12000-parsec system would have landed on a
+## colony by being in the same room as it. Sitting on a planet is now the price of taking
+## it, which is what makes a fleet's final approach a decision.
 static func resolve_all(
 	galaxy: GalaxyState, defs: Node, db: Node, rng: RandomNumberGenerator
 ) -> PackedStringArray:
 	var lines := PackedStringArray()
-	var system_indices := PackedInt32Array()
-	for system in galaxy.systems:
-		system_indices.append(system.index)
-	system_indices.sort()
+	var planet_indices := PackedInt32Array()
+	for p in galaxy.planets:
+		planet_indices.append(p.index)
+	planet_indices.sort()
 
-	for system_index in system_indices:
-		var fleets := MovementStage.fleets_in_system(galaxy, system_index, -1)
-		if fleets.is_empty():
+	for planet_index in planet_indices:
+		var planet: PlanetState = galaxy.planet(planet_index)
+		if planet == null or not planet.colonized:
 			continue
-
-		var system: SystemState = galaxy.system(system_index)
-		if system == null:
-			continue
-
-		# A colony is contested when some fleet in this system opposes its owner. Note
-		# that an undefended colony is still worth taking: the absence of a defender is
-		# not a reason to skip the invasion.
-		for planet_index in system.planet_indices:
-			var planet: PlanetState = galaxy.planet(planet_index)
-			if planet == null or not planet.colonized:
+		# Note that an undefended colony is still worth taking: the absence of a defender
+		# is not a reason to skip the invasion.
+		for fleet in MovementStage.fleets_in_system(galaxy, planet_index, -1):
+			if not fleet.active or fleet.owner == planet.owner:
 				continue
-			for fleet in fleets:
-				if not fleet.active or fleet.owner == planet.owner:
-					continue
-				var attacker: FactionState = galaxy.faction(fleet.owner)
-				var defender: FactionState = galaxy.faction(planet.owner)
-				if attacker == null or defender == null:
-					continue
-				var outcome := invade(galaxy, fleet, planet, attacker, defender, defs, db, rng)
-				if outcome == null:
-					continue
-				if outcome.captured:
-					lines.append("%s captured planet %d from %s (%d batteries destroyed)" % [
-						attacker.name, planet.index, defender.name, outcome.batteries_destroyed])
-				else:
-					lines.append("%s repelled the assault on planet %d" % [
-						defender.name, planet.index])
+			var attacker: FactionState = galaxy.faction(fleet.owner)
+			var defender: FactionState = galaxy.faction(planet.owner)
+			if attacker == null or defender == null:
+				continue
+			var outcome := invade(galaxy, fleet, planet, attacker, defender, defs, db, rng)
+			if outcome == null:
+				continue
+			if outcome.captured:
+				lines.append("%s captured planet %d from %s (%d batteries destroyed)" % [
+					attacker.name, planet.index, defender.name, outcome.batteries_destroyed])
+			else:
+				lines.append("%s repelled the assault on planet %d" % [
+					defender.name, planet.index])
 	return lines

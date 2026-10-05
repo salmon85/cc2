@@ -16,7 +16,8 @@ var faction: int = -1
 ## Fleet the order applies to, or -1 for imperial orders.
 var fleet: int = -1
 
-## Target system index, or -1.
+## Target system index, or -1. Always -1 now that there is one system and fleets
+## travel between planets; kept on the wire so old orders still parse.
 var target_system: int = -1
 
 ## Target planet index, or -1.
@@ -36,12 +37,12 @@ var payload: Dictionary = {}
 
 
 ## Build an order. Static constructors keep call sites readable and type-safe.
-static func make_move_fleet(faction_id: int, fleet_id: int, target_system: int) -> Order:
+static func make_move_fleet(faction_id: int, fleet_id: int, target_planet: int) -> Order:
 	var o := Order.new()
 	o.type = 1  # MOVE_FLEET
 	o.faction = faction_id
 	o.fleet = fleet_id
-	o.target_system = target_system
+	o.target_planet = target_planet
 	return o
 
 
@@ -118,7 +119,7 @@ static func make_disband(faction_id: int, fleet_id: int) -> Order:
 ## Human-readable label, used by the resolver's rejection log and the UI.
 func describe() -> String:
 	match type:
-		1: return "Fleet %d of %s moves to system %d" % [fleet, _faction_tag(), target_system]
+		1: return "Fleet %d of %s moves to planet %d" % [fleet, _faction_tag(), target_planet]
 		2: return "Fleet %d besieges system %d" % [fleet, target_system]
 		3: return "Fleet %d colonises planet %d" % [fleet, target_planet]
 		4: return "Build %s at planet %d" % [payload.get("hull", "?"), target_planet]

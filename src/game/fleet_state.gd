@@ -8,7 +8,7 @@ var id: int = -1
 ## Owning faction.
 var owner: int = -1
 
-## System the fleet currently occupies, or -1 while in transit.
+## Planet the fleet currently occupies, or -1 while in transit.
 var system: int = -1
 
 ## Transit progress toward `destination`, in parsecs of the remaining distance.
@@ -97,6 +97,19 @@ func base_accuracy() -> float:
 	return weighted / total_count
 
 
+## Hull definitions store `base_speed` and `sensor_range` in the old galactic units --
+## parsecs per turn against a 120-parsec disk. The system is fifty times wider, so both
+## are scaled here, at the one point every consumer reads.
+##
+## Scaling in the accessor rather than in the `.tres` files is deliberate: the raw values
+## stay legible as "a scout is 5x a dreadnought", and no balance number has to be rewritten
+## when the map is resized again. The sensor figures matter especially -- `FowStage` takes
+## the *maximum* of this and `GameDB.FLEET_SENSOR_RANGE`, and `GameDB` is already scaled,
+## so an unscaled hull reading would quietly override it and shrink every sensor bubble back
+## to a single orbit ring.
+const HULL_SCALE := 50.0
+
+
 ## Slowest member hull sets the fleet speed, before drive research.
 func base_speed() -> float:
 	var slowest := INF
@@ -106,7 +119,7 @@ func base_speed() -> float:
 			slowest = minf(slowest, float(def.get("base_speed")))
 	if slowest == INF:
 		return 0.0
-	return slowest
+	return slowest * HULL_SCALE
 
 
 ## Best sensor range among the members, before research.
@@ -116,7 +129,7 @@ func base_sensor_range() -> float:
 		var def: Resource = _hulls.get(key, null) as Resource
 		if def != null:
 			best = maxf(best, float(def.get("sensor_range")))
-	return best
+	return best * HULL_SCALE
 
 
 ## Total bombardment strength. Zero means this fleet cannot lay siege to a planet.

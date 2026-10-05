@@ -131,16 +131,37 @@ func staged_orders() -> Array[Order]:
 	return staged.duplicate()
 
 
-## Tell the server this player is ready to begin.
+## Tell the server this player is ready to begin, and submit anything they staged.
 ##
 ## Returns false when the client is not in the tree or has no seat yet -- both of which
 ## mean the packet would go nowhere, and reporting success for a send that never left
 ## would leave the lobby waiting on a ready flag nobody can see.
+##
+## Raising the flag submits the staged orders with it. There is no separate commit control
+## any more: the END TURN button was removed and READY took its place, so a player who
+## staged orders and pressed READY meant "apply these". Sending only the flag left the
+## server holding an empty submission for that slot, which is indistinguishable from a
+## player who readied up with nothing to do -- their orders were silently dropped.
 func set_ready(is_ready: bool = true) -> bool:
 	if not is_inside_tree() or slot < 0:
 		return false
-	rpc_set_ready.rpc_id(1, is_ready)
-	_ready_flagged = is_ready
+	if not is_ready:
+		rpc_set_ready.rpc_id(1, false)
+		_ready_flagged = false
+		return true
+	if awaiting or galaxy == null:
+		return false
+	# Submit first: the resolution can arrive on the very next packet, and a flag raised
+	# ahead of an empty submission would let the server resolve this slot as a no-op.
+	var wire: Array = []
+	for o in staged:
+		wire.append(o.to_dict())
+	staged.clear()
+	awaiting = true
+	awaiting_resolution.emit(galaxy.turn)
+	rpc_submit_orders.rpc_id(1, galaxy.turn, wire)
+	rpc_set_ready.rpc_id(1, true)
+	_ready_flagged = true
 	return true
 
 

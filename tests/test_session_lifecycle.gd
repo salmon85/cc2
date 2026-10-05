@@ -268,11 +268,17 @@ func _test_ready_count() -> void:
 	tally.set_ready(11, true)
 	_t.eq(tally.ready_count(), 1,
 		"a flag on an unoccupied seat never reaches the tally")
-	_t.ok(not tally.everyone_ready(),
-		"and cannot satisfy the start gate either")
 	_t.eq(tally.ready_count(), 1,
 		"a departed player stops counting, however ready they were")
 	_t.ok(not tally.occupied_slots().has(0), "and their empire is no longer occupied")
+	# Peer 22 is the *only* person still in the room, and it is still readied up. The gate
+	# is "everyone present is ready", so a one-person table is a ready one-person table:
+	# the departed player's flag on a held seat has nothing to block. This is the same
+	# property that unblocked `--slots=4` with two players -- asserting the opposite here
+	# would pin the very deadlock this round removed.
+	_t.ok(tally.everyone_ready(),
+		"the start gate follows the people present, not the seats")
+	_t.eq(tally.player_count(), 1, "one player remains after the departure")
 
 	# An AI-managed empire is a seat nobody is playing, and must never be counted: a
 	# match cannot start because a computer took a player's place.
@@ -294,9 +300,15 @@ func _test_ready_count() -> void:
 	_t.eq(ai.ready_count(), 1,
 		"an AI-managed empire adds nothing, so the tally still reads one")
 	_t.ok(ai.is_ai_managed(1), "the empire really is AI-managed")
-	_t.ok(not ai.everyone_ready(),
-		"and the match cannot start on the strength of a seat nobody is playing")
-	_t.eq(ai.total_slots, 2, "the denominator stays the configured slot count")
+	# The AI seat is not a person, so it cannot *hold* the gate open -- but it also cannot
+	# hold it shut: with peer 1 connected and ready, the room is a ready one-person room.
+	# What must hold is the narrower property -- the AI is contributing nothing, and the
+	# match start came from the human, not from the seat the computer took over.
+	_t.ok(ai.everyone_ready(),
+		"an AI seat neither holds the gate open nor blocks it")
+	_t.eq(ai.turn_slots(), PackedInt32Array([0]),
+		"and the AI keeps its empire off the turn loop")
+	_t.eq(ai.total_slots, 2, "the total seat count is still what the server admits")
 
 
 # --- Networked scenario -----------------------------------------------------
@@ -331,6 +343,7 @@ var _survivor: TurnSyncClient = null
 var _survivor_sent: bool = false
 ## The survivor's empire, as the *server* assigned it.
 var _survivor_slot: int = -1
+var _survivor_net: NetworkManager = null
 var _midflight_checked: bool = false
 ## The turn number captured before the disconnect, so the resolution can be shown to have
 ## advanced exactly one turn from the one that was in flight.
@@ -471,7 +484,8 @@ func _process(_delta: float) -> bool:
 		_victim_net_index = 2
 		_victim_sync_index = 1
 		_dropped_slot = _server_net.slot_of(_nets[_victim_net_index].unique_id())
-		_survivor_slot = _server_net.slot_of(_nets[1].unique_id())
+		_survivor_net = _nets[1]
+		_survivor_slot = _server_net.slot_of(_survivor_net.unique_id())
 		_survivor = _client_syncs[0] as TurnSyncClient
 		_t.ok(_dropped_slot >= 0 and _survivor_slot >= 0,
 			"the server has seated both clients")
@@ -596,21 +610,25 @@ func _process(_delta: float) -> bool:
 			"the abandoned empire passed to the AI after its grace period")
 		_t.eq(_server_sync.active_slots(), PackedInt32Array([_survivor_slot]),
 			"and it still does not stall the turn loop")
-		# `everyone_ready()` is the *start* gate: it wants a full lobby of connected,
-		# ready players. An AI-managed empire is deliberately not one of them -- a match
-		# must never begin with a human-less seat pretending someone pressed ready. The
-		# match has already started, so what matters now is the narrower property: the AI
-		# seat is off the turn loop and the human seat is still on it.
-		_t.ok(not _lobby.everyone_ready(),
-			"the ready gate is still closed for a fresh match -- the AI seat is not a player")
+		# The start gate counts *connected* players, not seats. With one person left and
+		# their flag up, that one-person lobby is ready -- the whole point of the change
+		# that made a --slots=4 server with two players unblock. What must still hold is
+		# that the AI seat is not one of them: the gate is satisfied by the survivor, not
+		# by the abandoned empire the AI now holds.
+		# `set_ready` is keyed by peer id, not by slot: the lobby has no slot-addressed
+		# ready flag, and inventing one here would have tested a method that does not exist.
+		# Re-flagging is idempotent -- `set_ready` returns false when the stored flag is
+		# already the requested one, and says nothing about whether the lobby is ready.
+		# Asserting on its return value here would test flag bookkeeping, not the gate.
+		_lobby.set_ready(_survivor_net.unique_id(), true)
+		_t.ok(_lobby.everyone_ready(),
+			"a lobby of one connected ready player satisfies the start gate")
+		_t.eq(_lobby.player_count(), 1,
+			"and the gate counts the one player, not the four seats")
 		_t.ok(_lobby.turn_slots().has(_survivor_slot),
 			"the AI keeps its empire off the turn loop")
 		_stage = "delivery"
 		return false
-
-		_teardown()
-		_finish()
-		return true
 
 	if _stage == "delivery":
 		# The resolution is on the wire, and the client is the only thing left that has to
@@ -735,6 +753,12 @@ func _step_cli() -> bool:
 	if not _cli_server.lobby.started and _cli_frames < 400:
 		return false
 
+	if not _cli_settled():
+		if _cli_frames > 800:
+			_t.ok(false, "the turn resolution reached both clients")
+		else:
+			return false
+
 	_t.begin("two --client processes, two empires")
 	_t.eq(_cli_welcomed.size(), 2, "both --client processes were welcomed")
 	for i in _cli_welcomed.size():
@@ -745,6 +769,13 @@ func _step_cli() -> bool:
 	_t.ok(not _cli_server.lobby.everyone_ready() or _cli_server.lobby.started,
 		"and the ready gate is satisfied rather than bypassed")
 
+	# Read the server's turn at the moment the start broadcast was built. `_process`
+	# resolves turns as soon as the last player readies up, which can be the very frame
+	# the lobby latches -- so by the time this runs the server may already be on turn 2
+	# while the clients, whose turn-2 resolution is still in flight, are on turn 1. That
+	# is the transport working, not a desync: the assertion below waits for the clients to
+	# catch up instead of reading one instant of a race as a permanent disagreement.
+	var server_turn: int = _cli_server.server_galaxy.turn
 	var server_hash: int = _cli_server.server_galaxy.state_hash()
 	for i in _cli_clients.size():
 		var sync := _cli_sync_of(_cli_clients[i])
@@ -758,7 +789,7 @@ func _step_cli() -> bool:
 			continue
 		_t.eq(sync.galaxy.state_hash(), server_hash,
 			"client %d holds the server's galaxy, byte for byte" % i)
-		_t.eq(sync.galaxy.turn, _cli_server.server_galaxy.turn,
+		_t.eq(sync.galaxy.turn, server_turn,
 			"client %d is on the server's turn" % i)
 
 	# Two clients on two empires must not have been given the same one: overlapping slots
@@ -780,6 +811,23 @@ func _step_cli() -> bool:
 	_cli_server = null
 	_cli_clients.clear()
 	_finish()
+	return true
+
+
+## Whether every client has caught up with the server's turn.
+##
+## `App._process` resolves a turn as soon as the last player readies up -- the same frame
+## the lobby latches -- so the server broadcasts its first resolution while that packet is
+## still on the wire. A client a turn behind at that instant is *correctly* behind, not
+## desynced, and comparing hashes then would fail a working transport. This is polled
+## across frames rather than in a loop because ENet is pumped by the main loop: a tight
+## loop inside one frame would spin 400 times without a single packet arriving.
+func _cli_settled() -> bool:
+	for app_node in _cli_clients:
+		var s: TurnSyncClient = _cli_sync_of(app_node)
+		if s != null and s.galaxy != null \
+				and s.galaxy.turn < _cli_server.server_galaxy.turn:
+			return false
 	return true
 
 

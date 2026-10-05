@@ -138,23 +138,29 @@ func _selected_row() -> int:
 	return rows[0] if not rows.is_empty() else -1
 
 
+## Where a fleet is, as a short name. Fleets sit on planets now, so a fleet's location is
+## a world; `FowStage.survey_system` naming guarantees the label is either a real name or a
+## catalogue designation, never blank.
 func _caption(f: FleetState) -> String:
-	var sys: SystemState = null
-	if f.system >= 0:
-		sys = _controller.galaxy.system(f.system)
-	var where := sys.name if sys != null else "IN TRANSIT"
+	var here := _controller.galaxy.planet(f.system)
+	var where := _planet_name(here) if here != null else "IN TRANSIT"
 	if f.destination >= 0:
-		var dest := _controller.galaxy.system(f.destination)
+		var dest := _controller.galaxy.planet(f.destination)
 		if dest != null:
-			where = "-> %s" % dest.name
+			where = "-> %s" % _planet_name(dest)
 	return "%s  %-12s %d ships" % [f.name if f.name != "" else "F%03d" % f.id, where, f.ship_count()]
+
+
+## A planet's display name, falling back to its catalogue designation.
+func _planet_name(p: PlanetState) -> String:
+	return p.name if p.name != "" else "P-%03d" % (p.index + 1)
 
 
 func _refresh_detail() -> void:
 	var f := _controller.fleet()
 	if f == null:
 		_detail.text = "[color=#%s]NO FLEET SELECTED[/color]" % CC2Theme.WHITE_DIM.to_html(false)
-		_order_hint.text = "Select a fleet, then enable STAGE MOVE and click a star on the map."
+		_order_hint.text = "Select a fleet, then enable STAGE MOVE and click a planet on the map."
 		return
 
 	var lines := PackedStringArray()
@@ -174,11 +180,11 @@ func _refresh_detail() -> void:
 		lines.append(Format.field("CARGO FREE", Format.fixed(f.free_cargo(), 1)))
 
 	if f.destination >= 0:
-		var dest := _controller.galaxy.system(f.destination)
-		lines.append(Format.field("IN TRANSIT TO", dest.name if dest != null else "?"))
+		var dest := _controller.galaxy.planet(f.destination)
+		lines.append(Format.field("IN TRANSIT TO", _planet_name(dest) if dest != null else "?"))
 		lines.append("[color=#%s]  ordered - awaiting resolution[/color]" % CC2Theme.CYAN.to_html(false))
 	else:
-		_order_hint.text = "STAGE MOVE armed. Click a star on the map to queue the order."
+		_order_hint.text = "STAGE MOVE armed. Click a planet on the map to queue the order."
 	_detail.text = "\n".join(lines)
 
 

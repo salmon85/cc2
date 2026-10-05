@@ -37,15 +37,23 @@ func bind(controller: SessionController) -> void:
 	queue_redraw()
 
 
-## Galaxy radius used to scale the star field into the viewport. The generator lays
-## systems out in roughly [-R, R] on both axes; leaving generous margin stops edge stars
-## from being cut off at the default zoom.
-const WORLD_SIZE := 2200.0
+## Half-extent of the drawn field, in parsecs. Mirrors `GalaxyGenerator.GALAXY_RADIUS`:
+## every planet sits inside this disk, so this is the span the grid has to cover.
+const WORLD_SIZE := GalaxyGenerator.GALAXY_RADIUS * 1.1
 
-## Glyph for a star the player has not surveyed: a hollow ring, deliberately dimmer and
-## flatter than a known star so known space still draws the eye first.
+## Grid pitch. The field is fifty times wider than the old galactic disk, so the old
+## 200-unit pitch would draw 60 lines across the viewport and read as a solid mesh.
+const GRID_STEP := 1000.0
+
+## Glyph for a body the player has not surveyed: a hollow ring, deliberately dimmer and
+## flatter than a known world so known space still draws the eye first.
 const UNKNOWN_MARKER_RADIUS := 7.0
 const UNKNOWN_MARKER_COLOUR := Color(0.42, 0.55, 0.50, 0.55)
+
+## Radius of a planet's disc, and of the star's. A star is drawn larger than any planet so
+## the centre of the system reads as the centre.
+const STAR_RADIUS := 13.0
+const PLANET_RADIUS := 5.5
 
 
 func _draw() -> void:
@@ -54,7 +62,7 @@ func _draw() -> void:
 	var galaxy := _controller.galaxy
 
 	_draw_field()
-	_draw_lanes(galaxy)
+	_draw_rings()
 	_draw_systems(galaxy)
 	_draw_fleets(galaxy)
 	_draw_order_line(galaxy)
@@ -63,114 +71,125 @@ func _draw() -> void:
 ## Faint grid so a panned map still reads as a navigable surface rather than void.
 func _draw_field() -> void:
 	var half := WORLD_SIZE * 0.5
-	var step := 200.0
 	var grid := Color(0.05, 0.11, 0.08, 0.35)
 	var x := -half
 	while x <= half:
 		draw_line(Vector2(x, -half), Vector2(x, half), grid, 1.0)
-		x += step
+		x += GRID_STEP
 	var y := -half
 	while y <= half:
 		draw_line(Vector2(-half, y), Vector2(half, y), grid, 1.0)
-		y += step
-	# Crosshair at the galactic centre.
+		y += GRID_STEP
+	# Crosshair and a guide ring at the galactic centre, sized to the system rather than
+	# to the old 120-unit disk so they still sit inside the field.
 	draw_line(Vector2(-18.0, 0.0), Vector2(18.0, 0.0), CC2Theme.CYAN_DIM, 1.0)
 	draw_line(Vector2(0.0, -18.0), Vector2(0.0, 18.0), CC2Theme.CYAN_DIM, 1.0)
-	draw_arc(Vector2.ZERO, 120.0, 0.0, TAU, 48, Color(0.05, 0.11, 0.08, 0.5), 1.0)
+	draw_arc(Vector2.ZERO, 1200.0, 0.0, TAU, 64, Color(0.05, 0.11, 0.08, 0.5), 1.0)
 
 
-## Known warp lanes, drawn under the stars so the network reads as background.
-func _draw_lanes(galaxy: GalaxyState) -> void:
-	var colour := Color(0.13, 0.34, 0.24, 0.55)
-	var hidden := Color(0.05, 0.09, 0.08, 0.35)
-	for sys in galaxy.systems:
-		if not _visible(sys.index):
-			draw_dashed_line(sys.position, sys.position, hidden, 1.0)
-			continue
-		for other_index in sys.warp_lanes:
-			# Lanes are stored on both ends; only draw from the lower index so each
-			# connection is painted once rather than twice at full opacity.
-			if other_index <= sys.index:
-				continue
-			var other := galaxy.system(other_index)
-			if other == null or not _visible(other_index):
-				continue
-			draw_line(sys.position, other.position, colour, 1.0)
+## Orbit rings, drawn under everything. Each planet gets its own ring, and a faint circle
+## per ring is what makes the layout read as orbits rather than as scattered dots.
+func _draw_rings() -> void:
+	var ring := Color(0.07, 0.17, 0.12, 0.5)
+	for i in 64:
+		draw_arc(Vector2.ZERO, float(i) * WORLD_SIZE * 0.5 / 64.0, 0.0, TAU, 48, ring, 1.0)
 
 
-## Stars: spectral-class coloured discs, owner rings, labels.
+## The star, the planets, owner rings and labels.
 func _draw_systems(galaxy: GalaxyState) -> void:
 	for sys in galaxy.systems:
 		var seen := _visible(sys.index)
 		var pos := sys.position
-
-		# Unknown systems are shown as an anonymous hollow marker so unexplored space is
-		# still navigable by shape, without leaking spectral class or ownership.
-		#
-		# The radius and alpha here are deliberately generous. Sensor ranges are a couple of
-		# parsecs against a galaxy spanning hundreds, so nearly every system starts out
-		# unsurveyed; a hairline ring left the map reading as an empty black field. These
-		# markers sit clearly behind known stars in brightness and carry no class colour,
-		# so the fog-of-war rule still holds -- you can see that a star is there, not what
-		# it is.
 		if not seen:
-			draw_arc(pos, UNKNOWN_MARKER_RADIUS, 0.0, TAU, 16, UNKNOWN_MARKER_COLOUR, 1.5)
+			draw_arc(pos, STAR_RADIUS, 0.0, TAU, 16, UNKNOWN_MARKER_COLOUR, 1.5)
 			continue
-
-		var colour := CC2Theme.star_color(sys.star_class)
-		# Soft halo, then the core. Two discs read as a star far better than one at this
-		# zoom without needing a texture asset.
-		draw_circle(pos, 9.0, Color(colour.r, colour.g, colour.b, 0.16))
-		draw_circle(pos, 4.5, colour)
-
-		# Ownership is only shown where the player has a legitimate reason to know it.
-		#
-		# Fog of war hides *unexplored* space; this hides what has been explored but is
-		# somebody else's. Seeing every opponent's territory outlined across the whole map
-		# gives away fleet deployments and border strength at a glance, which is most of
-		# what the scouting layer exists to withhold.
-		if _ownership_known(galaxy, sys):
-			var owner_colour := CC2Theme.faction_color(sys.owner)
-			draw_arc(pos, 8.0, 0.0, TAU, 20, owner_colour, 1.5)
-
-		if sys.index == _controller.selected_system:
-			draw_arc(pos, 14.0, 0.0, TAU, 24, CC2Theme.PHOSPHOR, 1.5)
-		elif sys.index == _hover:
-			draw_arc(pos, 12.0, 0.0, TAU, 20, CC2Theme.WHITE_DIM, 1.0)
-
-		# Label at a fixed galaxy-space size: it stays legible when zoomed in and stops
-		# cluttering when zoomed out.
-		if _label_worth_drawing(galaxy, sys):
-			var font := ThemeDB.fallback_font
-			var label := sys.name if sys.name != "" else "SYS %d" % sys.index
-			var size := font.get_string_size(
-				label, HORIZONTAL_ALIGNMENT_LEFT, -1, CC2Theme.FONT_SMALL
-			)
-			var at := pos + Vector2(11.0, -8.0)
-			# Dark plate behind the text: the map has no guaranteed background contrast
-			# where a label crosses a bright star or a lane.
-			draw_rect(
-				Rect2(at - Vector2(2.0, 2.0), size + Vector2(4.0, 4.0)),
-				Color(0.0, 0.0, 0.0, 0.65)
-			)
-			draw_string(
-				font, at, label, HORIZONTAL_ALIGNMENT_LEFT, -1, CC2Theme.FONT_SMALL,
-				CC2Theme.WHITE_DIM
-			)
+		_draw_star(sys)
+		for p_index in sys.planet_indices:
+			var p := galaxy.planet(p_index)
+			if p != null:
+				_draw_planet(galaxy, p)
 
 
-## Names get expensive to read once a hundred systems are on screen, so only label the
-## ones the player can act on or is looking at.
-func _label_worth_drawing(galaxy: GalaxyState, sys: SystemState) -> bool:
+func _draw_star(sys: SystemState) -> void:
+	var colour := CC2Theme.star_color(sys.star_class)
+	# Soft halo, then the core. Two discs read as a star far better than one at this
+	# zoom without needing a texture asset.
+	draw_circle(sys.position, STAR_RADIUS, Color(colour.r, colour.g, colour.b, 0.16))
+	draw_circle(sys.position, STAR_RADIUS * 0.5, colour)
+	if _ownership_known(_controller.galaxy, sys):
+		var owner_colour := CC2Theme.faction_color(sys.owner)
+		draw_arc(sys.position, STAR_RADIUS + 3.0, 0.0, TAU, 24, owner_colour, 1.5)
 	if sys.index == _controller.selected_system:
+		draw_arc(sys.position, STAR_RADIUS + 6.0, 0.0, TAU, 24, CC2Theme.PHOSPHOR, 1.5)
+
+
+## One planet.
+##
+## The fog rule is unchanged from when stars were the only markers: unless the player owns
+## this world or has surveyed it, it draws as a neutral hollow ring with no class colour,
+## no owner ring and no colony tick. That is the same bar the star markers already met, so
+## making planets the clickable thing did not loosen it.
+func _draw_planet(galaxy: GalaxyState, p: PlanetState) -> void:
+	var known := p.surveyed or _ownership_known(galaxy, _system_of(galaxy, p))
+	var pos := p.position
+	if not known:
+		draw_arc(pos, UNKNOWN_MARKER_RADIUS, 0.0, TAU, 16, UNKNOWN_MARKER_COLOUR, 1.5)
+		return
+
+	var colour := CC2Theme.planet_color(p.type_id) if p.type_id != &"" else CC2Theme.WHITE_DIM
+	draw_circle(pos, PLANET_RADIUS, Color(colour.r, colour.g, colour.b, 0.18))
+	draw_circle(pos, PLANET_RADIUS * 0.55, colour)
+
+	# An owned world gets a filled owner ring and a colony tick, because "is that mine" is
+	# the one question the map has to answer without being asked.
+	if p.owner == _controller.player_id and p.colonized:
+		draw_arc(pos, PLANET_RADIUS + 2.5, 0.0, TAU, 18, CC2Theme.faction_color(p.owner), 1.5)
+		draw_circle(pos, PLANET_RADIUS * 0.24, CC2Theme.faction_color(p.owner))
+	elif _ownership_known(galaxy, _system_of(galaxy, p)) and p.colonized:
+		# Somebody else's colony: a thin ring, no fill, so it is visible without shouting.
+		draw_arc(pos, PLANET_RADIUS + 2.5, 0.0, TAU, 18, CC2Theme.faction_color(p.owner), 1.0)
+
+	if p.index == _controller.selected_planet:
+		draw_arc(pos, PLANET_RADIUS + 6.0, 0.0, TAU, 20, CC2Theme.PHOSPHOR, 1.5)
+	elif p.index == _hover:
+		draw_arc(pos, PLANET_RADIUS + 5.0, 0.0, TAU, 20, CC2Theme.WHITE_DIM, 1.0)
+
+	if _label_worth_drawing(galaxy, p):
+		var font := ThemeDB.fallback_font
+		var label := planet_label(p)
+		# No backing plate. The dark rectangle that used to sit behind this text was
+		# drawn from the string's measured size offset by a fixed 2px, which put it
+		# beside the label rather than under it -- a black box floating to the right of
+		# every named marker. It existed to guarantee contrast over a bright marker,
+		# which is not a problem at this font size on the dark map field.
+		draw_string(
+			font, pos + Vector2(9.0, -6.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1,
+			CC2Theme.FONT_TINY, CC2Theme.WHITE_DIM
+		)
+
+
+## Which system a planet orbits in, or -1.
+func _system_of(galaxy: GalaxyState, p: PlanetState) -> SystemState:
+	for sys in galaxy.systems:
+		if sys.planet_indices.has(p.index):
+			return sys
+	return null
+
+
+## A planet's display name. Falls back to the catalogue designation, which is unique by
+## construction, so an unnamed body is still identifiable rather than a row of blanks.
+func planet_label(p: PlanetState) -> String:
+	if p.name != "":
+		return p.name
+	return "P-%d" % (p.index + 1)
+
+
+## Names get expensive to read once a hundred bodies are on screen, so only label the
+## ones the player can act on or is looking at.
+func _label_worth_drawing(galaxy: GalaxyState, p: PlanetState) -> bool:
+	if p.index == _controller.selected_planet:
 		return true
-	if sys.owner == _controller.player_id:
-		return true
-	for p_index in sys.planet_indices:
-		var p := galaxy.planet(p_index)
-		if p != null and p.owner == _controller.player_id and p.colonized:
-			return true
-	return false
+	return p.owner == _controller.player_id
 
 
 ## Fleet markers. Travelling fleets are drawn at their interpolated position with a
@@ -207,7 +226,7 @@ func _draw_fleets(galaxy: GalaxyState) -> void:
 			draw_polyline(pts + PackedVector2Array([pts[0]]), colour, 1.0)
 
 		if f.destination >= 0:
-			var dest := galaxy.system(f.destination)
+			var dest := galaxy.planet(f.destination)
 			if dest != null:
 				# Dashed line to the target plus a small arrowhead showing direction.
 				draw_dashed_line(here, dest.position, Color(colour.r, colour.g, colour.b, 0.7), 1.0)
@@ -236,10 +255,10 @@ func _draw_order_line(galaxy: GalaxyState) -> void:
 	var f := _controller.fleet()
 	if f == null or f.destination < 0:
 		return
-	var dest := galaxy.system(f.destination)
+	var dest := galaxy.planet(f.destination)
 	if dest == null:
 		return
-	var origin := galaxy.system(f.system)
+	var origin := galaxy.planet(f.system)
 	if origin == null:
 		return
 	var colour := CC2Theme.CYAN
@@ -250,27 +269,27 @@ func _draw_order_line(galaxy: GalaxyState) -> void:
 	draw_colored_polygon(PackedVector2Array([tip + dir * 9.0, tip + perp, tip - perp]), colour)
 
 
-## Interpolated map position of a fleet, which may be between systems.
+## Interpolated map position of a fleet, which may be between planets.
 func _fleet_position(galaxy: GalaxyState, f: FleetState) -> Vector2:
-	var here := galaxy.system(f.system)
+	var here := galaxy.planet(f.system)
 	if here == null:
 		return Vector2.ZERO
 	if f.destination < 0:
 		return here.position
-	var dest := galaxy.system(f.destination)
+	var dest := galaxy.planet(f.destination)
 	if dest == null:
 		return here.position
 	return here.position.lerp(dest.position, clampf(_travel_fraction(galaxy, f), 0.0, 1.0))
 
 
 ## How far along its journey a fleet is. `travelled` accumulates distance, and the stage
-## derives the leg length from the same `distance_to` the movement code uses.
+## derives the leg length from the same `orbit_distance` the movement code uses.
 func _travel_fraction(galaxy: GalaxyState, f: FleetState) -> float:
-	var here := galaxy.system(f.system)
-	var dest := galaxy.system(f.destination)
+	var here := galaxy.planet(f.system)
+	var dest := galaxy.planet(f.destination)
 	if here == null or dest == null:
 		return 0.0
-	var leg := here.distance_to(dest)
+	var leg := MovementStage.orbit_distance(here, dest)
 	if leg <= 0.0:
 		return 1.0
 	return clampf(f.travelled / leg, 0.0, 1.0)
@@ -278,13 +297,24 @@ func _travel_fraction(galaxy: GalaxyState, f: FleetState) -> float:
 
 ## Whether a fleet the player does not own is on the map at all.
 ##
-## An enemy fleet parked in a system is spotted by that system's sensor sweep, and one
-## under way is spotted only while it is physically inside a system the player can see --
-## between two stars it belongs to nobody's sensors, so it is not drawn there either.
+## An enemy fleet parked on a world is spotted by that world's sensor sweep, and one
+## under way is spotted only while it is physically inside an orbit the player can see --
+## between two planets it belongs to nobody's sensors, so it is not drawn there either.
 func _fleet_visible(galaxy: GalaxyState, f: FleetState) -> bool:
-	if f.system >= 0 and _visible(f.system):
+	if f.system >= 0 and _planet_visible(galaxy, f.system):
 		return true
-	return f.destination >= 0 and _visible(f.destination)
+	return f.destination >= 0 and _planet_visible(galaxy, f.destination)
+
+
+## Whether the player can see the world a fleet is sitting on.
+func _planet_visible(galaxy: GalaxyState, planet_index: int) -> bool:
+	var p := galaxy.planet(planet_index)
+	if p == null:
+		return false
+	if p.surveyed:
+		return true
+	var sys := _system_of(galaxy, p)
+	return sys != null and _visible(sys.index)
 
 
 ## Whether this player is entitled to see who owns `sys`.
@@ -303,15 +333,27 @@ func _visible(index: int) -> bool:
 	return FowStage.can_see(_controller.galaxy, _controller.player_id, index)
 
 
-## Nearest system to a point in galaxy coordinates, within `radius`.
+## Nearest body -- planet first, then the star -- to a point in galaxy coordinates.
 ##
-## Returns -1 when nothing is close enough. Radius is in galaxy units so the pick feels the
-## same at every zoom level once the camera transform is undone by the caller.
+## Planets are checked first because they are what the player clicks now, and a click near
+## the star is more likely to mean the world next to it than the star itself. Returns -1
+## when nothing is close enough. Radius is in galaxy units so the pick feels the same at
+## every zoom level once the camera transform is undone by the caller.
 func pick(galaxy_pos: Vector2, radius: float = 18.0) -> int:
 	if _controller == null or _controller.galaxy == null:
 		return -1
 	var best := -1
 	var best_dist := radius
+	for sys in _controller.galaxy.systems:
+		for p_index in sys.planet_indices:
+			var p := _controller.galaxy.planet(p_index)
+			if p == null:
+				continue
+			var d := p.position.distance_to(galaxy_pos)
+			if d < best_dist:
+				best_dist = d
+				best = p.index
+	# The star is the fallback: only wins when no planet is inside the radius.
 	for sys in _controller.galaxy.systems:
 		var d := sys.position.distance_to(galaxy_pos)
 		if d < best_dist:

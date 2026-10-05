@@ -28,9 +28,9 @@ cd /home/salmon/cc2
 Expected output:
 
 ```
-[cc2] launch: DEDICATED_SERVER ip=0.0.0.0 port=7777 seed=42 systems=50 factions=2 slots=2 (no warnings)
+[cc2] launch: DEDICATED_SERVER ip=0.0.0.0 port=7777 seed=42 planets=50 factions=2 slots=2 (no warnings)
 [cc2] session: DedicatedServer
-[cc2] dedicated server ready: 0.0.0.0:7777, 2 slots, seed 42, 50 systems, stardate 1
+[cc2] dedicated server ready: 0.0.0.0:7777, 2 slots, seed 42, 50 planets, stardate 1
 ```
 
 ```bash
@@ -46,7 +46,7 @@ Each client should print:
 ```
 [cc2] joining 127.0.0.1:7777 -- waiting for the opening state
 [cc2] connected; handshake in progress
-[cc2] joined as empire 0: seed 42, 50 systems, stardate 1
+[cc2] joined as empire 0: seed 42, 50 planets, stardate 1
 ```
 
 …and the server should log a seat per client:
@@ -56,10 +56,11 @@ Each client should print:
 [cc2] peer 368699998 joined as empire 1
 ```
 
-> **The match does not start yet.** A game waits for every empire `--slots`
-> admits to be connected *and* ready. With `--slots=2` you now have two
-> windows, and both must press **READY** in the top bar before turn 1 exists.
-> Each button reads `Ready n/2`, so you can see who is still holding things up.
+> **The match does not start yet.** A game waits for every *connected* player
+> to be ready — not for every seat `--slots` admits to fill. A `--slots=4` server
+> with two people in it shows `Ready 0/2` and starts as soon as both press **READY**;
+> the two empty seats are not a reason to wait for people who are never coming. If
+> someone drops out mid-game the count shrinks to the players who are still there.
 > The server prints `[cc2] match started` when the gate opens. Headless
 > clients pass `--ready` instead of pressing anything — see
 > [The lobby](#the-lobby).
@@ -105,17 +106,17 @@ loopback authority, so offline and networked play run the same turn resolution.
 |---|---|---|
 | `--server` | — | Required for a dedicated server. |
 | `--port=<int>` | `7777` | 1–65535. Server **binds** this. |
-| `--slots=<int>` | `2` | 1–8, clamped. Empire slots the server admits. |
+| `--slots=<int>` | `2` | 1–8, clamped. Empire slots the server admits. Seats are capacity, not a quota: the ready gate counts players who joined. |
 | `--seed=<int>` | random | Integer, **or any string** — `aurora-7` is hashed to a reproducible seed. |
-| `--systems=<int>` | `50` | 30–100, clamped. Star systems generated. |
+| `--systems=<int>` | `50` | 30–100, clamped. **Planets** in the single system. |
 | `--factions=<int>` | `2` | 1–8, clamped. Total empires. Raised to `--slots` if not given explicitly. |
 
 A healthy startup prints:
 
 ```
-[cc2] launch: DEDICATED_SERVER ip=0.0.0.0 port=7777 seed=42 systems=50 factions=2 slots=3 (no warnings)
+[cc2] launch: DEDICATED_SERVER ip=0.0.0.0 port=7777 seed=42 planets=50 factions=2 slots=3 (no warnings)
 [cc2] session: DedicatedServer
-[cc2] dedicated server ready: 0.0.0.0:7777, 3 slots, seed 42, 50 systems, stardate 1
+[cc2] dedicated server ready: 0.0.0.0:7777, 3 slots, seed 42, 50 planets, stardate 1
 ```
 
 To confirm it is listening:
@@ -127,6 +128,25 @@ ss -ulnp | grep 7777     # Linux
 The server binds `0.0.0.0`, so it accepts connections from other machines. Pass
 `--ip=` only if you need to see it echoed in the log; it does not change the bind.
 
+### The map: one system, many planets
+
+The game is played inside a **single star system**. `--systems=N` is the number of
+*planets* orbiting that star (30–100, clamped), not the number of separate star
+systems; the flag never changed, but what it counts did. There are no warp lanes —
+movement is a straight line between two worlds.
+
+- The **seed** governs the system: the star's class and name, every planet's type,
+  position on its orbit ring, and reserves. The same seed always lays out the same
+  system.
+- The **starting planet** is drawn fresh for each game, from a stream separate from
+  the layout. Two games on the same seed are the same system with different
+  starting positions — nobody gets handed the same homeworld twice.
+- Every empire gets a distinct, colonisable world, so an eight-player game is eight
+  empires in one neighbourhood rather than eight private corners of a galaxy.
+
+Sensors and fleet speed are scaled to the 12,000-parsec system, so a scout crosses it
+in tens of turns rather than hundreds.
+
 ### `--slots` vs `--factions`
 
 Easy to confuse, and they mean different things:
@@ -135,7 +155,7 @@ Easy to confuse, and they mean different things:
 - `--factions=N` — **total** factions in the galaxy, including AI.
 
 `--slots=2 --factions=2` is two humans and no AI. `--slots=2 --factions=4` is two
-humans plus two AI factions competing for the same systems.
+humans plus two AI factions competing for the same worlds.
 
 **`--slots` implies a faction floor.** An empire *is* a faction, so a slot with no
 faction behind it seats a player in a game they cannot play. When you give `--slots`

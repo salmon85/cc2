@@ -467,18 +467,28 @@ func _step_ready_sync() -> void:
 		_t.begin("lobby ready count reaches every peer")
 		_t.eq(seated, 2, "both clients hold a seat")
 
-		# The late-joiner path: `send_welcome` tells the arriving client the tally at once,
-		# so nobody sits on a stale "Ready 0/2" while the other player has already pressed.
+		# The late-joiner path: the arrival is broadcast to everyone, so nobody sits on a
+		# stale tally. The first client was welcomed when it was alone and recorded
+		# "Ready 0/1"; it must have been re-told "0/2" when the second one turned up, or
+		# the denominator is wrong on exactly the screen that gates the turn.
 		for sync in harness.client_syncs:
 			var cs := sync as TurnSyncClient
 			_t.ok(_rs_has_tally_for(cs), "a joining client is sent the tally on arrival",
 				"client %d recorded %s" % [cs.slot, str(_rs_tallies)])
+			_t.eq(cs.total_slots, 2,
+				"a client already seated is re-told the grown player count")
 
 		# Nobody is ready yet.
+		#
+		# The denominator is the number of *connected* players, not `total_slots`. A
+		# --slots=4 server with two people in it used to block forever, because the
+		# button insisted on four. Here both clients are seated, so the denominator is
+		# 2 -- and the seat count the server was opened with is larger than that, which
+		# is the whole point.
 		for sync in harness.client_syncs:
 			var cs := sync as TurnSyncClient
 			_t.eq(cs.ready_count, 0, "the tally starts at zero ready")
-			_t.eq(cs.total_slots, 2, "the tally carries the total slot count")
+			_t.eq(cs.total_slots, 2, "the tally counts the players who joined, not the seats")
 
 		_rs_tallies.clear()
 		var first := harness.client_syncs[0] as TurnSyncClient
@@ -501,7 +511,8 @@ func _step_ready_sync() -> void:
 			if _rs_has_tally_for(cs):
 				seen_by_each += 1
 			_t.eq(cs.ready_count, 1, "the client shows one player ready")
-			_t.eq(cs.total_slots, 2, "and still two slots")
+			_t.eq(cs.total_slots, 2,
+				"and still two -- the denominator is who is playing, not the seat count")
 
 		_t.ok(harness.server_sync.lobby.ready_count() == 1,
 			"the server agrees one player is ready")
@@ -518,9 +529,14 @@ func _step_ready_sync() -> void:
 
 
 ## Whether the server broadcasts the readiness tally instead of calling it locally.
+##
+## The denominator is the *connected* player count, not `total_slots`: a --slots=4 server
+## with two people in it is a two-player lobby, and the button that says "Ready 1/2" is
+## the one that lets the game start. A tally against the seat count blocks the turn
+## forever while the player waits for people who were never coming.
 func _server_broadcasts_ready_count() -> bool:
 	var src := FileAccess.get_file_as_string("res://src/net/turn_sync_server.gd")
-	return src.contains("rpc_lobby_ready_count.rpc(lobby.ready_count(), lobby.total_slots)")
+	return src.contains("rpc_lobby_ready_count.rpc(lobby.ready_count(), lobby.player_count())")
 
 
 func _rs_has_tally_for(cs: TurnSyncClient) -> bool:

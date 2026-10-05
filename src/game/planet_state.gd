@@ -12,7 +12,12 @@ var index: int = -1
 ## `PlanetTypeData.id` this body was generated as.
 var type_id: StringName = &"terrestrial"
 
-## Orbital slot within the system (0..5), purely for display ordering.
+## Display name, e.g. "Verdania". Empty means "use the catalogue designation", which is
+## what an old save or a hand-built test body gets.
+var name: String = ""
+
+## Orbital ring within the system, purely for display ordering. Bodies used to be capped at
+## six per system; there is one system now, so this is the ring index for any planet count.
 var orbit: int = 0
 
 ## Owning faction, or -1 when unclaimed.
@@ -111,12 +116,23 @@ func is_colonizable() -> bool:
 	return max_population() > 0.0
 
 
+## Where this body sits on the map, in system-space units.
+##
+## New in the single-system model: planets used to be drawn only as rows in a list and
+## took their position from the system they orbited. They are the primary map objects now,
+## so each one carries its own coordinate — laid out by the generator along a concentric
+## orbit ring and rendered as a clickable marker.
+var position: Vector2 = Vector2.ZERO
+
+
 ## Serialise to a plain dictionary for saves and network replication.
 func to_dict() -> Dictionary:
 	return {
 		"index": index,
 		"type_id": String(type_id),
+		"name": name,
 		"orbit": orbit,
+		"position": [position.x, position.y],
 		"owner": owner,
 		"colonized": colonized,
 		"population": population,
@@ -141,7 +157,14 @@ func from_dict(data: Dictionary) -> bool:
 		return false
 	index = int(data["index"])
 	type_id = StringName(str(data["type_id"]))
+	name = str(data.get("name", ""))
 	orbit = int(data.get("orbit", 0))
+	# Absent in saves written before planets became map objects. Those bodies load at the
+	# origin rather than failing: a galaxy is still playable, every planet is simply drawn
+	# on top of the star until the next generation.
+	var pos: Array = data.get("position", []) as Array
+	if pos.size() == 2:
+		position = Vector2(float(pos[0]), float(pos[1]))
 	owner = int(data.get("owner", -1))
 	colonized = bool(data.get("colonized", false))
 	population = float(data.get("population", 0.0))
@@ -176,8 +199,13 @@ static func _coerce_ship_queue(raw: Array) -> Array:
 ## (which retypes every key to `String`) would otherwise hash an identical planet
 ## differently from the in-memory original.
 func fingerprint() -> String:
-	return "%d:%s:%d:%d:%s:%.4f:%s:%.2f:%.2f:%.2f:%.4f:%s:%.4f:%.4f:%d" % [
-		index, String(type_id), orbit, owner, str(colonized), population,
+	# `position` is part of the hash: planets are placed on distinct orbit rings, and two
+	# layouts that differ only in where a body sits are different games. Leaving it out
+	# would let a regression reorder the whole system without a single determinism test
+	# noticing.
+	return "%d:%s:%s:%d:%.3f,%.3f:%d:%s:%.4f:%s:%.2f:%.2f:%.2f:%.4f:%s:%.4f:%.4f:%d" % [
+		index, String(type_id), name, orbit, position.x, position.y,
+		owner, str(colonized), population,
 		_sorted_keys(structures), reserve_metals, reserve_rare, reserve_energy,
 		terraform_progress, _sorted_keys(building_queue), shipyard_progress,
 		food_stock, build_turns_remaining,

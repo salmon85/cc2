@@ -89,15 +89,25 @@ func validate() -> PackedStringArray:
 
 
 ## Maximum speed cap imposed by the hull's role, before drive research.
+##
+## These are parsecs per turn, and the system is 12000 parsecs across, so every cap is
+## fifty times the old galactic value. This matters more than it looks: `fleet_speed` clamps
+## to the role cap, so leaving a scout capped at 12 parsecs against a 6000-parsec orbit means
+## the fastest ship in the game takes five hundred turns to cross the map and the whole
+## fleet-movement layer silently stops working.
+const SPEED_SCALE := 50.0
+
+
 static func role_speed_cap(role: int) -> float:
+	var base: float = 3.0
 	match role:
-		0: return 12.0  # Scout: the fastest thing in the game.
-		1: return 2.0   # Colony ship: crawl.
-		2: return 3.0   # Transport
-		3: return 5.0   # Corvette
-		4: return 3.5   # Cruiser
-		5: return 2.5   # Dreadnought
-	return 3.0
+		0: base = 12.0  # Scout: the fastest thing in the game.
+		1: base = 2.0   # Colony ship: crawl.
+		2: base = 3.0   # Transport
+		3: base = 5.0   # Corvette
+		4: base = 3.5   # Cruiser
+		5: base = 2.5   # Dreadnought
+	return base * SPEED_SCALE
 
 
 ## True when this hull may receive the given order type.

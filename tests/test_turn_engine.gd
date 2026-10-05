@@ -76,7 +76,7 @@ func _galaxy(seed_value: int, systems: int = 40, factions: int = 3) -> GalaxySta
 	return GalaxyGenerator.generate(_defs, r, systems, factions, _db)
 
 
-## Give `faction_id` a fleet at `system_index`, parked.
+## Give `faction_id` a fleet parked on `planet_index`.
 func _place_fleet(
 	g: GalaxyState, faction_id: int, system_index: int, ships: Dictionary
 ) -> FleetState:
@@ -109,6 +109,19 @@ func _colonize(g: GalaxyState, faction_id: int, planet_index: int) -> PlanetStat
 	return p
 
 
+## Index of a planet nobody owns, or -1.
+##
+## With one system holding every body, `systems[0].planet_indices[0]` used to name a fresh
+## world. It no longer does: planet 0 is whichever homeworld the generator drew, and
+## colonising it silently re-owns a populated planet at its population cap.
+func _unowned_planet(g: GalaxyState, skip: int = 0) -> int:
+	for i in range(skip, g.planets.size()):
+		var p := g.planet(i)
+		if p != null and p.owner < 0 and not p.colonized:
+			return i
+	return -1
+
+
 func _system_of_planet(g: GalaxyState, planet_index: int) -> int:
 	for s in g.systems:
 		if s.planet_indices.has(planet_index):
@@ -123,7 +136,8 @@ func _test_order_roundtrip() -> void:
 
 	var o := Order.make_move_fleet(0, 7, 12)
 	sup.ok(o.type == Enums.OrderType.MOVE_FLEET, "move order has MOVE_FLEET type")
-	sup.eq(o.target_system, 12, "move order keeps its target system")
+	sup.eq(o.target_planet, 12, "move order keeps its target planet")
+	sup.eq(o.target_system, -1, "a move order names no system")
 	sup.ok(not o.describe().is_empty(), "move order describes itself")
 
 	var back := Order.from_dict(o.to_dict())
@@ -131,7 +145,7 @@ func _test_order_roundtrip() -> void:
 	sup.eq(back.type, o.type, "type survives the round-trip")
 	sup.eq(back.faction, o.faction, "faction survives the round-trip")
 	sup.eq(back.fleet, o.fleet, "fleet survives the round-trip")
-	sup.eq(back.target_system, o.target_system, "target survives the round-trip")
+	sup.eq(back.target_planet, o.target_planet, "target survives the round-trip")
 	sup.eq(back.fingerprint(), o.fingerprint(), "fingerprint survives the round-trip")
 
 	sup.expect_guard("from_dict rejects a payload with no type", func() -> Variant:
@@ -218,31 +232,55 @@ func _test_movement() -> void:
 	sup.expect_guard("issue_move rejects an unknown fleet", func() -> Variant:
 		return MovementStage.issue_move(g, 99999, 0, 5)
 	)
-
-	# A system with no warp lane to the origin is not reachable this turn.
-	var unreachable := -1
-	for s in g.systems:
-		if not g.systems[origin].has_warp_lane_to(s.index):
-			unreachable = s.index
-			break
-	sup.ok(unreachable >= 0, "the map has at least one unreachable system")
-	sup.expect_guard("issue_move rejects a non-adjacent target", func() -> Variant:
-		return MovementStage.issue_move(g, fleet.id, 0, unreachable)
+	sup.expect_guard("issue_move rejects a move to the planet it is already on", func() -> Variant:
+		return MovementStage.issue_move(g, fleet.id, 0, origin)
+	)
+	sup.expect_guard("issue_move rejects an unknown planet", func() -> Variant:
+		return MovementStage.issue_move(g, fleet.id, 0, 99999)
 	)
 
-	# Order a legal move over an actual warp lane.
-	var neighbour := -1
-	for lane in g.systems[origin].warp_lanes:
-		if lane != origin:
-			neighbour = lane
-			break
-	sup.ok(neighbour >= 0, "the home system has at least one warp lane")
-	if neighbour >= 0:
-		sup.ok(MovementStage.issue_move(g, fleet.id, 0, neighbour), "a legal move is accepted")
-		sup.eq(fleet.destination, neighbour, "the destination is set")
-		MovementStage.advance(g)
-		sup.eq(fleet.system, neighbour, "the fleet arrives in one turn over a warp lane")
+	# Pick a far planet: movement is measured in parsecs, so a short hop and a long one
+	# have to be distinguished or the rescaling of the map would not be observable.
+	var far := -1
+	var far_d := 0.0
+	for p in g.planets:
+		var d: float = MovementStage.orbit_distance(g.planet(origin), p)
+		if d > far_d:
+			far_d = d
+			far = p.index
+	sup.ok(far >= 0 and far_d > 0.0, "the system has a planet worth travelling to",
+		"%.1f parsecs" % far_d)
+	if far >= 0:
+		sup.ok(MovementStage.issue_move(g, fleet.id, 0, far), "a legal move is accepted")
+		sup.eq(fleet.destination, far, "the destination is the target planet")
+		sup.expect_guard("issue_move refuses a fleet already in transit", func() -> Variant:
+			return MovementStage.issue_move(g, fleet.id, 0, origin + 1)
+		)
+
+		# A long hop must take more than one turn; a short one may take several. Either
+		# way, the fleet ends up where it was sent and nowhere else.
+		var turns := 0
+		while fleet.destination >= 0 and turns < 500:
+			MovementStage.advance(g)
+			turns += 1
+		sup.eq(fleet.system, far, "the fleet arrives at the target planet")
 		sup.eq(fleet.destination, -1, "the destination clears on arrival")
+		sup.ok(turns > 0, "the fleet did not teleport", "%d turns of travel" % turns)
+
+		# A neighbour on the next ring out is reachable and must not be instant.
+		var near := -1
+		for p in g.planets:
+			if p.index != far:
+				near = p.index
+				break
+		if near >= 0:
+			sup.ok(MovementStage.issue_move(g, fleet.id, 0, near), "a second move is accepted")
+			var hops := 0
+			while fleet.destination >= 0 and hops < 500:
+				MovementStage.advance(g)
+				hops += 1
+			sup.eq(fleet.system, near, "the fleet arrives at the second target")
+			sup.ok(hops > 0, "and it travelled rather than teleported", "%d turns" % hops)
 
 	# Engagement discovery: two hostile fleets in one system must be found.
 	var g2 := _galaxy(4242)
@@ -330,7 +368,7 @@ func _test_invasion() -> void:
 
 	# Bombardment must strip surface batteries before the ground assault.
 	var g := _galaxy(8000)
-	var planet := _colonize(g, 1, g.systems[0].planet_indices[0])
+	var planet := _colonize(g, 1, _unowned_planet(g, 1))
 	planet.structures[&"missile_battery"] = 4
 	var before := planet.count(&"missile_battery")
 
@@ -378,8 +416,12 @@ func _test_invasion() -> void:
 
 	# resolve_all must find a contested system and report it.
 	var g4 := _galaxy(8300)
-	_colonize(g4, 1, g4.systems[2].planet_indices[0])
-	_place_fleet(g4, 0, 2, {&"dreadnought": 8, &"transport": 4})
+	# The attacker must be parked *on the contested world*, which is the whole
+	# redefinition of "contested" in a one-system map.
+	var contested := _unowned_planet(g4)
+	sup.ok(contested >= 0, "there is a world to contest")
+	_colonize(g4, 1, contested)
+	_place_fleet(g4, 0, contested, {&"dreadnought": 8, &"transport": 4})
 	var lines := InvasionStage.resolve_all(g4, _defs, _db, _rng(4))
 	sup.ok(lines.size() >= 1, "resolve_all reports an invasion", "%d lines" % lines.size())
 
@@ -391,7 +433,32 @@ func _test_colony_sim() -> void:
 
 	# A fertile, unstarved colony with farms should grow.
 	var g := _galaxy(9000)
-	var planet := _colonize(g, 0, g.systems[0].planet_indices[0])
+	# Pick a body nobody owns. Planet 0 is now faction 0's randomly drawn homeworld, so
+	# colonising it would re-own an already-populated planet and the growth assertion
+	# below would be measuring a colony that was already at its cap.
+	var unowned := -1
+	for p in g.planets:
+		if p.owner < 0 and not p.colonized:
+			unowned = p.index
+			break
+	sup.ok(unowned >= 0, "the system has an unclaimed planet to test on")
+	var planet := _colonize(g, 0, unowned)
+	# The generator seeds hostile planet types alongside habitable ones, so "first
+	# unclaimed body" is not necessarily a place a colony could grow. Pick a world the
+	# colony can actually live on, which is the precondition for the growth assertion.
+	var habitable := -1
+	var best_hab := 0.0
+	for p in g.planets:
+		if p.owner >= 0 or p.colonized:
+			continue
+		var h: float = p.habitability()
+		if h > best_hab:
+			best_hab = h
+			habitable = p.index
+	sup.ok(habitable >= 0 and best_hab > 0.2,
+		"the system has a habitable world to colonise", "%.3f habitability" % best_hab)
+	if habitable >= 0 and habitable != unowned:
+		planet = _colonize(g, 0, habitable)
 	# Size the farm block to the local habitability so the colony actually feeds
 	# itself: production scales with habitability, consumption does not.
 	planet.structures[&"farm"] = maxi(4, int(ceil(2.0 / maxf(0.05, planet.habitability()))))
@@ -445,7 +512,7 @@ func _test_colony_sim() -> void:
 
 	# The treasury floor must be respected.
 	var broke: FactionState = g2.faction(1)
-	_colonize(g2, 1, g2.systems[1].planet_indices[0])
+	_colonize(g2, 1, _unowned_planet(g2, 1))
 	broke.treasury = float(_db.get("TREASURY_FLOOR")) + 1.0
 	ColonySim.simulate_faction(g2, broke, _defs, _db)
 	sup.near(broke.treasury, float(_db.get("TREASURY_FLOOR")), 0.001,
@@ -453,7 +520,7 @@ func _test_colony_sim() -> void:
 
 	# Construction advances and the finished building appears.
 	var g3 := _galaxy(9200)
-	var p3 := _colonize(g3, 0, g3.systems[0].planet_indices[0])
+	var p3 := _colonize(g3, 0, _unowned_planet(g3))
 	var fc: FactionState = g3.faction(0)
 	p3.building_queue[&"factory"] = 1
 	var factory_turns := int((_defs_building(&"factory") as Resource).get("build_turns"))
@@ -487,7 +554,7 @@ func _test_research() -> void:
 
 	var g := _galaxy(10000)
 	var f: FactionState = g.faction(0)
-	_colonize(g, 0, g.systems[0].planet_indices[0])
+	_colonize(g, 0, _unowned_planet(g))
 
 	# Surplus funds research; a deficit does not.
 	f.last_income = 100.0
@@ -560,17 +627,30 @@ func _test_fog_of_war() -> void:
 		"%d visible" % seen.size())
 	sup.ok(FowStage.can_see(g, 0, 0), "the fleet's own system is visible")
 
-	var unseen := 0
+	# With one system, system-level fog has nothing to hide: seeing the star is the
+	# precondition for seeing anything at all. The fog that actually matters is at the
+	# planet level, and this is where the 50x map rescaling gets tested -- a sensor bubble
+	# that was not rescaled would cover one orbit ring and the rest of the system would
+	# be permanently dark.
+	var seen_planets := 0
 	var first_unseen := -1
-	for s in g.systems:
-		if not seen.has(s.index):
-			unseen += 1
-			if first_unseen < 0:
-				first_unseen = s.index
-	sup.ok(unseen > 0, "a large map leaves something unseen", "%d unseen" % unseen)
-	if first_unseen >= 0:
-		sup.ok(not FowStage.can_see(g, 0, first_unseen),
-			"an unseen system stays hidden: %d" % first_unseen)
+	for p in g.planets:
+		var sys_index := _system_of_planet(g, p.index)
+		if seen.has(sys_index) and p.surveyed:
+			seen_planets += 1
+		elif first_unseen < 0:
+			first_unseen = p.index
+	sup.ok(seen_planets > 0, "a faction sees planets near its fleets",
+		"%d visible planets" % seen_planets)
+	sup.ok(first_unseen >= 0,
+		"a 50x system leaves planets outside any single sensor bubble",
+		"first unseen planet %d of %d" % [first_unseen, g.planets.size()])
+
+	# The bubble must be a minority of the system. If a scout sees everything, scouting
+	# is not a mechanic and the whole layer is decorative.
+	sup.ok(seen_planets < g.planets.size(),
+		"a scout's sensor bubble covers only part of the system",
+		"%d of %d planets visible" % [seen_planets, g.planets.size()])
 
 	# Redaction: the wire snapshot must not leak what the faction cannot see.
 	var snapshot := FowStage.redact(g, 0)
@@ -583,21 +663,29 @@ func _test_fog_of_war() -> void:
 		by_index[int(entry.get("index", -1))] = entry
 	sup.eq(by_index.size(), g.systems.size(), "the snapshot has one entry per system")
 
-	if first_unseen >= 0:
-		var e: Dictionary = by_index[first_unseen] as Dictionary
-		sup.eq(String(e.get("name", "")), "Unknown",
-			"an unseen system's name is redacted")
-		sup.eq(int(e.get("owner", -1)), -1, "an unseen system's owner is redacted")
-		sup.eq((e.get("warp_lanes", PackedInt32Array()) as PackedInt32Array).size(), 0,
-			"an unseen system's warp lanes are redacted")
-		sup.eq((e.get("planet_indices", PackedInt32Array()) as PackedInt32Array).size(), 0,
-			"an unseen system's planets are redacted")
+	# The star's identity is never redacted: it is the frame the whole map is built on,
+	# and a map centred on a nameless point has nothing to orient by.
+	var star_entry: Dictionary = by_index[0] as Dictionary
+	sup.ok(String(star_entry.get("name", "")) != "Unknown",
+		"the star keeps its name regardless of visibility")
+	sup.eq((star_entry.get("warp_lanes", PackedInt32Array()) as PackedInt32Array).size(), 0,
+		"the star still reports no warp lanes")
 
-	# The player's own homeworld must never be redacted away.
-	var own := g.faction(0).systems[0]
-	var own_entry: Dictionary = by_index[own] as Dictionary
-	sup.ok(String(own_entry.get("name", "")) != "Unknown",
-		"the player's own homeworld keeps its name")
+	# Planet-level redaction: a body the faction has never surveyed must not arrive on
+	# the wire with its owner, position or reserves intact. This is the rule the Request
+	# D audit was about, and planets being the primary marker makes it load-bearing.
+	var snapshot_planets: Array = snapshot.get("planets", []) as Array
+	sup.ok(snapshot_planets.size() > 0, "the snapshot carries planets")
+	var leaked := 0
+	for entry: Dictionary in snapshot_planets:
+		var p_index := int(entry.get("index", -1))
+		if int(entry.get("owner", -1)) < 0:
+			continue
+		var p: PlanetState = g.planet(p_index)
+		# An owned planet is only a leak if the viewer has no business knowing it.
+		if p != null and p.owner != 0 and not p.surveyed:
+			leaked += 1
+	sup.eq(leaked, 0, "no foreign planet's ownership is redacted away unsurveyed")
 
 	# Surveying is permanent and is recorded on the galaxy.
 	FowStage.survey_system(g, 0, 0)
@@ -626,9 +714,9 @@ func _test_turn_soak() -> void:
 
 	for t in 20:
 		var orders: Array = []
-		# Send the human's idle fleets to a rotating system, exercising the order path
+		# Send the human's idle fleets to a rotating planet, exercising the order path
 		# every single turn.
-		var target := (g.systems[0].index + t) % g.systems.size()
+		var target := t % g.planets.size()
 		for fleet in g.fleets_of(0):
 			if fleet.destination < 0 and MovementStage.issue_move(g, fleet.id, 0, target):
 				orders.append(Order.make_move_fleet(0, fleet.id, target))
@@ -730,15 +818,16 @@ func _test_determinism() -> void:
 		var rng := _rng(14000)
 		for t in 12:
 			var orders: Array = []
-			# A deterministic order stream: only the human's scout, moving one lane out.
+			# A deterministic order stream: only the human's scout, walking outward one
+			# orbit ring at a time. Warp lanes are gone, so the rotation is over planets.
 			for fleet in g.fleets_of(0):
 				if t % 3 == 0 and fleet.ships.has(&"scout"):
-					var lanes: PackedInt32Array = PackedInt32Array()
-					for s in g.systems:
-						if g.systems[fleet.system].has_warp_lane_to(s.index):
-							lanes.append(s.index)
-					if lanes.size() > 0:
-						var dest: int = lanes[t % lanes.size()]
+					var reach: PackedInt32Array = PackedInt32Array()
+					for p in g.planets:
+						if p.index != fleet.system:
+							reach.append(p.index)
+					if reach.size() > 0:
+						var dest: int = reach[t % reach.size()]
 						if MovementStage.issue_move(g, fleet.id, 0, dest):
 							orders.append(Order.make_move_fleet(0, fleet.id, dest))
 					break

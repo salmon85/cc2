@@ -150,9 +150,9 @@ func _start_dedicated_server(opts: CC2CLI.Options) -> bool:
 	net.peer_joined.connect(_on_peer_joined)
 	net.peer_left.connect(_on_peer_left)
 
-	print("[cc2] dedicated server ready: %s:%d, %d slots, seed %d, %d systems, stardate %d" % [
+	print("[cc2] dedicated server ready: %s:%d, %d slots, seed %d, %d planets, stardate %d" % [
 		opts.ip, opts.port, opts.slots, galaxy.seed_value,
-		galaxy.systems.size(), galaxy.turn + 1])
+		galaxy.planets.size(), galaxy.turn + 1])
 	return true
 
 
@@ -190,6 +190,10 @@ func _on_peer_left(peer_id: int, slot: int) -> void:
 		# reconnects inside the window gets their empire back.
 		lobby.leave(peer_id)
 	turn_sync.remove_active_slot(slot)
+	# Re-tallied on departure, not just on the next ready press. A disconnect that did not
+	# update the button left every remaining player looking at a count that included
+	# somebody who was no longer in the lobby.
+	turn_sync.broadcast_ready_count()
 
 
 ## Drive the authority: resolve the turn as soon as every connected player has submitted.
@@ -377,9 +381,9 @@ func _on_client_welcomed(assigned_slot: int, payload: Dictionary) -> void:
 	# hidden -- leaving a networked player with no way to satisfy the lobby.
 	game_client.top_bar.refresh()
 
-	print("[cc2] joined as empire %d: seed %d, %d systems, stardate %d" % [
+	print("[cc2] joined as empire %d: seed %d, %d planets, stardate %d" % [
 		assigned_slot, sync.galaxy.seed_value,
-		sync.galaxy.systems.size(), sync.galaxy.turn + 1])
+		sync.galaxy.planets.size(), sync.galaxy.turn + 1])
 	_declare_ready(sync)
 
 
@@ -462,8 +466,8 @@ func _start_local_client(opts: CC2CLI.Options) -> void:
 	if not game_client.start(galaxy, 0, opts.seed_value if opts.seed_given else 0):
 		push_error("[cc2] client failed to start a session")
 		return
-	print("[cc2] client attached: seed %d, %d systems, stardate %d" % [
-		galaxy.seed_value, galaxy.systems.size(), galaxy.turn + 1
+	print("[cc2] client attached: seed %d, %d planets, stardate %d" % [
+		galaxy.seed_value, galaxy.planets.size(), galaxy.turn + 1
 	])
 
 

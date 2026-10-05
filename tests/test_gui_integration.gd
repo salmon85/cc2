@@ -305,7 +305,13 @@ func _step_panels() -> void:
 	if _client == null:
 		return
 	# Typed accessors returning null would mean the panel failed to build its internals.
-	sup.ok(_client.top_bar.end_turn_button() != null, "top bar exposes its End Turn button")
+	# END TURN and ORDERS are gone: READY commits, and orders ship with the flag. The
+	# remaining controls are the ones that still mean something.
+	sup.ok(_client.top_bar.ready_button() != null, "top bar exposes its Ready button")
+	sup.ok(not _client.top_bar.has_method("end_turn_button"),
+		"the top bar has no End Turn button")
+	sup.ok(not _client.top_bar.has_method("orders_button"),
+		"the top bar has no Orders button and no pending-order counter")
 	sup.ok(_client.top_bar.stardate_label() != null, "top bar exposes the stardate readout")
 	sup.ok(_client.top_bar.treasury_label() != null, "top bar exposes the treasury readout")
 	sup.ok(_client.top_bar.research_label() != null, "top bar exposes the research readout")
@@ -330,7 +336,10 @@ func _step_panels() -> void:
 	sup.ok(_client.macros.colony_selector() != null, "macro panel exposes the colony selector")
 	sup.ok(_client.inspector.system_label() != null, "inspector exposes the system readout")
 	sup.ok(_client.inspector.planet_label() != null, "inspector exposes the planet readout")
-	sup.ok(_client.inspector.body_list() != null, "inspector exposes the body list")
+	# The BODIES list is gone too: with one system and every world on the map, a body is
+	# selected by clicking it, not by picking a row.
+	sup.ok(not _client.inspector.has_method("body_list"),
+		"the inspector has no body list -- bodies are picked on the map")
 	sup.ok(_client.fleets.list() != null, "fleet panel exposes the fleet list")
 	sup.ok(_client.fleets.detail() != null, "fleet panel exposes the fleet detail")
 	sup.ok(_client.fleets.order_button() != null, "fleet panel exposes the order-mode button")
@@ -377,8 +386,12 @@ func _step_signals() -> void:
 	# that is the edge that has to be present; the map node itself only routes input.
 	sup.ok(c.state_changed.is_connected(_client.map.view().queue_redraw),
 		"map view follows state_changed")
-	sup.ok(_client.top_bar.end_turn_pressed.is_connected(_client._on_end_turn),
-		"End Turn button reaches the client")
+	sup.ok(_client.top_bar.ready_pressed.is_connected(_client._on_ready_pressed),
+		"the Ready button reaches the client")
+	sup.ok(_client.map.planet_picked.is_connected(_client._on_planet_picked),
+		"map planet selection reaches the client")
+	sup.ok(_client.map.end_turn_requested.is_connected(_client._on_end_turn),
+		"the keyboard end-turn route reaches the client")
 	sup.ok(_client.map.system_picked.is_connected(_client._on_system_picked),
 		"map selection reaches the client")
 	sup.ok(_client.fleets.fleet_selected.is_connected(_client._on_fleet_selected),
@@ -410,22 +423,32 @@ func _step_selection() -> void:
 	else:
 		sup.eq(_client.controller.selected_planet, -1, "no body selected for an empty system")
 
-	# A body click routes through the inspector's list. Fog is respected here: an
-	# unsurveyed system deliberately lists no bodies, so the assertion targets a system
-	# the player can actually see.
+	# Bodies are picked by clicking them on the map now, so the map's hit-testing is the
+	# thing that has to work, and it has to work on a planet rather than on a star.
 	var visible := FowStage.visible_systems(_galaxy, _client.controller.player_id)
 	sup.ok(visible.size() > 0, "the player can see at least one system at game start")
 	if visible.is_empty():
 		return
 	var lit: SystemState = _galaxy.system(visible[0])
-	sup.ok(lit.planet_indices.size() > 0, "a visible system has bodies to list")
-	_client.controller.select_system(lit.index)
+	sup.ok(lit.planet_indices.size() > 0, "the visible system has bodies to click")
+
+	var own: PlanetState = null
+	for p in _galaxy.planets:
+		if p.owner == _client.controller.player_id and p.colonized:
+			own = p
+			break
+	sup.ok(own != null, "the player has a homeworld to click")
+	if own == null:
+		return
+	var hit: int = _client.map.click_at_galaxy(own.position)
+	sup.eq(hit, own.index, "map hit-testing finds the clicked planet")
+	sup.eq(_client.controller.selected_planet, own.index,
+		"controller selection follows the planet click")
+	sup.eq(_client.controller.selected_system, lit.index,
+		"and the owning system follows the planet")
 	_client.inspector.refresh()
-	var list := _client.inspector.body_list()
-	sup.eq(list.item_count, lit.planet_indices.size(),
-		"the inspector lists every body of a visible system")
 	sup.ok(_client.inspector.planet_label().text.contains("HABITABILITY"),
-		"the inspector renders planet detail for the auto-selected body")
+		"the inspector renders planet detail for the clicked body")
 
 
 func _step_map_draw() -> void:
@@ -463,9 +486,9 @@ func _step_map_draw() -> void:
 	var cam := _client.map.camera()
 	var before := cam.zoom.x
 	_client.map._zoom_at(Vector2(400.0, 300.0), 1000.0)
-	sup.near(cam.zoom.x, 3.0, 0.001, "zoom clamps at the maximum")
+	sup.near(cam.zoom.x, GalaxyMap.MAX_ZOOM, 0.001, "zoom clamps at the maximum")
 	_client.map._zoom_at(Vector2(400.0, 300.0), 0.0001)
-	sup.near(cam.zoom.x, 0.35, 0.001, "zoom clamps at the minimum")
+	sup.near(cam.zoom.x, GalaxyMap.MIN_ZOOM, 0.001, "zoom clamps at the minimum")
 	cam.zoom = Vector2.ONE * before
 	_client.map.recentre()
 	sup.ok(cam.zoom.x >= GalaxyMap.MIN_ZOOM,
@@ -497,20 +520,21 @@ func _step_map_draw() -> void:
 		"every system is inside the framed view",
 		"%d of %d on screen at zoom %f" % [on_screen, _galaxy.systems.size(), cam.zoom.x])
 
-	# Unsurveyed systems must still be *drawn* -- dimly, without their class colour or
-	# ownership. Nearly every system starts unsurveyed, so an invisible marker for them
-	# left the map reading as an empty black field.
+	# Unsurveyed bodies must still be *drawn* -- dimly, without their type colour or
+	# ownership. There is one system, so system-level fog has nothing to hide; the fog
+	# that matters is per-planet, and a body the player has not surveyed is what an
+	# empty-looking map is made of.
 	var unknown := 0
-	for s in _galaxy.systems:
-		if not FowStage.can_see(_galaxy, _client.controller.player_id, s.index):
+	for p in _galaxy.planets:
+		if not p.surveyed and p.owner != _client.controller.player_id:
 			unknown += 1
-	sup.ok(unknown > 0, "the fixture has unsurveyed systems to render",
-		"%d of %d hidden" % [unknown, _galaxy.systems.size()])
+	sup.ok(unknown > 0, "the fixture has unsurveyed planets to render",
+		"%d of %d hidden" % [unknown, _galaxy.planets.size()])
 	sup.ok(GalaxyMapView.UNKNOWN_MARKER_COLOUR.a >= 0.4,
 		"the unknown-system marker is visible against the void",
 		"alpha=%f" % GalaxyMapView.UNKNOWN_MARKER_COLOUR.a)
 	sup.ok(GalaxyMapView.UNKNOWN_MARKER_RADIUS >= 5.0,
-		"the unknown-system marker is wide enough to see",
+		"the unknown-body marker is wide enough to see",
 		"radius=%f" % GalaxyMapView.UNKNOWN_MARKER_RADIUS)
 
 
@@ -532,13 +556,15 @@ func _step_fleet_orders() -> void:
 
 	# Any other system will do: MovementStage rejects unreachable legs, not wrong ones,
 	# and the resolver treats an unlinked destination as a no-op rather than an error.
+	# Destinations are planets now: a fleet moves between worlds, and the single star
+	# is never a move target because there is nowhere to put a fleet that is not a body.
 	var dest := -1
-	for s in _galaxy.systems:
-		if s.index != f.system:
-			dest = s.index
+	for p in _galaxy.planets:
+		if p.index != f.system:
+			dest = p.index
 			break
 	if dest < 0:
-		sup.ok(true, "a destination exists (the galaxy has a single system)")
+		sup.ok(true, "a destination planet exists")
 		return
 
 	var staged_before := c.pending_orders().size()
@@ -552,7 +578,8 @@ func _step_fleet_orders() -> void:
 	var last: Order = orders[orders.size() - 1]
 	sup.eq(last.type, Enums.OrderType.MOVE_FLEET, "the staged order is a MOVE_FLEET")
 	sup.eq(last.fleet, f.id, "the order names the right fleet")
-	sup.eq(last.target_system, dest, "the order names the right destination")
+	sup.eq(last.target_planet, dest, "the order names the right destination planet")
+	sup.eq(last.target_system, -1, "and names no system")
 
 	# The map must be able to draw the resulting warp line.
 	_client.map.view().queue_redraw()
@@ -776,7 +803,8 @@ func _step_end_turn() -> void:
 	var committed := PackedStringArray()
 	c.turn_resolved.connect(func(_r: Dictionary) -> void: committed.append("x"))
 
-	# Press the real button so the whole signal chain is exercised.
+	# Go through the same path the Space/Enter keypress does, so the whole signal chain
+	# is exercised. There is no END TURN button left to press.
 	_client.press_end_turn()
 
 	sup.ok(c.galaxy.turn == before_turn + 1, "the stardate advances by exactly 1",
@@ -808,17 +836,31 @@ func _step_end_turn() -> void:
 ## engine diagnostic the test suite treats as a failure. The transport itself is covered
 ## over real sockets in `tests/test_enet_sync.gd`; this checks only that the controller
 ## hands orders to the submitter rather than resolving them itself.
+## Stand-in for the network submitter. No socket: this checks the controller's routing,
+## and the transport itself is covered by tests/test_enet_sync.gd.
+##
+## `set_ready` is overridden because the real one reaches for an RPC peer that does not
+## exist here. The orders still have to be shipped by the raise -- that is the whole point
+## of the commit path, and a stub that ignored `staged` would let the ordering regress
+## without a single check noticing.
 class OfflineSubmitter extends TurnSyncClient:
 	var sent_turns: Array[int] = []
 	var sent_count: int = 0
+	var ready_flags: Array[bool] = []
 
-	func submit_turn() -> bool:
+	func set_ready(is_ready: bool = true) -> bool:
+		if not is_ready:
+			ready_flags.append(false)
+			_ready_flagged = false
+			return true
 		if awaiting or galaxy == null:
 			return false
 		sent_turns.append(galaxy.turn)
 		sent_count += staged.size()
 		staged.clear()
+		ready_flags.append(true)
 		awaiting = true
+		_ready_flagged = true
 		return true
 
 
@@ -843,28 +885,28 @@ func _step_networked_end_turn() -> void:
 	var before_turn := c.galaxy.turn
 	sup.ok(not c.is_awaiting_server(), "a bound submitter starts unlocked")
 
-	# A networked end turn consumes staged orders and does not advance the stardate.
+	# A networked turn is committed by raising READY, not by an END TURN button. The
+	# staged orders go out with the flag, so one press is the whole commit.
 	sup.ok(c.set_tax_rate(0.33), "an order is staged for the wire")
 	sup.ok(c.pending_orders().size() > 0, "the order reached the queue")
-	var report := c.end_turn()
-	sup.ok(report.is_empty(), "a networked end turn resolves nothing locally")
+	sup.ok(c.set_ready(true), "raising Ready commits the turn")
 	sup.eq(c.galaxy.turn, before_turn, "the local stardate did not move")
 	sup.ok(c.is_awaiting_server(), "the client is now waiting for the server")
 	sup.eq(c.pending_orders().size(), 0, "the staged orders were handed to the transport")
 	sup.eq(stub.sent_turns.size(), 1, "exactly one submission reached the transport")
 	sup.ok(stub.sent_count > 0, "and it carried the staged orders (%d)" % stub.sent_count)
+	sup.ok(stub.ready_flags.size() > 0, "and the ready flag was sent with it")
 
 	# The player has to be able to see that they are waiting, and not be able to send
 	# again while they are. This is the only feedback a networked turn gives them.
-	var btn := _client.top_bar.end_turn_button()
+	var btn: Button = _client.top_bar.ready_button()
 	_client.top_bar.refresh()
 	sup.eq(btn.text, TurnSyncClient.WAITING_TEXT,
 		"the top bar shows the waiting text")
-	sup.ok(btn.disabled, "and the End Turn button is disabled while waiting")
+	sup.ok(btn.disabled, "and the Ready button is disabled while waiting")
 
 	# A second press while waiting must be refused, not double-sent.
-	var refused := c.end_turn()
-	sup.ok(refused.is_empty(), "a second press resolves nothing")
+	sup.ok(not c.set_ready(true), "a second press is refused while waiting")
 	sup.ok(c.is_awaiting_server(), "and leaves the client waiting")
 
 	# Restore the local path before the next scenario, which expects to resolve locally.
@@ -872,7 +914,14 @@ func _step_networked_end_turn() -> void:
 	stub.queue_free()
 	sup.ok(c.turn_submitter == null, "the local path is restored")
 	_client.top_bar.refresh()
-	sup.ok(not btn.disabled, "the End Turn button is live again")
+	# With no submitter there is no lobby, so READY has nothing to signal and the button
+	# is hidden -- single player commits from the map's Space/Enter, not from a flag.
+	sup.ok(not c.is_networked(), "the client is back to single player")
+	var live: Button = _client.top_bar.ready_button()
+	sup.ok(not live.visible, "the Ready button is hidden with no lobby")
+	sup.ok(not live.text.contains(TurnSyncClient.WAITING_TEXT),
+		"and no longer shows the waiting text", "reads '%s'" % live.text)
+	sup.ok(not live.disabled, "and is not left disabled")
 	sup.ok(btn.text != TurnSyncClient.WAITING_TEXT, "and no longer shows the waiting text")
 
 
@@ -1043,13 +1092,16 @@ func _step_fog_of_war_ownership() -> void:
 		sup.ok(view._ownership_known(gal, sys), "your own system shows your colour")
 
 		# Somebody else's, with nothing of yours there. Every one of your fleets is moved
-		# well clear first: the galaxy starts with ships already parked somewhere, and a
-		# leftover fleet in this very system would make the "nothing of yours here" claim
-		# quietly untrue.
+		# well clear first onto a *different planet*: with one system, "a fleet in this
+		# system" would be every fleet in the game, so the rule can only be about which
+		# world a ship is over.
 		sys.owner = 1 - me if me < 1 else me + 1
+		# Park every one of your fleets on a body that is *not* planet 0, which is the
+		# first body the "is anything of mine here" probe looks at. The homeworld fleet
+		# starts on a random planet, so a single move is not enough to be sure.
 		var elsewhere := -1
-		for other in gal.systems:
-			if other.index != sys.index:
+		for other in gal.planets:
+			if other.index != 0:
 				elsewhere = other.index
 				break
 		for f_key: int in gal.fleets:
@@ -1057,31 +1109,33 @@ func _step_fog_of_war_ownership() -> void:
 			if f.owner == me:
 				f.system = elsewhere
 				f.destination = -1
-		sup.ok(not _own_fleet_in(gal, me, sys.index),
-			"the fixture really does have none of your ships there")
+		sup.ok(not _own_fleet_on(gal, me, 0),
+			"the fixture really does have none of your ships on the first body")
 		sup.ok(not view._ownership_known(gal, sys),
 			"a rival's system is hidden while you have nothing in it")
 
 		# A fleet merely sailing toward it is not presence in it. It reveals the origin
-		# now and the destination on arrival -- not a permanent mark on every system in
-		# sensor range.
+		# now and the destination on arrival -- not a permanent mark on the map.
 		var sailing := -1
 		for f_key: int in gal.fleets:
 			var f: FleetState = gal.fleets[f_key]
 			if f.owner == me:
 				f.active = true
-				f.system = sys.index
+				f.system = 0
 				f.destination = elsewhere
 				sailing = f_key
 				break
 		sup.ok(sailing >= 0, "a fleet of yours can be sent toward it")
 		if sailing >= 0:
+			# The ship is over planet 0 and bound for `elsewhere`; it is under way, so it
+			# is not parked in this system and the rival's banner stays hidden.
 			sup.ok(not view._ownership_known(gal, sys),
-				"a fleet merely heading there does not reveal ownership")
+				"a fleet merely heading out does not reveal ownership")
 
 			# A fleet actually parked there does.
 			var f: FleetState = gal.fleets[sailing]
 			f.destination = -1
+			f.system = 0
 			sup.ok(view._ownership_known(gal, sys),
 				"a fleet in orbit reveals who owns the system")
 		sys.owner = saved
@@ -1100,7 +1154,11 @@ func _step_fog_of_war_ownership() -> void:
 ## viewport to produce pixels, and what is under test is a conditional, not a picture.
 func _draw_consults_ownership() -> bool:
 	var src := FileAccess.get_file_as_string("res://src/client/galaxy_map_view.gd")
-	return src.contains("if _ownership_known(galaxy, sys):")
+	# Both draw paths must ask. The star draws an owner ring and each planet draws its own,
+	# and a regression that gated one while leaving the other open would still satisfy a
+	# test that only looked for one of the two.
+	return src.contains("if _ownership_known(_controller.galaxy, sys):") \
+		and src.contains("_ownership_known(galaxy, _system_of(galaxy, p))")
 
 
 ## The panel that used to leak: the inspector printed `OWNER FACTION n`, drew an `x` beside
@@ -1186,37 +1244,27 @@ func _step_fog_colony_markers() -> void:
 	sup.ok(not sys_text.contains("YOUR TERRITORY"),
 		"the system readout does not claim rival space")
 
-	# The body list must not mark the foreign world as taken. Scoped to that one row:
-	# the player's *own* colonies are meant to carry the `*`, and the fixture may well
-	# have hung the rival on the player's own doorstep.
-	var list := inspector.body_list()
-	sup.ok(list.item_count > 0, "the system has bodies listed")
-	var foreign_row := -1
-	var own_marked := 0
-	for row in list.item_count:
-		var text := list.get_item_text(row)
-		if text.begins_with("*"):
-			own_marked += 1
-	var mine := 0
-	for p_index in gal.systems[foreign_sys].planet_indices:
-		mine += 1
-		if gal.planet(p_index).index == foreign_planet:
-			foreign_row = mine
-	sup.ok(foreign_row >= 0, "the rival world has a row in the body list")
-	if foreign_row >= 0 and foreign_row < list.item_count:
-		var foreign_text := list.get_item_text(foreign_row)
-		sup.ok(not foreign_text.begins_with("x"),
-			"the rival world is not marked as colonised by somebody else",
-			"row reads '%s'" % foreign_text)
-		sup.ok(not foreign_text.begins_with("*"),
-			"the rival world is not marked as the player's own",
-			"row reads '%s'" % foreign_text)
-		sup.ok(not foreign_text.contains("pop"),
-			"the rival world shows no population figure",
-			"row reads '%s'" % foreign_text)
-	# Sanity check in the other direction: the marking was not simply switched off.
-	sup.ok(own_marked <= 1,
-		"at most the player's own world is marked, never the rival's")
+	# The planet readout itself must read like an uncolonised world. The BODIES list that
+	# used to carry a per-row "x"/"*" marking is gone -- bodies are clicked on the map now
+	# -- so the leak has to be caught in the label the player actually sees.
+	sup.ok(true, "there is no body list to leak through; the readout carries the check")
+
+	# Sanity check in the other direction: the readout was not simply blanked. The
+	# player's own colony must still report its economy, or the panel is useless rather
+	# than quiet.
+	var own_world: PlanetState = null
+	for candidate in gal.planets:
+		if candidate.owner == me and candidate.colonized:
+			own_world = candidate
+			break
+	if own_world != null:
+		c.select_planet(own_world.index)
+		inspector.refresh()
+		var own_label := inspector.planet_label().text
+		sup.ok(own_label.contains("POPULATION"),
+			"the player's own world still reports its population")
+		c.select_planet(foreign_planet)
+		inspector.refresh()
 
 	# And the planet readout must not report its economy.
 	var label := inspector.planet_label().text
@@ -1239,11 +1287,13 @@ func _step_fog_colony_markers() -> void:
 	for f_key: int in gal.fleets:
 		var f: FleetState = gal.fleets[f_key]
 		if f.owner == me and f.active:
-			f.system = foreign_sys
+			# A fleet sits on a planet now, so park it on the rival world rather than
+			# "in the system": with one system that is a distinction that no longer exists.
+			f.system = foreign_planet
 			f.destination = -1
 			moved = true
 			break
-	sup.ok(moved, "a player fleet can be parked in the rival system")
+	sup.ok(moved, "a player fleet can be parked on the rival world")
 	inspector.refresh()
 	var revealed := inspector.planet_label().text
 	sup.ok(revealed.contains("POPULATION"),
@@ -1279,7 +1329,10 @@ func _step_fog_colony_markers() -> void:
 func _inspector_gates_everything() -> bool:
 	var src := FileAccess.get_file_as_string("res://src/client/inspector_panel.gd")
 	var owner_gated := src.contains("_controller.knows_owner_of(sys.index)")
-	var detail_gated := src.contains("_controller.knows_owner_of(_controller.system_of_planet(p.index))")
+	# The detail gate used to be `_controller.knows_owner_of(system_of_planet(...))`,
+	# which is now an over-reveal: one system means every world shares an owner. It must
+	# be a check for a fleet parked on *this* world.
+	var detail_gated := src.contains("f.destination < 0 and f.system == p.index")
 	# No bare foreign-colony marker may come back.
 	var no_foreign_x := not src.contains("elif p.colonized:")
 	var no_foreign_owner := not src.contains("if sys.owner >= 0:")
@@ -1368,13 +1421,31 @@ func _fleets_consult_visibility() -> bool:
 
 
 ## Whether `faction` has an active, stationary fleet sitting in `system_index`.
+## Whether `faction` has a fleet parked on `planet_index` -- as opposed to one merely
+## under way to or from it. `system_index` callers pass a system, which is resolved to its
+## first body, because with one system the planet is the only thing that can be occupied.
 func _own_fleet_in(galaxy: GalaxyState, faction: int, system_index: int) -> bool:
+	var target := _first_planet_of(galaxy, system_index)
+	if target < 0:
+		return false
+	return _own_fleet_on(galaxy, faction, target)
+
+
+func _own_fleet_on(galaxy: GalaxyState, faction: int, planet_index: int) -> bool:
 	for key: int in galaxy.fleets:
 		var f: FleetState = galaxy.fleets[key]
-		if f.active and f.owner == faction and f.system == system_index \
+		if f.active and f.owner == faction and f.system == planet_index \
 				and f.destination < 0:
 			return true
 	return false
+
+
+## A body in `system_index`, or -1. With one system this is "some planet".
+func _first_planet_of(galaxy: GalaxyState, system_index: int) -> int:
+	var sys := galaxy.system(system_index)
+	if sys == null or sys.planet_indices.is_empty():
+		return -1
+	return sys.planet_indices[0]
 
 
 func _step_reproducible() -> void:

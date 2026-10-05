@@ -44,16 +44,23 @@ const RESEARCH_BUDGET_SHARE := 0.30
 const TP_PER_FIELD_PER_TP := 1.0
 
 ## Movement: parsecs per turn at drive level 0, before propulsion research.
-const BASE_MOVEMENT := 1.0
-const MOVEMENT_PER_DRIVE_LEVEL := 0.75
-const MAX_MOVEMENT := 12.0
+## Fleet movement is in parsecs per turn, and the system is now 12000 parsecs across.
+## These are fifty times the old galactic values for the same reason the map is fifty times
+## wider: a scout covering one parsec per turn would take three months of turns to reach its
+## neighbour, which reads as the fleet not moving at all.
+const BASE_MOVEMENT := 50.0
+const MOVEMENT_PER_DRIVE_LEVEL := 37.5
+const MAX_MOVEMENT := 600.0
 ## Warp lanes are traversed in a single turn regardless of drive level.
 const WARP_LANE_TRAVEL := 0.25
 
 ## Sensor ranges in parsecs.
-const SCOUT_SENSOR_RANGE := 6.0
-const FLEET_SENSOR_RANGE := 3.0
-const COLONY_SENSOR_RANGE := 2.0
+## Sensor reach, in parsecs. Scaled with the map for the same reason as movement: against
+## a 6000-parsec half-extent, a six-parsec bubble covers a single orbit ring and no more,
+## so scouting would be worthless.
+const SCOUT_SENSOR_RANGE := 900.0
+const FLEET_SENSOR_RANGE := 450.0
+const COLONY_SENSOR_RANGE := 300.0
 
 ## Combat.
 const SHIELD_ABSORPTION_PER_POINT := 1.0

@@ -9,7 +9,6 @@ class_name InspectorPanel
 var _controller: SessionController = null
 
 var _system_label: RichTextLabel = null
-var _body_list: ItemList = null
 var _planet_label: RichTextLabel = null
 
 
@@ -34,30 +33,10 @@ func _build() -> void:
 	_system_label.custom_minimum_size = Vector2(0, 150)
 	col.add_child(_system_label)
 
-	col.add_child(_heading("BODIES"))
-
-	_body_list = ItemList.new()
-	_body_list.custom_minimum_size = Vector2(0, 92)
-	_body_list.allow_reselect = true
-	# ItemList's default theme is a bright list; force it into the terminal palette.
-	_body_list.add_theme_stylebox_override(
-		"panel", CC2Theme.sunk(CC2Theme.BG_SUNK, CC2Theme.BORDER)
-	)
-	_body_list.add_theme_color_override("font_color", CC2Theme.WHITE_DIM)
-	_body_list.add_theme_color_override("font_selected_color", CC2Theme.BG)
-	_body_list.add_theme_color_override("font_hovered_color", CC2Theme.PHOSPHOR)
-	_body_list.add_theme_stylebox_override(
-		"selected", CC2Theme.box(CC2Theme.PHOSPHOR, CC2Theme.PHOSPHOR, 0, 2)
-	)
-	_body_list.add_theme_stylebox_override(
-		"selected_focus", CC2Theme.box(CC2Theme.PHOSPHOR, CC2Theme.PHOSPHOR, 0, 2)
-	)
-	_body_list.add_theme_stylebox_override(
-		"hovered", CC2Theme.box(Color(0.05, 0.12, 0.09), CC2Theme.BORDER, 0, 2)
-	)
-	_body_list.item_selected.connect(_on_body_selected)
-	col.add_child(_body_list)
-
+	# The BODIES list is gone. Planets are picked by clicking them on the map, which is
+	# where a player is already looking to decide what to do; a duplicate list here made
+	# the map and the panel two controls for one job, and the one in the panel could not
+	# show anything the map did not.
 	col.add_child(_heading("PLANET DETAIL"))
 
 	_planet_label = RichTextLabel.new()
@@ -89,7 +68,6 @@ func refresh() -> void:
 	if _controller == null or _controller.galaxy == null:
 		return
 	_refresh_system()
-	_refresh_bodies()
 	_refresh_planet()
 
 
@@ -115,7 +93,6 @@ func _refresh_system() -> void:
 	lines.append(Format.field("CLASS", _star_class_name(sys.star_class)))
 	lines.append(Format.field("BODIES", str(sys.body_count())))
 	lines.append(Format.field("VALUE", Format.fixed(sys.strategic_value, 2)))
-	lines.append(Format.field("LANES", str(sys.warp_lanes.size())))
 	# Ownership is only reported for the player's own empire. Sensor sweeps can reveal a
 	# foreign star, but not its flag: naming the owner here handed every player a free,
 	# always-accurate roster of where every other empire had settled, which is the whole
@@ -133,104 +110,16 @@ func _refresh_system() -> void:
 	_system_label.text = "\n".join(lines)
 
 
-func _refresh_bodies() -> void:
-	# Only rebuild the list when the system changed, so clicking bodies does not fight
-	# the player's own selection.
-	var sys: SystemState = null
-	if _controller.selected_system >= 0:
-		sys = _controller.galaxy.system(_controller.selected_system)
-	# The key is the system *plus* what the rows actually say about it. Keying on the
-	# index alone meant a body that changed owner or colony status kept its old caption
-	# until the player left and came back -- so a world that had just been settled by
-	# somebody else was still drawn with the player's own `*` beside it.
-	var key := _body_list_key(sys)
-	if str(_body_list.get_meta("system", "")) != key:
-		_body_list.set_meta("system", key)
-		_body_list.clear()
-		if sys != null and _controller.can_see(sys.index):
-			for p_index in sys.planet_indices:
-				var p := _controller.galaxy.planet(p_index)
-				if p == null:
-					continue
-				_body_list.add_item(_body_caption(p))
-		_select_selected_body(sys)
-
-
-## A cache key that changes whenever any row would render differently.
-func _body_list_key(sys: SystemState) -> String:
-	if sys == null:
-		return "-"
-	var parts := PackedStringArray()
-	for p_index in sys.planet_indices:
-		var p := _controller.galaxy.planet(p_index)
-		if p == null:
-			continue
-		parts.append("%d:%d:%s" % [p.index, p.owner, "1" if p.colonized else "0"])
-	return "%d|%s" % [sys.index, "|".join(parts)]
-
-
-## Highlight the row for the controller's selected planet. `ItemList` indexes rows, so
-## the planet index is mapped back through `planet_indices` rather than used directly.
-func _select_selected_body(sys: SystemState) -> void:
-	if _body_list.item_count == 0:
-		return
-	var want := _controller.selected_planet
-	var row := 0
-	for p_index in sys.planet_indices:
-		var p := _controller.galaxy.planet(p_index)
-		if p == null:
-			continue
-		if p.index == want:
-			_body_list.select(row)
-			return
-		row += 1
-	_body_list.deselect_all()
-
-
-## One row per body in the system list.
+## The currently selected planet, or null when nothing is picked.
 ##
-## Only the player's *own* colonies are marked. The `x` this used to draw for any
-## foreign `colonized` planet was a colony-status indicator that no amount of fog could
-## hide: the moment a sensor sweep brushed a neighbouring empire, the list reported which
-## of its worlds were settled and which were empty, at zero cost to the other player.
-## Foreign bodies render as the blank they are until the player actually lands there.
-func _body_caption(p: PlanetState) -> String:
-	var flag := " "
-	if p.owner == _controller.player_id and p.colonized:
-		flag = "*"
-	var type_name := String(p.type_id).capitalize()
-	var pop := "  pop %s" % Format.fixed(p.population, 2) \
-		if p.colonized and p.owner == _controller.player_id and p.population > 0.0 else ""
-	return "%s %-14s%s" % [flag, type_name, pop]
-
-
+## The player selects one by clicking it on the map; there is no list to select from any
+## more, so this is whatever the last map click resolved to.
 func _selected_planet() -> PlanetState:
 	if _controller == null or _controller.galaxy == null:
 		return null
 	if _controller.selected_planet < 0:
 		return null
 	return _controller.galaxy.planet(_controller.selected_planet)
-
-
-func _on_body_selected(index: int) -> void:
-	if _controller == null or _controller.galaxy == null:
-		return
-	var sys: SystemState = null
-	if _controller.selected_system >= 0:
-		sys = _controller.galaxy.system(_controller.selected_system)
-	if sys == null:
-		return
-	# ItemList indices are positional within the visible subset, so map back through
-	# planet_indices rather than assuming index == body position.
-	var visible := 0
-	for p_index in sys.planet_indices:
-		var p := _controller.galaxy.planet(p_index)
-		if p == null:
-			continue
-		if visible == index:
-			_controller.select_planet(p.index)
-			return
-		visible += 1
 
 
 func _refresh_planet() -> void:
@@ -308,12 +197,25 @@ func _refresh_planet() -> void:
 ## actually parked in that system -- the same "my ships are sitting in it" standard
 ## `SessionController.knows_owner_of` applies to ownership, so the two never disagree
 ## about whether a player is allowed to see what is there.
+## Whether the player may see this body's economy.
+##
+## A world the player owns is always known. A world owned by somebody else is known only
+## when the player has a fleet parked *on that world specifically*. Consulting the owning
+## *system* instead -- which is what this used to do -- is a real over-reveal now that
+## there is one system: every world in the game orbits the same star, so "I know who owns
+## the system" trivially became "I know the economy of every planet on the map" the moment
+## a single ship was anywhere at all.
 func _planet_detail_known(p: PlanetState) -> bool:
 	if _controller == null or p == null:
 		return false
 	if p.owner == _controller.player_id:
 		return true
-	return _controller.knows_owner_of(_controller.system_of_planet(p.index))
+	if p.surveyed:
+		return true
+	for f in _controller.galaxy.fleets_of(_controller.player_id):
+		if f.destination < 0 and f.system == p.index:
+			return true
+	return false
 
 
 ## Food balance per turn: production from farms and habitability, minus consumption from
@@ -356,10 +258,6 @@ func _star_class_name(star_class: int) -> String:
 		5: return "B BLUE GIANT"
 		6: return "O BLUE SUPERGIANT"
 		_: return "CLASS ?"
-
-
-func body_list() -> ItemList:
-	return _body_list
 
 
 func planet_label() -> RichTextLabel:

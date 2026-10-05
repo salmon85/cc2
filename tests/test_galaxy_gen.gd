@@ -3,9 +3,9 @@ extends SceneTree
 ##
 ##   godot --headless --path . -s res://tests/test_galaxy_gen.gd
 ##
-## Asserts the spec's structural invariants (system count range, 1..6 bodies per system,
-## warp-lane connectivity, faction separation) and, critically, that generation is a pure
-## function of the seed.
+## Asserts the structural invariants of the single-system model (one star at the origin,
+## `--systems=N` planets on orbit rings, random distinct homeworlds per empire) and,
+## critically, that the *layout* is a pure function of the seed while the *opening* is not.
 
 const DefsScript := preload("res://src/data/defs.gd")
 const DBScript := preload("res://src/data/game_db.gd")
@@ -23,12 +23,12 @@ func _initialize() -> void:
 	_defs.call("load_all")
 	_db = _singleton(&"GameDB", DBScript)
 
-	_test_system_count_range()
-	_test_star_placement()
-	_test_planet_population()
-	_test_warp_lane_connectivity()
+	_test_single_star()
+	_test_planet_count_range()
+	_test_orbit_layout()
 	_test_faction_seeding()
 	_test_every_requested_faction_exists()
+	_test_homeworld_is_random()
 	_test_determinism()
 	_test_edge_cases()
 
@@ -50,170 +50,122 @@ func _singleton(node_name: StringName, script: GDScript) -> Node:
 
 
 ## Generate a galaxy from a seed. Each call gets a fresh stream so seeds are independent.
-func _generate(seed_value: int, systems: int, factions: int) -> GalaxyState:
+##
+## `home_seed` seeds the homeworld draw. It is a separate argument because it is a separate
+## stream: the layout must be reproducible from the seed alone, while the choice of starting
+## planet is meant to vary. Passing a fixed `home_seed` is how a test asks for the same
+## opening twice, and passing different values is how it asks for different ones.
+func _generate(
+	seed_value: int, systems: int, factions: int, home_seed: int = -1
+) -> GalaxyState:
 	var rng_service: Node = _singleton(&"RNGService", RngScript)
 	rng_service.call("seed_stream", seed_value)
 	var stream: RandomNumberGenerator = RandomNumberGenerator.new()
 	stream.seed = seed_value
 	stream.state = seed_value
-	return GeneratorScript.generate(_defs, stream, systems, factions, _db)
+	var homes: RandomNumberGenerator = null
+	if home_seed >= 0:
+		homes = RandomNumberGenerator.new()
+		homes.seed = home_seed
+		homes.state = home_seed
+	return GeneratorScript.generate(_defs, stream, systems, factions, _db, homes)
 
 
 # --- Tests ---------------------------------------------------------------------
 
-func _test_system_count_range() -> void:
-	_t.begin("system count honours the spec range")
-	# The spec allows 30..100 systems.
+func _test_single_star() -> void:
+	_t.begin("there is exactly one star, at the origin")
+	var g := _generate(42, 60, 3)
+	_t.eq(g.systems.size(), 1, "the galaxy holds one system")
+	if g.systems.is_empty():
+		return
+	var star: SystemState = g.systems[0]
+	_t.eq(star.index, 0, "the system is index 0")
+	_t.eq(star.position, Vector2.ZERO, "the star sits at the origin")
+	_t.ok(star.name != "", "the star has a name")
+	_t.in_range(star.star_class, 0, 6, "the star has a valid spectral class")
+	_t.eq(star.strategic_value, 1.0, "the whole system is the strategic prize")
+	# With one system and no network between stars, the warp lane graph is empty rather
+	# than degenerate: a self-lane would let a fleet "travel" to where it already is.
+	_t.eq(star.warp_lanes.size(), 0, "the single system has no warp lanes")
+	_t.eq(g.systems[0].body_count(), g.planets.size(),
+		"every planet in the galaxy belongs to the one system")
+
+
+func _test_planet_count_range() -> void:
+	_t.begin("planet count honours the request")
+	# `--systems=N` is now a planet count. The command line never changed; what the flag
+	# means did, and these are the bounds the old galaxy used for its system count.
 	for requested in [30, 50, 64, 100]:
 		var g := _generate(1234, requested, 2)
-		_t.ok(g != null, "generation succeeded for %d systems" % requested)
+		_t.ok(g != null, "generation succeeded for %d planets" % requested)
 		if g == null:
 			continue
-		_t.eq(g.systems.size(), requested, "exactly %d systems generated" % requested)
+		_t.eq(g.planets.size(), requested, "exactly %d planets generated" % requested)
 
 	# Out-of-range requests are clamped, not rejected.
 	var small := _generate(1234, 5, 2)
-	_t.eq(small.systems.size(), 30, "a request below 30 is clamped to the spec minimum")
+	_t.eq(small.planets.size(), GeneratorScript.MIN_SYSTEMS,
+		"a request below the floor is clamped up to the minimum")
 	var large := _generate(1234, 500, 2)
-	_t.eq(large.systems.size(), 100, "a request above 100 is clamped to the spec maximum")
+	_t.eq(large.planets.size(), GeneratorScript.MAX_SYSTEMS,
+		"a request above the ceiling is clamped down to the maximum")
 
 
-func _test_star_placement() -> void:
-	_t.begin("star placement")
-	var g := _generate(42, 60, 3)
-	var unique_names: Dictionary = {}
-	var min_sep := INF
-	var out_of_bounds := 0
-
-	for s in g.systems:
-		unique_names[s.name] = true
-		_t.in_range(
-			s.position.length(), 0.0, GeneratorScript.GALAXY_RADIUS + 0.001,
-			"system %d sits inside the galactic disk" % s.index)
-		if s.position.length() > GeneratorScript.GALAXY_RADIUS + 0.001:
-			out_of_bounds += 1
-		_t.in_range(s.strategic_value, 0.0, 1.0, "system %d has a normalised value" % s.index)
-
-	for i in g.systems.size():
-		for j in range(i + 1, g.systems.size()):
-			min_sep = minf(min_sep, g.systems[i].distance_to(g.systems[j]))
-
-	_t.eq(out_of_bounds, 0, "no system lies outside the disk")
-	_t.eq(unique_names.size(), g.systems.size(), "every system has a unique name")
-
-	# At the maximum map size the curated name pool is guaranteed to run out, so this
-	# exercises the catalogue-designation fallback rather than the happy path.
-	var big := _generate(42, 100, 2)
-	var big_names: Dictionary = {}
-	for sys in big.systems:
-		big_names[sys.name] = true
-	_t.eq(big_names.size(), 100, "all 100 system names stay unique once the pool is exhausted")
-
-	# And across many seeds, because the fallback draws randomly.
-	var collisions := 0
-	for probe_seed in [7, 19, 55, 91, 404]:
-		var m := _generate(probe_seed, 100, 2)
-		var seen: Dictionary = {}
-		for sys in m.systems:
-			if seen.has(sys.name):
-				collisions += 1
-			seen[sys.name] = true
-	_t.eq(collisions, 0, "no name collisions across five large-galaxy seeds")
-	# Stars must be spread, not clumped: the min-separation constant is the guarantee.
-	_t.ok(
-		min_sep >= GeneratorScript.MIN_STAR_SEPARATION * 0.5,
-		"stars are separated enough to read the map",
-		"closest pair is %.2f parsecs" % min_sep)
-
-
-func _test_planet_population() -> void:
-	_t.begin("planet population")
+## Planets sit on concentric rings around the star, and the map is fifty times larger
+## than the old galactic disk.
+func _test_orbit_layout() -> void:
+	_t.begin("orbit layout")
 	var g := _generate(777, 50, 2)
-	_t.ok(g.planets.size() > 0, "the galaxy has bodies")
+	_t.ok(g.planets.size() > 0, "the system has bodies")
 
-	var all_indices_used := true
-	var orbit_problems := 0
+	var out_of_bounds := 0
 	var unbound := 0
 	var seen_classes: Dictionary = {}
+	var seen_rings: Dictionary = {}
+	var ring_conflicts := 0
+	var last_radius := -INF
+	var rings_ascend := true
 
-	for s in g.systems:
-		_t.in_range(
-			s.body_count(), GeneratorScript.MIN_PLANETS, GeneratorScript.MAX_PLANETS,
-			"system %d holds 1..6 bodies" % s.index)
-		if s.body_count() < GeneratorScript.MIN_PLANETS or s.body_count() > GeneratorScript.MAX_PLANETS:
-			orbit_problems += 1
-		for planet_index in s.planet_indices:
-			if not (planet_index >= 0 and planet_index < g.planets.size()):
-				all_indices_used = false
-		for t in s.body_count():
-			var body: PlanetState = g.planet(s.planet_indices[t])
-			if body == null or body.type_data() == null:
-				unbound += 1
-				continue
-			seen_classes[body.type_id] = true
-			_t.eq(body.orbit, t, "body %d has the right orbital slot" % body.index)
-			_t.ok(body.reserve_metals >= 0.0, "body %d has non-negative metals" % body.index)
-
-	_t.eq(orbit_problems, 0, "no system breaks the body-count limit")
-	_t.ok(all_indices_used, "every system body index resolves to a real planet")
-	_t.eq(unbound, 0, "every planet is bound to its type definition")
-	_t.eq(seen_classes.size(), 6, "all six planet classes appear in the galaxy")
-
-	# Each planet's global index must equal its position in the flat array.
-	var consistent := true
 	for i in g.planets.size():
-		if (g.planets[i] as PlanetState).index != i:
-			consistent = false
-	_t.ok(consistent, "planet indices are contiguous and match their array position")
+		var body: PlanetState = g.planets[i]
+		_t.eq(body.index, i, "planet %d is at its own array position" % i)
+		_t.eq(body.orbit, i, "planet %d has ring %d" % [i, i])
+		if body.type_data() == null:
+			unbound += 1
+		seen_classes[body.type_id] = true
+		_t.ok(body.name != "", "planet %d has a name" % i)
 
+		var radius := body.position.length()
+		# The outer ring sits at OUTER_ORBIT of the radius, so the tolerance has to allow
+		# for the ring's own placement rather than testing against the raw radius.
+		if radius > GeneratorScript.GALAXY_RADIUS + 0.001:
+			out_of_bounds += 1
+		if seen_rings.has(i):
+			ring_conflicts += 1
+		seen_rings[i] = true
+		if radius < last_radius - 0.001:
+			rings_ascend = false
+		last_radius = radius
 
-func _test_warp_lane_connectivity() -> void:
-	_t.begin("warp lane graph")
-	var g := _generate(909, 50, 2)
-	var n := g.systems.size()
+	_t.eq(out_of_bounds, 0, "no planet lies outside the system disk")
+	_t.eq(ring_conflicts, 0, "no two planets share an orbit ring")
+	_t.ok(rings_ascend, "orbit radii increase with ring index")
+	_t.eq(unbound, 0, "every planet is bound to its type definition")
+	_t.eq(seen_classes.size(), 6, "all six planet classes appear in the system")
 
-	# Lanes must be symmetric: if A can reach B, B can reach A.
-	var asymmetric := 0
-	var self_links := 0
-	var duplicates := 0
-	for s in g.systems:
-		var seen: Dictionary = {}
-		for lane in s.warp_lanes:
-			if lane == s.index:
-				self_links += 1
-			if seen.has(lane):
-				duplicates += 1
-			seen[lane] = true
-			var other: SystemState = g.system(lane)
-			if other == null or not other.has_warp_lane_to(s.index):
-				asymmetric += 1
+	# The system is meant to be fifty times the old 120-unit disk. If this drifts back the
+	# map framing and the sensor ranges drift with it, so pin the number.
+	_t.near(GeneratorScript.GALAXY_RADIUS, 120.0 * 50.0, 0.001,
+		"the system is fifty times the old galactic radius")
 
-	_t.eq(asymmetric, 0, "every warp lane is reciprocal")
-	_t.eq(self_links, 0, "no system warp-lanes to itself")
-	_t.eq(duplicates, 0, "no duplicate warp lanes")
-
-	# Connectivity: every system must be reachable from every other (BFS from system 0).
-	var seen: Dictionary = {0: true}
-	var queue: Array[int] = [0]
-	while not queue.is_empty():
-		var current: int = queue.pop_front()
-		for lane in (g.system(current) as SystemState).warp_lanes:
-			if not seen.has(lane):
-				seen[lane] = true
-				queue.append(lane)
-	_t.eq(seen.size(), n, "the warp lane graph is fully connected from system 0")
-
-	# Degree sanity: every system has at least one lane, and none is absurdly hubbed.
-	var total_degree := 0
-	var isolated := 0
-	for sys in g.systems:
-		var degree := sys.warp_lanes.size()
-		total_degree += degree
-		if degree < 1:
-			isolated += 1
-	_t.eq(isolated, 0, "every system has at least one warp lane")
-	_t.ok(total_degree / float(n) >= 2.0, "the average system has 2+ lanes",
-		"average degree %.2f" % (total_degree / float(n)))
+	# The innermost ring must clear the star glyph, or planets are drawn under the star.
+	var innermost := INF
+	for body in g.planets:
+		innermost = minf(innermost, body.position.length())
+	_t.ok(
+		innermost >= GeneratorScript.GALAXY_RADIUS * GeneratorScript.INNER_ORBIT - 0.001,
+		"the innermost orbit clears the star")
 
 
 func _test_faction_seeding() -> void:
@@ -235,36 +187,40 @@ func _test_faction_seeding() -> void:
 	# Each faction must hold a real, colonised homeworld.
 	for f in g.factions:
 		var home_colonies := 0
-		var home_system := -1
-		for s in g.systems:
-			if s.owner != f.id:
-				continue
-			home_system = s.index
-			for planet_index in s.planet_indices:
-				var p: PlanetState = g.planet(planet_index)
-				if p != null and p.owner == f.id and p.colonized:
-					home_colonies += 1
+		for p in g.planets:
+			if p.owner == f.id and p.colonized:
+				home_colonies += 1
 		_t.ok(home_colonies >= 1, "%s has a colonised homeworld" % f.name)
-		_t.ok(home_system >= 0, "%s controls at least one system" % f.name)
-		_t.ok(f.system_count() >= 1, "%s tracks its systems" % f.name)
 		_t.ok(f.treasury > 0.0, "%s starts with a treasury" % f.name)
 		_t.eq(f.fleets.size(), 1, "%s starts with one scout fleet" % f.name)
 
-	# Homeworlds must be separated enough to leave room for expansion.
-	var homes := PackedInt32Array()
+	# No two empires may start on the same world. With one system this is the only
+	# separation rule left, and drawing without checking would hand two players the same
+	# planet -- the first thing anyone would notice.
+	var homes: Dictionary = {}
+	var shared := 0
 	for f in g.factions:
-		for s in g.systems:
-			if s.owner == f.id:
-				homes.append(s.index)
+		for p in g.planets:
+			if p.owner == f.id and p.colonized:
+				if homes.has(p.index):
+					shared += 1
+				homes[p.index] = true
 				break
-	var too_close := 0
-	for i in homes.size():
-		for j in range(i + 1, homes.size()):
-			var d: float = g.system(homes[i]).distance_to(g.system(homes[j]))
-			if d < GeneratorScript.GALAXY_RADIUS * 0.25:
-				too_close += 1
-	_t.ok(too_close == 0, "no two homeworlds sit on top of each other",
-		"%d homeworld pairs are closer than a quarter radius" % too_close)
+	_t.eq(shared, 0, "no two factions share a homeworld")
+	_t.eq(homes.size(), g.factions.size(), "every faction got a distinct starting planet")
+
+	# The starting fleet sits on the homeworld, so turn 1 has a legal move.
+	for f in g.factions:
+		var fleet := g.fleets.get(f.fleets[0], null) as FleetState
+		_t.ok(fleet != null, "%s has a starting fleet object" % f.name)
+		if fleet == null:
+			continue
+		var on_home := false
+		for p in g.planets:
+			if p.owner == f.id and p.colonized and p.index == fleet.system:
+				on_home = true
+				break
+		_t.ok(on_home, "%s's starting fleet is parked on its homeworld" % f.name)
 
 	# Faction ids and fleet ids must be unique and dense.
 	var ids: Dictionary = {}
@@ -276,6 +232,79 @@ func _test_faction_seeding() -> void:
 	for id: int in g.fleets:
 		fleet_ids[id] = true
 	_t.eq(fleet_ids.size(), g.fleets.size(), "fleet ids are unique")
+
+
+## The player asked for a different starting planet every game, including between two
+## games that share a seed. This is the test for exactly that, and for the constraint that
+## separates it from plain non-determinism: the *layout* must not move when the homeworld
+## does.
+func _test_homeworld_is_random() -> void:
+	_t.begin("starting planet is random, layout is not")
+	var homes_seen: Dictionary = {}
+	var identical_layout := true
+	var layout_differs_when_seed_differs := false
+
+	for attempt in 20:
+		var g := _generate(20240101, 60, 4, attempt)
+		_t.ok(g != null, "generation %d with its own home seed succeeded" % attempt)
+		if g == null:
+			continue
+		# The layout fingerprint must be identical for all 20: same seed, same system.
+		if attempt == 0:
+			_reference_layout = _layout_fingerprint(g)
+		elif _layout_fingerprint(g) != _reference_layout:
+			identical_layout = false
+		homes_seen[_opening_fingerprint(g)] = true
+
+	_t.ok(identical_layout,
+		"the planet layout is byte-identical across 20 runs on the same seed")
+
+	# Twenty different home seeds, four empires each: the openings must not all be the
+	# same. One collision would not be alarming; twenty identical ones would mean the
+	# homeworld draw is falling through to the layout stream.
+	_t.ok(homes_seen.size() > 1,
+		"the opening varies with the homeworld seed",
+		"%d distinct openings across 20 runs" % homes_seen.size())
+
+	# And a different layout seed must still produce a different layout, or the
+	# separation above is trivially satisfied by a generator that ignores both seeds.
+	var other := _generate(20240102, 60, 4, 0)
+	if other != null:
+		layout_differs_when_seed_differs = _layout_fingerprint(other) != _reference_layout
+	_t.ok(layout_differs_when_seed_differs, "a different seed still changes the layout")
+
+	# With no home stream at all, generation falls back to the layout stream and is
+	# therefore reproducible. Replays and the determinism test depend on that.
+	var a := _generate(555, 40, 3)
+	var b := _generate(555, 40, 3)
+	_t.eq(a.fingerprint(), b.fingerprint(),
+		"with no separate home stream the whole galaxy is reproducible")
+
+
+## The layout alone: system, planet types, positions, reserves. Excludes ownership and
+## fleets, which are where the homeworld draw shows up.
+var _reference_layout: String = ""
+
+
+func _layout_fingerprint(g: GalaxyState) -> String:
+	var parts := PackedStringArray()
+	parts.append(g.systems[0].name if not g.systems.is_empty() else "")
+	parts.append("star:%d" % (g.systems[0].star_class if not g.systems.is_empty() else -1))
+	for p in g.planets:
+		parts.append("%s@%.3f,%.3f:%s" % [
+			p.name, p.position.x, p.position.y, String(p.type_id)])
+	return "\n".join(parts)
+
+
+## Where each empire started, which is the part that is allowed to vary.
+func _opening_fingerprint(g: GalaxyState) -> String:
+	var parts := PackedStringArray()
+	for f in g.factions:
+		for p in g.planets:
+			if p.owner == f.id and p.colonized:
+				parts.append(str(p.index))
+				break
+	return ",".join(parts)
 
 
 ## The generator used to clamp the empire count to one per five systems
@@ -300,20 +329,17 @@ func _test_every_requested_faction_exists() -> void:
 	if g8 != null:
 		for f in g8.factions:
 			var home := -1
-			for s in g8.systems:
-				if s.owner == f.id:
-					home = s.index
+			for p in g8.planets:
+				if p.owner == f.id and p.colonized:
+					home = p.index
 					break
-			_t.ok(home >= 0, "%s owns a homeworld system" % f.name)
-			if home < 0:
-				continue
-			var colonies := 0
-			for p_index in g8.systems[home].planet_indices:
-				var p := g8.planet(p_index)
-				if p != null and p.owner == f.id and p.colonized:
-					colonies += 1
-			_t.ok(colonies >= 1, "%s holds a founding colony" % f.name)
+			_t.ok(home >= 0, "%s owns a homeworld" % f.name)
 			_t.ok(f.fleets.size() >= 1, "%s starts with a fleet" % f.name)
+			if f.fleets.is_empty():
+				continue
+			var fleet := g8.fleets.get(f.fleets[0], null) as FleetState
+			_t.ok(fleet != null and fleet.system == home,
+				"%s's fleet starts on its homeworld" % f.name)
 
 	# Player slots 2 and 3 in particular: these are the seats that were refused.
 	_t.ok(g8.factions.size() >= 4, "at least four empires exist for a --slots=4 server")
@@ -321,8 +347,8 @@ func _test_every_requested_faction_exists() -> void:
 		for slot in [2, 3]:
 			var f: FactionState = g8.factions[slot]
 			var playable := false
-			for s in g8.systems:
-				if s.owner == f.id:
+			for p in g8.planets:
+				if p.owner == f.id and p.colonized:
 					playable = true
 					break
 			_t.ok(playable, "slot %d (0-indexed) has an empire with territory" % slot)

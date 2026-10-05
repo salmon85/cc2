@@ -9,14 +9,28 @@ class_name GalaxyMap
 ## Emitted when a system is picked with the left button.
 signal system_picked(system_index: int)
 
+## Emitted when a planet is clicked, with its galaxy index. Planets are the map's primary
+## selectable objects; `system_picked` now fires only for the star.
+signal planet_picked(planet_index: int)
+
 ## Emitted when empty space is picked.
 signal background_picked
 
 ## Emitted with an error string when an interaction is refused.
 signal interaction_refused(reason: String)
 
-const MIN_ZOOM := 0.35
-const MAX_ZOOM := 3.0
+## Emitted when the player commits the turn with the keyboard.
+##
+## The END TURN button was removed: a networked player commits by pressing READY. Single
+## player has no lobby and therefore no READY, so the map keeps the keyboard route — the
+## one place a player is already looking when they want to advance.
+signal end_turn_requested
+
+## The field is fifty times wider than it was, so the fit zoom had to drop by roughly the
+## same factor to keep the whole system on screen at startup. The old floor of 0.35 would
+## put the camera nine thousand parsecs out for a 6000-parsec system.
+const MIN_ZOOM := 0.007
+const MAX_ZOOM := 0.6
 const ZOOM_STEP := 1.15
 const PAN_BUTTON := MOUSE_BUTTON_MIDDLE
 
@@ -24,9 +38,10 @@ const PAN_BUTTON := MOUSE_BUTTON_MIDDLE
 ## framing computed against it is meaningless -- see `frame_galaxy`.
 const MIN_AREA := 8.0
 
-## Mirrors `GalaxyGenerator.GALAXY_RADIUS`: systems are laid out inside this disk, so
-## it is the half-extent the initial camera has to frame.
-const GALAXY_RADIUS := 120.0
+## Mirrors `GalaxyGenerator.GALAXY_RADIUS`: the system is laid out inside this disk, so it
+## is the half-extent the initial camera has to frame. Fifty times the old value, because
+## the old figure framed a whole galaxy and this frames one star's neighbourhood.
+const GALAXY_RADIUS := GalaxyGenerator.GALAXY_RADIUS
 
 ## Slack left around the disk when fitting, so edge systems are not flush against the
 ## panel border and the crosshair still reads as the galactic centre.
@@ -172,6 +187,13 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if not (event is InputEventKey) or not event.is_pressed():
 		return
 	var key := event as InputEventKey
+	# Space commits the turn. Checked before the camera bindings so it does not also
+	# pan, and not gated on `_user_framed` because committing has nothing to do with
+	# framing the view.
+	if key.keycode == KEY_SPACE or key.keycode == KEY_ENTER:
+		accept_event()
+		end_turn_requested.emit()
+		return
 	_user_framed = true
 	var step := 80.0 / _camera.zoom.x
 	match key.keycode:
@@ -215,8 +237,13 @@ func _to_galaxy(screen_pos: Vector2) -> Vector2:
 	return (screen_pos - centre) / _camera.zoom.x + _camera.position
 
 
-## Route a click: to a fleet's destination if a fleet is selected and the shift key is
-## held, otherwise to selection.
+## Route a click: to a planet's owner as a move destination if a fleet is selected and
+## the shift key is held, otherwise to selection.
+##
+## `GalaxyMapView.pick` returns whatever is under the cursor, which is now a *planet* index
+## for every body and the star's system index only when the star itself was hit. A star is
+## not a move destination -- there is nowhere to put a fleet that is not a planet -- so a
+## click on it always selects rather than staging an order.
 func _click_at(screen_pos: Vector2) -> void:
 	var gal := _to_galaxy(screen_pos)
 	var hit: int = _view.pick(gal)
@@ -226,21 +253,34 @@ func _click_at(screen_pos: Vector2) -> void:
 		interaction_refused.emit("empty space")
 		background_picked.emit()
 		return
-	if _order_mode or Input.is_key_pressed(KEY_SHIFT):
+
+	if _is_planet(hit) and (_order_mode or Input.is_key_pressed(KEY_SHIFT)):
 		var f := _controller.fleet()
 		if f == null:
 			interaction_refused.emit("select a fleet before issuing a move")
-			system_picked.emit(hit)
+			planet_picked.emit(hit)
 			return
 		if not _controller.queue_move(hit):
 			# The controller has already explained the refusal; mirror it once so the
 			# map is not silently unresponsive.
 			interaction_refused.emit("move refused")
 			return
-		system_picked.emit(hit)
+		planet_picked.emit(hit)
 		return
+
+	if _is_planet(hit):
+		planet_picked.emit(hit)
+		_controller.select_planet(hit)
+		return
+
 	system_picked.emit(hit)
-	_on_view_system_clicked(hit)
+	_controller.select_system(hit)
+
+
+## Whether a pick index refers to a planet rather than to the star.
+func _is_planet(index: int) -> bool:
+	return _controller != null and _controller.galaxy != null \
+		and _controller.galaxy.planet(index) != null
 
 
 func _on_view_system_clicked(index: int) -> void:
@@ -293,22 +333,27 @@ func frame_galaxy() -> void:
 		return
 	var galaxy := _controller.galaxy if _controller != null else null
 
-	# Home system when the player has one, otherwise the middle of the galaxy.
-	var home := _home_system()
-	var centre := Vector2.ZERO if home == Vector2.INF else home
+	# The star sits at the origin, and every planet orbits it, so the star is always the
+	# centre worth framing from. Centring on the player's homeworld instead would push the
+	# far side of the system off screen, which is where their own expansion is heading.
+	var centre := Vector2.ZERO
+	if galaxy != null:
+		var star := galaxy.system(0)
+		if star != null:
+			centre = star.position
 
-	# Zoom to the *widest* system around that centre, not to the galaxy disk: centring on
-	# home pushes the systems on the far side of the galaxy out past the disk's own radius,
-	# so fitting the disk alone would crop them. Camera zoom magnifies, so the fit is the
-	# visible area divided by twice the half-extent it has to cover.
-	var need_x := GALAXY_RADIUS
-	var need_y := GALAXY_RADIUS
+	# Fit the *outermost planet* around that centre, not the nominal disk radius: the
+	# outermost ring sits at OUTER_ORBIT, so fitting the raw radius would waste a tenth of
+	# the viewport on empty space. Camera zoom magnifies, so the fit is the visible area
+	# divided by twice the half-extent it has to cover.
+	var need_x := GALAXY_RADIUS * GalaxyGenerator.OUTER_ORBIT
+	var need_y := need_x
 	if galaxy != null:
 		need_x = 0.0
 		need_y = 0.0
-		for sys in galaxy.systems:
-			need_x = maxf(need_x, absf(sys.position.x - centre.x))
-			need_y = maxf(need_y, absf(sys.position.y - centre.y))
+		for p in galaxy.planets:
+			need_x = maxf(need_x, absf(p.position.x - centre.x))
+			need_y = maxf(need_y, absf(p.position.y - centre.y))
 	var zoom := clampf(minf(
 		visible.x / (2.0 * need_x * FIT_MARGIN),
 		visible.y / (2.0 * need_y * FIT_MARGIN)
@@ -325,8 +370,12 @@ func _on_resized() -> void:
 	frame_galaxy()
 
 
-## Position of the system holding the player's first colony, or `Vector2.INF` when the
-## player has no colony yet.
+## Position of the player's first colony, or `Vector2.INF` when the player has none.
+##
+## Kept for the "recentre on my homeworld" affordance. The default framing no longer uses
+## it -- the whole system is one star's neighbourhood and a homeworld-centred view would
+## show a fragment of it -- but the accessor is still what a caller needs to know where the
+## player actually is.
 func _home_system() -> Vector2:
 	if _controller == null or _controller.galaxy == null:
 		return Vector2.INF
@@ -334,12 +383,8 @@ func _home_system() -> Vector2:
 	var colonies := _controller.player_colonies()
 	if colonies.is_empty():
 		return Vector2.INF
-	var target := colonies[0].index
-	# PlanetState does not point back at its system, so walk the systems' body lists.
-	for sys in galaxy.systems:
-		if sys.planet_indices.has(target):
-			return sys.position
-	return Vector2.INF
+	# A planet carries its own position now, so there is nothing to walk back up to.
+	return colonies[0].position
 
 
 ## Drop any manual framing and return to the default: home system centred, whole galaxy

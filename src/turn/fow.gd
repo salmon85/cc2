@@ -33,7 +33,7 @@ static func update_visibility(galaxy: GalaxyState, faction_id: int, db: Node) ->
 	for fleet in galaxy.fleets_of(faction_id):
 		if fleet.system < 0:
 			continue
-		var system: SystemState = galaxy.system(fleet.system)
+		var system: SystemState = galaxy.system(_system_of(galaxy, galaxy.planet(fleet.system)))
 		if system == null:
 			continue
 		var reach: float = maxf(fleet.base_sensor_range(), float(db.get("FLEET_SENSOR_RANGE")))
@@ -72,13 +72,19 @@ static func survey_system(galaxy: GalaxyState, faction_id: int, system_index: in
 	return newly
 
 
-## Which system a planet belongs to, or -1. Linear scan is fine: a planet is visited a
-## handful of times per turn and the system list is bounded at 100.
+## Which system a planet belongs to, or -1.
 static func _system_of(galaxy: GalaxyState, planet: PlanetState) -> int:
+	if planet == null:
+		return -1
 	for system in galaxy.systems:
 		if system.planet_indices.has(planet.index):
 			return system.index
 	return -1
+
+
+## The system a planet index belongs to, or -1.
+static func system_of_planet(galaxy: GalaxyState, planet_index: int) -> int:
+	return _system_of(galaxy, galaxy.planet(planet_index))
 
 
 ## Systems `faction_id` can currently see.

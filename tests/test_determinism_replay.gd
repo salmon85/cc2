@@ -68,13 +68,15 @@ func _orders_for(galaxy: GalaxyState) -> Array:
 	for fleet in galaxy.fleets_of(0):
 		if fleet.destination >= 0:
 			continue
-		var lanes := PackedInt32Array()
-		for s in galaxy.systems:
-			if galaxy.systems[fleet.system].has_warp_lane_to(s.index):
-				lanes.append(s.index)
-		if lanes.size() == 0:
+		# Warp lanes are gone with the multi-system map; a fleet now picks any other
+		# planet as a destination, rotating deterministically by turn.
+		var reachable := PackedInt32Array()
+		for p in galaxy.planets:
+			if p.index != fleet.system:
+				reachable.append(p.index)
+		if reachable.size() == 0:
 			continue
-		var dest: int = lanes[galaxy.turn % lanes.size()]
+		var dest: int = reachable[galaxy.turn % reachable.size()]
 		if MovementStage.issue_move(galaxy, fleet.id, 0, dest):
 			orders.append(Order.make_move_fleet(0, fleet.id, dest))
 	return orders

@@ -214,6 +214,16 @@ func is_ready(peer_id: int) -> bool:
 	return entry != null and entry.is_ready
 
 
+## How many players are actually connected right now.
+##
+## This — not `total_slots` — is what the ready button's denominator must be. A `--slots=4`
+## server with two people in it is a two-player lobby that will admit two more; showing
+## "Ready 2/4" told both players there were two more people to wait for who might never
+## arrive, and "Ready 2/2" told them what is actually true.
+func player_count() -> int:
+	return occupied_slots().size()
+
+
 ## How many connected peers have readied up.
 ##
 ## Counts only *occupied* slots: a player who dropped is not "ready", and neither is one
@@ -274,14 +284,20 @@ func all_slots() -> PackedInt32Array:
 	return out
 
 
-## Whether every configured slot holds a connected, ready peer.
+## Whether the match can start: at least one player is present, and all of them are ready.
 ##
-## A slot held by nobody does *not* count as ready. That is the whole reason a lobby
-## waits rather than starting on first connect: a match that begins while a second
-## player is still typing their name would hand them a game already in progress.
+## The gate is on *people present*, not on `total_slots`. `--slots=N` is how many players
+## the server will ever admit, not a quota the lobby waits to fill: a `--slots=4` server
+## with two players who both readied up was stuck forever, which reads as "the game is
+## broken" rather than "wait for two more people who are never coming". Anyone arriving
+## later joins a game already in progress, which is what every other lobby does.
+##
+## An empty lobby still refuses to start. Without that, a server nobody has connected to
+## would broadcast a match start on its first frame, and the first player to arrive would
+## be handed a "started" game with nobody in it.
 func everyone_ready() -> bool:
 	var occupied := occupied_slots()
-	if occupied.size() < total_slots:
+	if occupied.is_empty():
 		return false
 	for s: int in occupied:
 		var peer := peer_of(s)
@@ -425,8 +441,8 @@ func _reclaimable_slot() -> int:
 
 func _deferral_reason() -> String:
 	var occupied := occupied_slots()
-	if occupied.size() < total_slots:
-		return "waiting for %d more player(s)" % (total_slots - occupied.size())
+	if occupied.is_empty():
+		return "waiting for a player to join"
 	for s: int in occupied:
 		var peer := peer_of(s)
 		if peer == 0 or not is_ready(peer):

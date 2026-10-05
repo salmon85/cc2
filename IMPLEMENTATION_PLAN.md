@@ -664,3 +664,131 @@ includes what the rows would actually say.
 - The Defect 3 fixture is **constructed**, not searched for: a single-player galaxy has
   one empire, so a rival colony would never appear naturally and the behavioural half of
   the test would silently never run.
+
+# Round 8: one system, planet-scale map, and a lobby that counts players
+
+Seven reported problems, but four of them turned out to be one problem wearing different
+clothes: the map had *systems* where it needed *planets*. Everything below is arranged by
+that insight rather than by the order it was reported in.
+
+## Defect 1: the ready gate counted seats, not players
+
+`--slots=4` with two people connected deadlocked the turn. The gate compared a ready
+*count* against a *capacity*, so an under-filled table could never advance — the game was
+structurally unplayable at any slot count above the number of humans who actually turned up.
+
+The distinction that was missing is that `--slots` is **capacity** and the gate needs
+**attendance**. `LobbyState.player_count()` is now the denominator: it tracks joins and
+leaves, so a player dropping mid-game immediately raises the ratio for everyone else
+rather than stranding them. `help.md` now says so in the `--slots` row itself.
+
+## A second lobby bug the new test found
+
+`send_welcome()` broadcast the ready tally to the *newcomer only* (`rpc_id`). The client
+who was already seated never learned the denominator had grown, so it sat on a stale
+fraction until its next turn sync. `send_welcome` now calls `_broadcast_ready_count()` —
+an actual broadcast — because growing the table is exactly the event every seated client
+needs to hear about. This is the second time "the message was correct, it just went to the
+wrong people" has been a real bug in this transport.
+
+## Defect 2: the misaligned black box
+
+The screenshot's box was the panel's background rect, drawn at a different size than the
+text it framed. Removed rather than realigned: it was decoration, and removing it also
+satisfies the font-size reduction without a second layout constant to keep in sync. Ready
+state is now carried by colour alone (green unready / red ready).
+
+## Defect 3: END TURN and ORDERS, both removed
+
+Two buttons removed rather than hidden. END TURN became `map.end_turn_requested`, fired
+automatically once every connected player is ready — the button was the only thing
+between the player and the transition they wanted anyway. ORDERS and its counter are gone
+with it: orders are applied at turn commit regardless, so the counter was reporting the
+result of a decision the player could not influence.
+
+## Defect 4: the map becomes one system
+
+This is the structural change everything else follows from. `GalaxyGenerator` now places
+**one** star at the origin with `strategic_value = 1.0` and populates it with planets on
+sqrt-spaced orbit rings (`GALAXY_RADIUS * lerpf(0.06, 0.94, sqrt(t))` — square root
+spreads rings by *area*, so they don't bunch toward the star). `--systems=N` is retained
+as the CLI surface everyone already uses but now means **planets in the one system**.
+
+Every subsystem that asked "which system" had to ask "which planet" instead — movement,
+invasion, FoW, the inspector, and the renderer. Two of those conversions found real bugs,
+which is the argument for doing the conversion by hand rather than by search-and-replace:
+
+- **`_homeworld_of` walked `faction.systems`.** With one system, every empire's index
+  resolved to the same entry, so *every* empire's homeworld came back as planet 0. It now
+  scans `galaxy.planets` for a colonized planet it owns — the systems index is not a
+  meaningful proxy for "where this empire is" when there is exactly one system.
+- **`knows_owner_of` and `_planet_detail_known` over-revealed.** Both gated on "own fleet
+  in this *system*", which with one system means any ship anywhere reveals every rival's
+  holdings and full economy. Both now narrow to a fleet **parked on that specific world**.
+  This is a Fog-of-War regression the restructure introduced; it is called out here
+  because "the system-level check is now trivially true" is not a thing anyone would
+  notice by reading the diff.
+
+## Defect 5: 50x scale needs four constants, not one
+
+The system is 50x larger, so every distance was re-tuned: `GameDB.BASE_MOVEMENT` 50→2500,
+`MAX_MOVEMENT` 600, and the three sensor ranges. Two more live where the units are read —
+`ShipHullData.SPEED_SCALE` and `FleetState.HULL_SCALE`, both 50.0.
+
+This is the one change in the round most likely to have broken something silently, and it
+did: with only the `GameDB` constants scaled, fleets computed 76.0/turn against a 5973-unit
+crossing and never visibly moved. Movement clamps to the *hull* speed cap, not the base
+value, so `FleetState.base_speed()` must scale the hull figure at the one point every
+consumer reads. Missing any one of the four constants produces a working-looking game
+that does nothing.
+
+## Defect 6: the seed governs layout, the homeworld does not
+
+Determinism tests force a distinction that is easy to blur. The `home_rng` stream is drawn
+separately from the layout stream, so **the same seed always produces the same map** while
+**the starting planet is redrawn on every game** — which is what was asked for, and what
+`test_determinism_replay` now asserts in both directions (same seed → same layout
+fingerprint, different runs → different opening fingerprint).
+
+## Defects the self-verification loop caught in Round 8
+
+Three of these are worth recording because none of them were visible by reading the diff.
+
+**A dead call that aborted the test driver forever.** `_lobby.mark_ready(slot, true)` was
+never a real method — the lobby has `set_ready(peer_id, ready)`, keyed by *peer*. The call
+raised every frame, which aborted `_process` *before* its final `return false`, so the
+stage never advanced and the suite spun until it was killed rather than failing. Two
+lessons: a suite that hangs is reporting a crash inside its own driver, and the dead
+`_teardown(); _finish(); return true` sitting after that `return false` meant the abort
+had nowhere visible to go. Both removed.
+
+**Two assertions that pinned the bug this round was meant to fix.** The old pure-rule
+tests asserted `not everyone_ready()` for a lobby where the only remaining player *was*
+ready — i.e. they asserted the `--slots=4`-with-two-players deadlock was correct. Under the
+new gate that is true, so the tests failed. They were rewritten to assert the property that
+actually matters: the departed player's flag cannot reach the tally, and an AI-managed seat
+contributes nothing and stays off the turn loop. Notably `not everyone_ready()` was never
+the interesting property even before — the AI seat was already excluded from `occupied_slots()`,
+so it never held the gate open in the first place.
+
+**A one-frame race read as a desync.** The server resolves turn 2 on the same frame the
+lobby latches, so the four "client holds the server's galaxy" assertions ran while that
+resolution was still on the wire and compared turn 1 against turn 2. Waiting for the
+clients to catch up — polled *across frames*, because ENet is pumped by the main loop and a
+tight in-frame loop would burn 400 iterations without one packet arriving — makes them
+pass. Note what this is not: it is not a fixed desync. The hash matched as soon as the
+packet landed, and the clients were correctly behind rather than wrong.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 1815 checks, 0 failed, ALL GREEN**, exit 0.
+  (`test_app` 17, `test_cli` 78, `test_defs` 156, `test_determinism_replay` 199,
+  `test_enet_sync` 152, `test_galaxy_gen` 321, `test_gui_integration` 238,
+  `test_session_lifecycle` 158, `test_state` 84, `test_transport` 24,
+  `test_turn_engine` 388.)
+- `test_galaxy_gen`: 321 checks — adds `_test_homeworld_is_random`, which pins both halves
+  of Defect 6 rather than just asserting "something varies".
+- `test_turn_engine`: 388 checks — `_unowned_planet(g, skip)` exists because the old
+  fixtures colonised `g.systems[0].planet_indices[0]`, which is now faction 0's randomly
+  drawn homeworld already sitting at its population cap. A test that "grows a colony" by
+  re-colonising someone's homeworld passes for the wrong reason.

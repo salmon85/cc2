@@ -38,8 +38,12 @@ static func _dominant_role(fleet: FleetState) -> int:
 
 
 ## Issue a move order. Returns false (and changes nothing) when the order is illegal.
+##
+## The target is a *planet*, not a system. There is one system, so a system target is
+## either "where you already are" or "the star", and neither is a move a player would
+## recognise as movement. Sending a fleet to a planet is the only legible order left.
 static func issue_move(
-	galaxy: GalaxyState, fleet_id: int, faction_id: int, target_system: int
+	galaxy: GalaxyState, fleet_id: int, faction_id: int, target_planet: int
 ) -> bool:
 	var f: FleetState = galaxy.fleet(fleet_id)
 	if f == null or not f.active:
@@ -48,7 +52,7 @@ static func issue_move(
 		return false
 	if f.system < 0 or f.destination >= 0:
 		return false  # already in transit
-	var dest: SystemState = galaxy.system(target_system)
+	var dest: PlanetState = galaxy.planet(target_planet)
 	if dest == null or dest.index == f.system:
 		return false
 
@@ -78,16 +82,14 @@ static func advance(galaxy: GalaxyState) -> PackedInt32Array:
 			continue
 
 		var speed := fleet_speed(f, owner_state)
-		var from: SystemState = galaxy.system(f.system)
-		var to: SystemState = galaxy.system(f.destination)
+		var from: PlanetState = galaxy.planet(f.system)
+		var to: PlanetState = galaxy.planet(f.destination)
 		if from == null or to == null:
 			f.destination = -1
+			f.travelled = 0.0
 			continue
 
-		# A direct warp lane collapses the distance to a token hop, which is why a
-		# mature network moves fleets across the map in a single turn.
-		var distance: float = GameDB.WARP_LANE_TRAVEL if from.has_warp_lane_to(to.index) \
-			else from.distance_to(to)
+		var distance := orbit_distance(from, to)
 
 		f.travelled += speed
 		if f.travelled + 0.0001 >= distance:
@@ -99,16 +101,25 @@ static func advance(galaxy: GalaxyState) -> PackedInt32Array:
 	return arrivals
 
 
-## Every active fleet sitting in `system_index`. Pass -1 for `faction_id` to get them all.
+## Straight-line distance between two planets' orbits, in parsecs.
+##
+## Because every planet sits on a ring around one star, the distance between two worlds is
+## the chord between their orbit points -- the star is in the way geometrically but not
+## tactically, so the two bodies are treated as directly reachable.
+static func orbit_distance(from: PlanetState, to: PlanetState) -> float:
+	return from.position.distance_to(to.position)
+
+
+## Every active fleet sitting on `planet_index`. Pass -1 for `faction_id` to get them all.
 static func fleets_in_system(
-	galaxy: GalaxyState, system_index: int, faction_id: int
+	galaxy: GalaxyState, planet_index: int, faction_id: int
 ) -> Array[FleetState]:
 	var out: Array[FleetState] = []
 	var ids := galaxy.fleets.keys()
 	ids.sort()
 	for id: int in ids:
 		var f: FleetState = galaxy.fleets[id] as FleetState
-		if f == null or not f.active or f.system != system_index:
+		if f == null or not f.active or f.system != planet_index:
 			continue
 		if faction_id >= 0 and f.owner != faction_id:
 			continue
@@ -116,10 +127,33 @@ static func fleets_in_system(
 	return out
 
 
-## Pair fleets sharing a system into engagements, deterministically.
+## Every active fleet that is somewhere on the map, in stable id order.
+##
+## Replaces the old per-system sweep: with one system and no neighbours, "the fleets in
+## this system" would have meant "all the fleets", which is the same answer for every
+## caller and hides the grouping that combat and invasion actually need.
+static func fleets_in_orbit(galaxy: GalaxyState, faction_id: int = -1) -> Array[FleetState]:
+	var out: Array[FleetState] = []
+	var ids := galaxy.fleets.keys()
+	ids.sort()
+	for id: int in ids:
+		var f: FleetState = galaxy.fleets[id] as FleetState
+		if f == null or not f.active or f.system < 0:
+			continue
+		if faction_id >= 0 and f.owner != faction_id:
+			continue
+		out.append(f)
+	return out
+
+
+## Pair fleets sharing a planet into engagements, deterministically.
 ##
 ## Returns an array of `[attacker_id, defender_id]` pairs. Both sides alternate so no
 ## faction gets to strike first purely by iteration order.
+##
+## Sharing an *orbit* is what counts, not sharing a neighbourhood: two fleets pass each other
+## 400 parsecs apart and do not fight, which is what stops the whole map becoming one
+## battle the moment two empires expand.
 static func find_engagements(galaxy: GalaxyState) -> Array:
 	var pairs: Array = []
 	var by_system: Dictionary = {}

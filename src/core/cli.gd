@@ -87,7 +87,7 @@ class Options extends RefCounted:
 		var mode_name: String = [
 			"SINGLE_PLAYER", "DEDICATED_SERVER", "CLIENT", "SETUP_MENU"
 		][mode]
-		return "%s ip=%s port=%d seed=%d systems=%d factions=%d slots=%d%s%s" % [
+		return "%s ip=%s port=%d seed=%d planets=%d factions=%d slots=%d%s%s" % [
 			mode_name, ip, port, seed_value, system_count, faction_count, slots,
 			" ready" if auto_ready else "",
 			"" if not warnings.is_empty() else " (no warnings)",
@@ -132,6 +132,10 @@ static func parse(argv: PackedStringArray) -> Options:
 				elif arg.begins_with("--systems="):
 					opts.system_count = _parse_clamped_int(
 						arg.substr(10), opts, 30, 100, "systems", 50)
+					# The flag is still called `--systems`, but the game is one system now
+					# and this is its planet count. Renaming the flag would break every
+					# existing launch script for no gain in clarity -- the help text and
+					# the `planets=` log line say what it means.
 				elif arg.begins_with("--factions="):
 					opts.faction_count = _parse_clamped_int(
 						arg.substr(11), opts, 1, 8, "factions", 2)
@@ -204,9 +208,10 @@ static func parse(argv: PackedStringArray) -> Options:
 ##
 ## An explicit `--factions` wins: an operator who says `--slots=8 --factions=2` is running
 ## a two-human game with spectators' seats, not a mistake, so it is honoured and left to
-## `App` to report. The system count is raised alongside the factions because the generator
-## keeps roughly one homeworld per five systems, and a cramped map would quietly cap the
-## empire count back down to below the slot count -- the same bug one layer down.
+## `App` to report. The planet count is raised alongside the factions so there is always
+## enough of the system to give every empire its own starting world: a cramped system
+## would quietly cap the empire count back down to below the slot count -- the same bug
+## one layer down.
 static func reconcile_slot_empires(opts: Options) -> void:
 	if opts.mode != Mode.DEDICATED_SERVER:
 		return

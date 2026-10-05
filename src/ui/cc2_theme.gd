@@ -57,6 +57,10 @@ const STAR_COLORS: Array[Color] = [
 
 ## --- Metrics ---------------------------------------------------------------
 
+## Map labels only. Smaller than `FONT_SMALL` because a star name sits next to a glyph on
+## a dark field, where a plate used to be needed to keep it legible -- and the plate is
+## gone. Bigger than nothing so the names still read at the default zoom.
+const FONT_TINY := 9
 const FONT_SMALL := 11
 const FONT_BODY := 13
 const FONT_HEAD := 16
@@ -78,6 +82,33 @@ static func star_color(star_class: int) -> Color:
 	if star_class < 0:
 		return STAR_COLORS[2]
 	return STAR_COLORS[clampi(star_class, 0, STAR_COLORS.size() - 1)]
+
+
+## Palette for a planet, chosen from the id hash of its `PlanetTypeData`.
+##
+## Bodies are the map's new primary markers -- a hundred planets rather than a hundred
+## stars -- so they need to be distinguishable from each other at a glance without any
+## class semantics. A stable hash gives every type its own colour forever, across saves,
+## which matters because the id is all that survives serialisation.
+const PLANET_COLORS: Array[Color] = [
+	Color(0.800, 0.520, 0.360),   ## rust
+	Color(0.400, 0.720, 0.560),   ## verdant
+	Color(0.400, 0.560, 0.820),   ## ocean
+	Color(0.860, 0.780, 0.440),   ## desert
+	Color(0.640, 0.520, 0.780),   ## ice-violet
+	Color(0.820, 0.460, 0.460),   ## molten
+	Color(0.560, 0.640, 0.480),   ## barren
+	Color(0.480, 0.480, 0.540),   ## rock
+]
+
+
+## Colour for a planet of `type_id`. Falls back to a neutral grey for an empty or
+## unknown id, so a body whose definition failed to load still renders.
+static func planet_color(type_id: StringName) -> Color:
+	if type_id == &"":
+		return Color(0.50, 0.54, 0.52)
+	var key := str(type_id)
+	return PLANET_COLORS[absi(key.hash()) % PLANET_COLORS.size()]
 
 
 ## A flat, square-cornered box. The Amiga look has no rounded corners and no gradients,

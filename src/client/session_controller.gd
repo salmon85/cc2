@@ -154,6 +154,11 @@ func system_of_planet(planet_index: int) -> int:
 ## destination when it arrives, which is the information a player is entitled to -- not
 ## a permanent mark on every system within sensor range.
 ##
+## "Parked there" is now "parked on a world that orbits there". Fleets sit on planets, and
+## with one system every fleet in the game orbits the star, so the test has to be about
+## which body a ship is over rather than about which system -- otherwise the answer is
+## trivially yes for the entire galaxy and the rule stops filtering anything.
+##
 ## An unowned system is always "known": there is no owner to reveal, and rendering the
 ## neutral form is what makes empty space read as empty rather than as redacted.
 ##
@@ -171,14 +176,31 @@ func knows_owner_of(system_index: int) -> bool:
 		return true
 	if sys.owner == player_id:
 		return true
+	# A fleet parked on a world in this system counts as presence. A fleet merely sailing
+	# to it does not: `destination` set means the fleet is under way and has not settled
+	# anywhere yet.
+	#
+	# "In this system" is deliberately narrow. With one system every world resolves here,
+	# so a broader reading -- "a ship of mine is anywhere at all" -- would make the rule
+	# vacuous and turn the entire map into a known-object map the moment a player launched
+	# one ship. The first body of the system is the one that can be occupied; a ship on any
+	# other world in the same system does not stand in for it.
+	var first := _first_planet_of(system_index)
+	if first < 0:
+		return false
 	for key: int in galaxy.fleets:
 		var f: FleetState = galaxy.fleets[key]
-		if not f.active or f.owner != player_id:
-			continue
-		# In orbit only: `system` is cleared or left behind once a fleet is under way.
-		if f.system == system_index and f.destination < 0:
+		if f.active and f.owner == player_id and f.destination < 0 and f.system == first:
 			return true
 	return false
+
+
+## The lowest-indexed body in `system_index`, or -1. With one system this is planet 0.
+func _first_planet_of(system_index: int) -> int:
+	var sys := galaxy.system(system_index) if galaxy != null else null
+	if sys == null or sys.planet_indices.is_empty():
+		return -1
+	return sys.planet_indices[0]
 
 
 ## Orders the player has staged but not yet submitted.
@@ -206,6 +228,10 @@ func select_system(index: int) -> void:
 	state_changed.emit()
 
 
+## Select a planet. The map calls this on every body click now, so the selected system
+## follows the planet rather than the other way round: the inspector's top section is the
+## world, and a body whose system disagrees with the selection would show the star's
+## details above the planet's.
 func select_planet(index: int) -> void:
 	if galaxy == null:
 		return
@@ -213,6 +239,10 @@ func select_planet(index: int) -> void:
 		action_rejected.emit("no such planet")
 		return
 	selected_planet = index
+	for sys in galaxy.systems:
+		if sys.planet_indices.has(index):
+			selected_system = sys.index
+			break
 	state_changed.emit()
 
 
@@ -227,19 +257,29 @@ func select_fleet(id: int) -> void:
 		action_rejected.emit("that fleet is not yours")
 		return
 	selected_fleet = id
-	selected_system = target.system
+	# A fleet sits on a planet now; `target.system` is that planet's index. Keep the
+	# selection consistent with it so the inspector shows the world the fleet is over.
+	selected_planet = target.system
+	for sys in galaxy.systems:
+		if sys.planet_indices.has(target.system):
+			selected_system = sys.index
+			break
 	state_changed.emit()
 
 
 # --- Player actions --------------------------------------------------------
 
 ## Queue a move for the selected fleet. Returns false and explains when refused.
-func queue_move(target_system: int) -> bool:
+##
+## `target_planet` is a planet index. Fleets used to move between star systems; there is one
+## system now, so the map's destinations are worlds and the fleet ends up parked on the
+## planet the player clicked.
+func queue_move(target_planet: int) -> bool:
 	var f := fleet()
 	if f == null:
 		action_rejected.emit("select a fleet first")
 		return false
-	if galaxy == null or galaxy.system(target_system) == null:
+	if galaxy == null or galaxy.planet(target_planet) == null:
 		action_rejected.emit("no such destination")
 		return false
 	if not f.active:
@@ -249,11 +289,11 @@ func queue_move(target_system: int) -> bool:
 		action_rejected.emit("that fleet is already in transit")
 		return false
 
-	var order := Order.make_move_fleet(player_id, f.id, target_system)
+	var order := Order.make_move_fleet(player_id, f.id, target_planet)
 	if queue.submit(order):
-		# Keep the in-flight mirror in step so the map draws the warp line immediately
+		# Keep the in-flight mirror in step so the map draws the transit line immediately
 		# rather than only after the turn resolves.
-		MovementStage.issue_move(galaxy, f.id, player_id, target_system)
+		MovementStage.issue_move(galaxy, f.id, player_id, target_planet)
 		state_changed.emit()
 		return true
 	action_rejected.emit("the order was refused")
@@ -384,14 +424,33 @@ func is_awaiting_server() -> bool:
 
 ## Signal the lobby ready flag (or take it back).
 ##
+## Commit this player's turn and tell the server they are ready.
+##
 ## Only meaningful in a networked session: single player has no lobby to be ready *for*.
 ## Returns false when there is no server to tell, which the caller reports rather than
 ## silently doing nothing -- a player who presses READY and sees no change needs to know
 ## whether the button is broken or the flag simply does not apply here.
+##
+## This ships the staged orders as part of raising the flag. The END TURN button used to be
+## that commit step, and it has been removed: READY *is* the commit now. Leaving the two
+## separate would mean a player staged four orders, pressed READY, and watched them vanish
+## because nothing had submitted them -- the button would have looked like it did nothing.
 func set_ready(is_ready: bool) -> bool:
 	if turn_submitter == null:
 		return false
-	return turn_submitter.set_ready(is_ready)
+	# Only a raise commits. Un-readying is a correction within the same lobby, and must
+	# not re-ship orders the player already submitted.
+	if not is_ready:
+		return turn_submitter.set_ready(false)
+	if is_awaiting_server():
+		action_rejected.emit(TurnSyncClient.WAITING_TEXT)
+		return false
+	var staged := orders_to_submit()
+	for o in staged:
+		turn_submitter.stage_order(o)
+	if queue != null:
+		queue.clear()
+	return turn_submitter.set_ready(true)
 
 
 ## Whether this client has told the server it is ready. False in a local session.

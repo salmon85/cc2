@@ -126,7 +126,7 @@ static func _apply_order(
 		Enums.OrderType.MOVE_FLEET:
 			var fleet: FleetState = galaxy.fleet(order.fleet) as FleetState
 			if fleet != null and fleet.owner == order.faction:
-				MovementStage.issue_move(galaxy, order.fleet, order.faction, order.target_system)
+				MovementStage.issue_move(galaxy, order.fleet, order.faction, order.target_planet)
 		Enums.OrderType.BUILD_SHIP:
 			_apply_build_ship(galaxy, faction, order, defs, db)
 		Enums.OrderType.BUILD_STRUCTURE:
