@@ -339,37 +339,33 @@ func _draw_order_line(galaxy: GalaxyState) -> void:
 	var perp := Vector2(-dir.y, dir.x) * 5.0
 	draw_colored_polygon(PackedVector2Array([tip + dir * 9.0, tip + perp, tip - perp]), colour)
 
-	# Waypoint dots along the line, one per DOT_FRACTION of the crossing. They are the
-	# units transit time is quoted in, so showing the units the number is counted in is
-	# what makes "18 dots, 2 turns" checkable against the map rather than a claim in a
-	# panel.
-	_draw_waypoints(galaxy, origin, dest, staged)
+	# Waypoint pips along the line: one per turn of flight. They are the units transit
+	# time is quoted in, so showing the units the number is counted in is what makes
+	# "14 dots, 14 turns" checkable against the map rather than a claim in a panel.
+	#
+	# The positions come from `MovementStage.waypoints`, which is also where the turn count
+	# comes from. Drawing them from a loop of the view's own let the two drift.
+	_draw_waypoints(galaxy, f.system, target, staged)
 
 
-## The waypoint dots for a planned crossing.
-func _draw_waypoints(
-	galaxy: GalaxyState, origin: PlanetState, dest: PlanetState, staged: bool
-) -> void:
-	var span := dest.position - origin.position
-	var dots := MovementStage.orbit_dots(galaxy, origin, dest)
-	if dots <= 0.0 or span.length_squared() <= 0.0:
+## The waypoint pips for a planned crossing.
+func _draw_waypoints(galaxy: GalaxyState, from_planet: int, to_planet: int, staged: bool) -> void:
+	var origin := galaxy.planet(from_planet)
+	var dest := galaxy.planet(to_planet)
+	if origin == null or dest == null:
 		return
-	var dir := span / span.length()
-	var perp := Vector2(-dir.y, dir.x)
+	var marks := MovementStage.waypoints(galaxy, from_planet, to_planet)
+	if marks.is_empty():
+		return
+	var span := dest.position - origin.position
+	if span.length_squared() <= 0.0:
+		return
+	var perp := Vector2(-span.y, span.x).normalized()
 	var colour := CC2Theme.WHITE_DIM if staged else CC2Theme.CYAN
-	var step := MovementStage.dot_size(galaxy)
 	var alpha := 0.45 if staged else 0.8
-	var travelled := 0.0
-	var n := 0
-	while travelled < span.length() and n < 256:
-		travelled += step
-		n += 1
-		# The terminal dot is the destination's own marker; drawing it twice is noise.
-		if travelled >= span.length():
-			break
-		var at := origin.position + dir * travelled
+	for at: Vector2 in marks:
 		# A tick rather than a round dot: it reads as a ruler marking, which is what it is,
-		# and stays legible when the dots are a pixel apart at low zoom.
+		# and stays legible when the pips are a pixel apart at low zoom.
 		draw_line(at - perp * 3.0, at + perp * 3.0,
 			Color(colour.r, colour.g, colour.b, alpha), 1.0)
 

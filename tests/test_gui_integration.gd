@@ -612,6 +612,79 @@ func _step_order_confirmation() -> void:
 	sup.ok(turns == maxi(1, ceili(dots / MovementStage.DOTS_PER_TURN)),
 		"the quoted turns are the distance in dots over the uniform rate",
 		"%d dots / %.0f per turn" % [dots, MovementStage.DOTS_PER_TURN])
+
+	# The figure the player reads has to be the figure on the map. A turn *is* a waypoint:
+	# count the pips drawn along the order line, add the destination's own marker, and you
+	# must land on the quoted turn count -- not one short, not one long.
+	#
+	# This is the assertion that was missing. The suite previously compared the quote
+	# against `ceili(dots / DOTS_PER_TURN)`, which is `transit_turns` with the division
+	# still in it, so it passed at every possible rate -- including the ten-dots-per-turn
+	# value that made the panel read "14 dots, 2 turns" over fourteen visible pips.
+	sup.eq(MovementStage.waypoints(gal, f.system, dest).size() + 1, turns,
+		"the pips drawn along the route plus the destination marker ARE the quoted turns")
+	sup.ok(MovementStage.fleet_speed(f, c.player()) == 1.0,
+		"a fleet advances exactly one waypoint per turn, so a turn is one pip",
+		"%.3f dots/turn" % MovementStage.fleet_speed(f, c.player()))
+	# Every pip is evenly spaced and evenly ordered: the ruler has no skipped marks.
+	var marks := MovementStage.waypoints(gal, f.system, dest)
+	var span_len := gal.planet(f.system).position.distance_to(gal.planet(dest).position)
+	var gaps := PackedFloat32Array()
+	var prev := gal.planet(f.system).position
+	for m: Vector2 in marks:
+		gaps.append(prev.distance_to(m))
+		prev = m
+	var max_gap := 0.0
+	for gp: float in gaps:
+		max_gap = maxf(max_gap, absf(gp - MovementStage.dot_size(gal)))
+	sup.ok(max_gap < 0.01,
+		"every pip is exactly one dot from the last -- none skipped or bunched",
+		"worst=%.5f parsecs off a %.3f dot" % [max_gap, MovementStage.dot_size(gal)])
+	sup.ok(span_len > 0.0, "the route has a length to divide up", "%.1f" % span_len)
+
+	# The longest crossing is not where this relationship is decided. `round(dots)` and the
+	# pip count agree whenever the fractional part of the distance is at least a half --
+	# the longest hops land there by luck -- and disagree by exactly one on the other half
+	# of the map. So the check searches for a crossing where the two *provably differ* and
+	# requires the pip count. Without that, the panel could print a rounded parsec figure
+	# and every assertion above would still pass, which is precisely how "14 dots, 2 turns"
+	# shipped beside a line of fourteen pips.
+	var div_dest := -1
+	var div_dots := 0.0
+	for p in gal.planets:
+		if p.index == f.system:
+			continue
+		var d := MovementStage.orbit_dots(gal, gal.planet(f.system), p)
+		# Skip anything where the rounded distance already equals the pip count --
+		# such a pair cannot tell the two implementations apart.
+		if int(round(d)) == MovementStage.waypoints(gal, f.system, p.index).size() + 1:
+			continue
+		div_dots = d
+		div_dest = p.index
+		break
+	if div_dest >= 0:
+		var div_pips := MovementStage.waypoints(gal, f.system, div_dest).size() + 1
+		var div_turns := MovementStage.transit_turns(gal, f.system, div_dest)
+		sup.ok(int(round(div_dots)) != div_turns,
+			"a crossing was found where a rounded distance and the pip count disagree",
+			"raw=%.3f round=%d pips=%d" % [div_dots, int(round(div_dots)), div_pips])
+		sup.eq(div_pips, div_turns,
+			"and there the pips and turns still agree")
+		# Open the prompt for it and read what the player is actually shown.
+		map.cancel_order()
+		map.propose_order(div_dest)
+		var shown_div := panel.visible_text()
+		sup.ok(shown_div.contains("%d dots" % div_pips),
+			"the prompt prints the pip count there, not the rounded distance",
+			"want %d dots (rounded distance is %d); shown=%s"
+				% [div_pips, int(round(div_dots)), shown_div])
+		sup.ok(shown_div.contains("%d turn" % div_turns),
+			"alongside the matching turn count",
+			"want %d turns; shown=%s" % [div_turns, shown_div])
+		map.cancel_order()
+	else:
+		sup.ok(true, "no crossing on this map discriminates the two figures; not exercised")
+
 	# Every fleet moves at the same rate, so a second fleet over a longer leg takes
 	# strictly more turns. Speed varying with hull composition is what made this
 	# unquotable before.
@@ -635,8 +708,15 @@ func _step_order_confirmation() -> void:
 	sup.ok(panel.visible_text().contains("%d turn" % turns),
 		"quoting the number of turns the flight will take",
 		"want %d turns; shown=%s" % [turns, panel.visible_text()])
-	sup.ok(panel.visible_text().contains("%d dots" % int(round(dots))),
-		"and the dot distance it is counted in")
+	# The quoted dot figure must be the pip count -- the marks on the map plus the
+	# destination -- and therefore equal the turn count. Asserting it against a separately
+	# rounded parsec distance is what let "14 dots, 2 turns" print side by side.
+	var pip_count := MovementStage.waypoints(gal, f.system, dest).size() + 1
+	sup.ok(panel.visible_text().contains("%d dots" % pip_count),
+		"and the dot distance it is counted in",
+		"want %d dots; shown=%s" % [pip_count, panel.visible_text()])
+	sup.eq(pip_count, turns,
+		"the quoted dots and the quoted turns are the same figure")
 
 	# --- cancel discards --------------------------------------------------------
 	map.cancel_order()

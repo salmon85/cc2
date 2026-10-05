@@ -306,6 +306,17 @@ func _test_movement() -> void:
 			"%s travels at the uniform dot rate" % str(hulls))
 	sup.eq(speed, MovementStage.DOTS_PER_TURN,
 		"and the rate is the one the turn count is quoted in")
+	# Pinned to the literal, not to the constant. `eq(speed, DOTS_PER_TURN)` is a tautology
+	# -- it passes at ten dots per turn exactly as it passes at one, which is how the map
+	# ended up quoting "14 dots, 2 turns" over a line of fourteen pips without a single
+	# check failing. The rate is the thing that makes a pip mean a turn, so it gets a
+	# literal.
+	sup.eq(speed, 1.0,
+		"and that rate is one waypoint per turn -- a turn IS a pip on the map")
+	# Which makes the quoted figure count the marks rather than approximate them.
+	sup.ok(ceili(MovementStage.orbit_dots(g, g.planet(origin), g.planet(origin + 1))
+			/ MovementStage.DOTS_PER_TURN) >= 1,
+		"any real crossing costs at least one turn")
 
 	# A dot is a fixed fraction of the radius, so the same crossing is the same number of
 	# dots on every map size. This is what makes a quoted turn count meaningful across a
@@ -399,6 +410,10 @@ func _test_movement() -> void:
 				"%d turns over %.0f dots" % [
 					widest, MovementStage.orbit_dots(
 						g, g.planet(inner), g.planet(outer))])
+			# The turn count is the pip count, so it must agree with the marks drawn for
+			# this exact crossing. Guards the two against drifting apart again.
+			sup.eq(MovementStage.waypoints(g, inner, outer).size() + 1, widest,
+				"the longest crossing draws one pip per turn")
 			# And it is the same on the biggest map the game can be launched on, which is
 			# the whole reason distances are in dots.
 			var big := _sized_galaxy(2024, "extreme")

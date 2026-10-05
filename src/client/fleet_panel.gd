@@ -157,9 +157,13 @@ func show_proposal(planet_index: int) -> void:
 		hide_proposal()
 		return
 	var turns := MovementStage.transit_turns(_controller.galaxy, f.system, planet_index)
-	var dots := MovementStage.orbit_dots(_controller.galaxy, _controller.galaxy.planet(f.system), dest)
-	_transit_label.text = "ESTIMATED TRANSIT\n%d turn%s  (%d dots)" % [
-		turns, "" if turns == 1 else "s", int(round(dots))]
+	# The dot count is the *pip count*, taken from the same list the map draws and the
+	# turn count is derived from -- not a separately rounded parsec figure. Printed from a
+	# separate computation it read "14 dots, 2 turns" beside a line of fourteen pips, which
+	# is two numbers a player cannot reconcile rather than one number they can check.
+	var dots := MovementStage.waypoints(_controller.galaxy, f.system, planet_index).size() + 1
+	_transit_label.text = "ESTIMATED TRANSIT\n%d turn%s  (%d dots on the map)" % [
+		turns, "" if turns == 1 else "s", dots]
 	_transit_label.visible = true
 	_confirm_row.visible = true
 

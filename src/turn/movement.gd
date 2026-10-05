@@ -9,9 +9,9 @@ class_name MovementStage
 ## Distances are counted in **dots**, not parsecs. A dot is a fixed fraction of the map's
 ## span, so a crossing is the same *number of dots* on every map size and a dot is the
 ## same *distance* every fleet covers in a turn. That makes transit time a function of
-## distance alone -- legible to the player as "12 dots, 6 turns" -- rather than a product
-## of three independent per-hull speeds that has to be estimated on the client and
-## happened to disagree with what the resolver did.
+## distance alone -- legible to the player as "14 dots, 14 turns", one pip per turn -- and
+## not a product of three independent per-hull speeds that has to be estimated on the
+## client and happened to disagree with what the resolver did.
 
 ## How far one dot is, as a fraction of the map radius.
 ##
@@ -22,18 +22,58 @@ class_name MovementStage
 ##
 ## A hundredth of the radius, which makes a full-width crossing about two hundred dots on
 ## *every* map size -- the scale is what makes the turn count below independent of the tier.
-## Coarser than this and ten dots per turn crosses the whole map in two turns, which is
-## the "movements take multiple turns" property disappearing.
+## Coarser than this and the pips bunch up until the line reads as solid and a player
+## counting them has nothing to count.
 const DOT_FRACTION := 0.01
+
+## World positions of the waypoint marks drawn along an order line.
+##
+## One mark per *whole* dot of the crossing, excluding the final dot: the destination's own
+## planet marker sits there and drawing a pip on top of it is noise. So the list is always
+## one shorter than `transit_turns`, and `transit_turns` counts the destination marker as
+## the last waypoint -- the crossing has exactly as many marks as turns once you count it.
+##
+## This is the list the map draws *and* the one the turn count is derived from, so the two
+## cannot drift. When they were computed independently -- the view walking its own loop
+## while the panel asked `transit_turns` -- a change to the rate moved the marks and the
+## quote together by coincidence, and nothing checked that they agreed.
+static func waypoints(
+	galaxy: GalaxyState, from_planet: int, to_planet: int
+) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	var a := galaxy.planet(from_planet)
+	var b := galaxy.planet(to_planet)
+	if a == null or b == null:
+		return out
+	var span := orbit_distance(a, b)
+	if span <= 0.0:
+		return out
+	var step := dot_size(galaxy)
+	var dir := (b.position - a.position) / span
+	var travelled := 0.0
+	# Bounded by the dot count, not by a magic number: a coarse map or a long crossing
+	# cannot silently truncate the ruler.
+	var guard := 0
+	while travelled + step < span and guard < 4096:
+		travelled += step
+		guard += 1
+		out.append(a.position + dir * travelled)
+	return out
+
 
 ## Dots a fleet covers in one turn.
 ##
 ## Uniform across every hull and every role by design. A scout and a dreadnought used to
 ## move at different rates, which made transit time depend on what a fleet happened to be
 ## built from and made it impossible to quote a number to the player before committing.
-## Ten dots per turn puts a full-width crossing at roughly twenty turns and a short hop at
-## one or two, which is the range where a player plans.
-const DOTS_PER_TURN := 10.0
+##
+## One dot per turn, so a turn *is* a waypoint. This is the whole contract between the
+## number the panel quotes and the map the player is looking at: every pip drawn along the
+## order line is one turn of flight, and the quoted count is the number of pips. At ten
+## dots per turn the same crossing read "14 dots, 2 turns" -- the fleet visibly skipped
+## past seven pips per turn, and a player counting the pips had no way to reconcile that
+## with the figure that decides when their fleet arrives.
+const DOTS_PER_TURN := 1.0
 
 ## Maximum parsecs a faction's fleets can cover this turn.
 ##
@@ -75,9 +115,13 @@ static func orbit_dots(galaxy: GalaxyState, from: PlanetState, to: PlanetState) 
 
 ## Turns a fleet would take to cross to `to_planet`, at the uniform rate.
 ##
-## Rounded *up*: a fleet that is already in range arrives at the end of the next turn
-## rather than instantly, and a fraction of a turn never rounds the other way -- the
-## player is quoted the same number the resolver will take.
+## This is the pip count, rounded *up*, plus the destination's own marker -- so a player
+## counting waypoints along the order line gets exactly this number, and cannot end up
+## holding a figure one short of what they drew.
+##
+## Rounded up rather than truncated: a fleet that is already in range arrives at the end of
+## the next turn rather than instantly, and a fraction of a turn never rounds the other
+## way -- the player is quoted the same number the resolver will take.
 static func transit_turns(galaxy: GalaxyState, from_planet: int, to_planet: int) -> int:
 	var a := galaxy.planet(from_planet)
 	var b := galaxy.planet(to_planet)
