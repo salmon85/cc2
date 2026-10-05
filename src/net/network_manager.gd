@@ -29,7 +29,17 @@ signal connection_failed(reason: String)
 signal peer_joined(peer_id: int, slot: int)
 
 ## Emitted when a remote peer leaves. `slot` is -1 when the peer had no slot.
+##
+## Server-side only. A client does **not** emit this when another player leaves -- see
+## `peer_departed` -- because "a peer left" and "the server is gone" would be the same
+## signal, and a client that treats the first as the second quits mid-session.
 signal peer_left(peer_id: int, slot: int)
+
+## Emitted on a client when some *other* peer leaves the shared server.
+##
+## Separate from `peer_left` precisely so it cannot be handled as a lost server: the
+## session is still alive and the remaining players keep playing.
+signal peer_departed(peer_id: int)
 
 const LOOPBACK := "127.0.0.1"
 
@@ -346,4 +356,15 @@ func _on_peer_connected(peer_id: int) -> void:
 func _on_peer_disconnected(peer_id: int) -> void:
 	var slot := slot_of(peer_id)
 	release_peer(peer_id)
-	peer_left.emit(peer_id, slot)
+	# A host is the authority: it owns seats, so a peer leaving is a session event it
+	# must react to. A *client* also learns about other peers leaving, because ENet
+	# reports every peer on the connection -- but that is another player closing their
+	# window, not this session ending. Forwarding it as `peer_left` would make every
+	# client treat someone else's disconnect as its own server going away.
+	if is_host:
+		peer_left.emit(peer_id, slot)
+	else:
+		# Still emitted, under a name that cannot be mistaken for "the server died":
+		# a client watching the lobby has no seats to release, but it does have to tell
+		# the player somebody left.
+		peer_departed.emit(peer_id)

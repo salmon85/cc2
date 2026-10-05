@@ -36,6 +36,7 @@ func _initialize() -> void:
 	_test_full_lobby_refuses_a_third()
 	_test_grace_then_ai_fallback()
 	_test_reclaim_before_expiry()
+	_test_ready_count()
 
 
 # --- Pure rules ------------------------------------------------------------
@@ -229,6 +230,73 @@ func _count_start() -> void:
 func _record_vacancy(slot: int, reason: String) -> void:
 	_vacated.append("%d:%s" % [slot, reason])
 	_wire_vacated.append("%d:%s" % [slot, reason])
+
+
+## The tally the READY button displays.
+##
+## Shown to the player, so it has to be the server's answer rather than a client's own
+## optimism: a count each client computes for itself is a count clients can disagree
+## about, which reads as a broken lobby.
+func _test_ready_count() -> void:
+	var tally := SessionLobby.new(3)
+	tally.grace_seconds = 5.0
+	_t.eq(tally.ready_count(), 0, "an empty lobby has nobody ready")
+	tally.join(11)
+	tally.join(22)
+	_t.eq(tally.ready_count(), 0, "two seated players are still not ready")
+
+	tally.set_ready(11, true)
+	_t.eq(tally.ready_count(), 1, "one ready player counts once")
+	tally.set_ready(22, true)
+	_t.eq(tally.ready_count(), 2, "and so do two")
+
+	# Retractable, and the count follows it back down -- otherwise a player who changed
+	# their mind would still be counted, and the match could start without them.
+	tally.set_ready(11, false)
+	_t.eq(tally.ready_count(), 1, "taking readiness back decrements the count")
+
+	# Peer 11 readies again (it took it back one line up), so the count has two
+	# contributions for the departure below to take one away from.
+	tally.set_ready(11, true)
+	_t.eq(tally.ready_count(), 2, "both are ready again")
+
+	tally.leave(11)
+	# The entry is *retained* after a departure, so `set_ready()` still accepts it -- and
+	# that is harmless rather than a hole: an unoccupied slot is not in `occupied_slots()`,
+	# so a flag left on it can never reach the tally or the start gate. A returning player
+	# is re-flagged against the same record, which is the whole reason it is kept.
+	tally.set_ready(11, true)
+	_t.eq(tally.ready_count(), 1,
+		"a flag on an unoccupied seat never reaches the tally")
+	_t.ok(not tally.everyone_ready(),
+		"and cannot satisfy the start gate either")
+	_t.eq(tally.ready_count(), 1,
+		"a departed player stops counting, however ready they were")
+	_t.ok(not tally.occupied_slots().has(0), "and their empire is no longer occupied")
+
+	# An AI-managed empire is a seat nobody is playing, and must never be counted: a
+	# match cannot start because a computer took a player's place.
+	var ai := SessionLobby.new(2)
+	ai.grace_seconds = 5.0
+	ai.join(1)
+	ai.join(2)
+	ai.set_ready(1, true)
+	ai.set_ready(2, true)
+	_t.eq(ai.ready_count(), 2, "both seats are human and ready")
+
+	# Slot 1's player leaves, is held, then expires to the AI. Slot 0 keeps a real,
+	# connected, ready player throughout -- so any change in the tally can only be
+	# about the seat nobody is playing.
+	ai.leave(2)
+	_t.eq(ai.ready_count(), 1, "the departed player's seat drops out of the tally")
+	ai.tick(6.0)
+	ai.mark_ai_managed(1)
+	_t.eq(ai.ready_count(), 1,
+		"an AI-managed empire adds nothing, so the tally still reads one")
+	_t.ok(ai.is_ai_managed(1), "the empire really is AI-managed")
+	_t.ok(not ai.everyone_ready(),
+		"and the match cannot start on the strength of a seat nobody is playing")
+	_t.eq(ai.total_slots, 2, "the denominator stays the configured slot count")
 
 
 # --- Networked scenario -----------------------------------------------------

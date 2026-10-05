@@ -482,3 +482,98 @@ together. Headless clients substitute `--ready` for the button. See `help.md`.
 The AI empire is a *seat*, not a mind: its slot stops holding the turn open and it is
 marked AI-managed, but nothing yet plays it. An AI faction brain remains future work, as
 does lobby re-admission (a player returning after their grace expires has expired).
+
+
+# Bug Fixes & Interface Improvements
+
+## Bug 1: stardates never advanced and ships never moved
+
+**Root cause.** `TurnSyncPeer.apply_snapshot()` built a fresh `GalaxyState` from the
+payload and assigned `galaxy = incoming`. The `SessionController` — and through it every
+panel, the map, and the fleet views — still held the *original* object. After a turn
+resolved, the sync peer's copy was correct and the interface's copy was one turn stale,
+forever.
+
+Proven before fixing, with a four-line script:
+
+```
+attached:  controller galaxy id = -9223371997143104011   turn=0
+resolved:  sync galaxy id      = -9223371997075995143   turn=1
+           controller id       = -9223371997143104011   turn=0
+           SAME OBJECT?        = false
+```
+
+**Fix.** `from_dict()` already mutates in place, so the snapshot is now deserialised into
+the *live* galaxy. After the fix the same script reports `SAME OBJECT? true` and the
+controller reads `turn=1`.
+
+**A second defect in the same function.** The old code adopted the payload *before*
+checking its hash, so a mismatched snapshot replaced the client's state and only then
+reported the desync — the one thing the hash exists to prevent. The payload is now built
+into a scratch object, verified, and only then applied.
+
+## Bug 2: one player quitting ended everyone's game
+
+**Root cause.** ENet reports *every* peer on the connection, so a client sees other
+players come and go. `NetworkManager._on_peer_disconnected()` had no `is_host` guard —
+unlike `_on_peer_connected()` right above it — and emitted `peer_left` regardless. On a
+client, `App._on_client_server_gone()` handles that signal by calling `get_tree().quit(1)`.
+So any player closing their window ended the session for every other player.
+
+**Fix.** Split the two events. A host still emits `peer_left` (it owns the seats). A
+client emits the new `peer_departed`, which `App` handles by logging
+`another player left (peer N); their empire is held by the server` to the event log and
+doing nothing else. `peer_left` on a client now means only what it should: this session's
+authority is gone, and it genuinely cannot continue.
+
+Verified with two real clients: killing one leaves the other running, playing, and
+holding its state.
+
+## Improvement 1: fog of war on ownership
+
+`_draw_systems()` now draws an owner ring only where the player is entitled to know the
+owner — their own system, or one with a fleet actually parked in it. A fleet merely
+sailing there does not count: it reveals the origin now and the destination on arrival,
+which is what a real player would know. Unowned systems always render neutral, so empty
+space reads as empty rather than as redacted.
+
+## Improvement 2: the READY button shows the lobby tally
+
+`SessionLobby.ready_count()` counts only *occupied* seats, so a departed player and an
+AI-managed empire both contribute nothing. The server broadcasts it over a new
+`rpc_lobby_ready_count`, on arrival and on every change. The button reads `Ready 1/2` —
+green while unready, red once pressed.
+
+The count is authoritative rather than each client counting its own flags, because two
+windows disagreeing about who is ready makes the lobby look broken. The button also never
+shows a count below the local pressed state, which would otherwise read `Ready 0/2` for
+the frame between pressing and hearing back.
+
+Colour is not the only signal: roughly one man in twelve cannot reliably separate these
+two hues, so the wording carries the state on its own.
+
+## Defects the loop caught in this round
+
+Three of my own test fixtures were wrong before any product code was: a lambda capturing
+a local by value, an index into a list after removal, and a readiness assertion that
+re-flagged a departed peer. Worth recording because each produced a *plausible* failure
+rather than an obvious one — the fixture was the thing under suspicion, not the code.
+
+One product question surfaced from a failing test and was resolved by reading the code
+rather than by changing it: `set_ready()` still accepts a departed peer, because their
+entry is retained for reclaim. That is harmless — an unoccupied seat is not in
+`occupied_slots()`, so a stale flag can never reach the tally or the start gate — and it
+is now asserted rather than left to chance.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 2212 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_gui_integration`: 207 checks (was 184), including the resolution-reaches-panels
+  and peer-departure regressions.
+- `test_session_lifecycle`: 155 checks (was 139), including the ready tally.
+- Each new test confirmed to fail with its fix reverted: object replacement (3), the
+  missing `is_host` guard (2), the ungated owner ring (1), the ready tally counting
+  unoccupied and AI seats (2).
+- The ownership test asserts that `_draw_systems()` *consults* the rule, not just that
+  the rule behaves — the first version of that test passed happily while the drawing
+  path ignored the rule entirely.

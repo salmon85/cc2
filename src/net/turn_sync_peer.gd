@@ -40,6 +40,9 @@ signal welcomed(assigned_slot: int, payload: Dictionary)
 ## Emitted on the server when a peer is told the game is full and dropped.
 signal peer_refused(peer_id: int, reason: String)
 
+## Emitted when the server reports a new ready count for the lobby.
+signal lobby_ready_changed(ready_count: int, total_slots: int)
+
 ## Emitted on the client when the server announces the match has begun.
 signal match_started(payload: Dictionary)
 
@@ -165,6 +168,23 @@ func apply_ready(_peer_id: int, _is_ready: bool) -> void:
 	pass
 
 
+## Server -> clients: how many players have readied.
+##
+## The count is authoritative rather than each client counting its own optimism: a flag
+## can be in flight, or refused, and a button that says "Ready 2/2" to one player and
+## "Ready 1/2" to another at the same instant makes the lobby look broken.
+@rpc("authority", "call_remote", "reliable")
+func rpc_lobby_ready_count(ready_count: int, total_slots: int) -> void:
+	if _is_authority():
+		return
+	apply_ready_count(ready_count, total_slots)
+
+
+## Role hook for a readiness broadcast. The base class only reports it.
+func apply_ready_count(ready_count: int, total_slots: int) -> void:
+	lobby_ready_changed.emit(ready_count, total_slots)
+
+
 ## Server -> clients: the match is starting. Carries the same shape as a welcome, so a
 ## client's first state arrives by the same code path whether it joined early or the
 ## lobby filled later.
@@ -255,6 +275,12 @@ func apply_snapshot(payload: Dictionary) -> int:
 	var raw: Dictionary = payload.get("state", {})
 	if raw.is_empty():
 		return -1
+	var expected := str(payload.get("state_hash", ""))
+
+	# Deserialise into a *scratch* object first, so the hash can be checked before
+	# anything is committed. Adopting the payload and then discovering it desyncs would
+	# leave the client holding the server's bad state -- exactly the split-brain the hash
+	# exists to prevent.
 	var incoming := GalaxyState.new()
 	if not incoming.from_dict(raw):
 		return -1
@@ -264,17 +290,31 @@ func apply_snapshot(payload: Dictionary) -> int:
 	if not incoming.rebind_definitions(defs):
 		push_error("[TurnSyncPeer] snapshot references unknown definitions")
 
-	var expected := str(payload.get("state_hash", ""))
 	var actual := str(incoming.state_hash())
-
-	galaxy = incoming
-	current_turn = galaxy.turn
-	if defs != null and not galaxy.rebind_definitions(defs):
-		pass  # already reported above; a partially known registry is still playable
-
 	if not expected.is_empty() and expected != actual:
 		desync_detected.emit(current_turn, int(actual), int(expected))
 		return -1
+
+	# Mutate the galaxy *in place* rather than replacing the reference.
+	#
+	# Everything already bound to this galaxy -- the SessionController, and through it
+	# every panel, the map and the fleet views -- holds this exact object. Handing them a
+	# new one silently leaves them reading the previous turn forever: the stardate does
+	# not move and ships never appear to move, while the sync peer's own copy looks
+	# perfectly correct. Deserialising into the live object is what makes those holders
+	# see the new state, and `from_dict()` already does exactly that.
+	if galaxy == null:
+		galaxy = incoming
+	else:
+		if not galaxy.from_dict(raw):
+			# Should be unreachable: `raw` was just accepted into `incoming`. Treated as a
+			# failure rather than a partial write, so the two never disagree.
+			push_error("[TurnSyncPeer] snapshot failed to apply to the live galaxy")
+			return -1
+		if defs != null and not galaxy.rebind_definitions(defs):
+			pass  # already reported above; a partially known registry is still playable
+
+	current_turn = galaxy.turn
 	return int(actual)
 
 

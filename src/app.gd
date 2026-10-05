@@ -30,6 +30,10 @@ var server_slots: PackedInt32Array = PackedInt32Array()
 ## Slot/ready/match-start state for a dedicated server. Null in client and local modes.
 var lobby: SessionLobby = null
 
+## The mounted game GUI, once one exists. Kept so a session-level event -- a peer
+## leaving, say -- can reach the player's event log rather than only the terminal.
+var game_client: GameClient = null
+
 
 func _ready() -> void:
 	options = CC2CLI.parse_os()
@@ -271,7 +275,11 @@ func _start_network_client(opts: CC2CLI.Options) -> void:
 
 	net.connection_succeeded.connect(_on_client_connected)
 	net.connection_failed.connect(_on_client_failed)
+	# Two different events, and conflating them is what made one player's quit end
+	# everyone else's game: `peer_left` fires when *this* client's server goes away,
+	# `peer_departed` when some other player closes their window.
 	net.peer_left.connect(_on_client_server_gone)
+	net.peer_departed.connect(_on_client_peer_departed)
 
 	var client_sync := net.add_sync_endpoint(TurnSyncClient) as TurnSyncClient
 	client_sync.net = net
@@ -279,6 +287,7 @@ func _start_network_client(opts: CC2CLI.Options) -> void:
 	client_sync.turn_resolved.connect(_on_client_turn_resolved)
 	client_sync.desync_detected.connect(_on_client_desync)
 	client_sync.match_started.connect(_on_client_match_started)
+	client_sync.lobby_ready_changed.connect(_on_client_ready_count)
 	client_sync = null
 
 	var err := net.join_game(opts.ip, opts.port)
@@ -299,9 +308,36 @@ func _on_client_failed(reason: String) -> void:
 	get_tree().quit(1)
 
 
+## The server reported a new lobby tally. Redraw the button so both players see the same
+## count at the same moment.
+func _on_client_ready_count(ready_count: int, _total_slots: int) -> void:
+	if game_client != null and is_instance_valid(game_client):
+		game_client.top_bar.refresh()
+
+
+## The authority went away. Nothing can be played, so this session ends.
+##
+## Only *this* client is affected. That is the whole point of routing it separately from
+## `peer_departed`: quitting here is correct, because the game genuinely has no server
+## left to resolve turns against.
 func _on_client_server_gone(_peer_id: int, _slot: int) -> void:
 	push_error("[cc2] the server closed the connection")
 	get_tree().quit(1)
+
+
+## Another player left. The session is still live and this client keeps playing.
+##
+## The server owns the abandoned empire -- it is held for a grace period and then handed
+## to the AI -- so there is nothing for a client to decide here, only something to tell
+## the player. Exiting instead would end a game that is still perfectly playable, and
+## would do so for every other player too, since they would each take this path.
+func _on_client_peer_departed(peer_id: int) -> void:
+	var text := "[cc2] another player left (peer %d); their empire is held by the server" % peer_id
+	print(text)
+	# The event log is where a player will actually look. A departure they only see in
+	# the terminal they launched from is a departure most of them never see.
+	if game_client != null and is_instance_valid(game_client):
+		game_client.status_message.emit(text)
 
 
 ## The welcome arrived and verified: build the game client on the server's galaxy.
@@ -323,6 +359,7 @@ func _on_client_welcomed(assigned_slot: int, payload: Dictionary) -> void:
 		push_error("[cc2] client scene root is not a GameClient")
 		get_tree().quit(1)
 		return
+	self.game_client = game_client
 	# `assigned_slot` is the empire the *server* chose. It is not necessarily 0, and
 	# binding the wrong one would let a player command another empire's colonies.
 	if not game_client.start(sync.galaxy, assigned_slot, 0):
@@ -330,6 +367,7 @@ func _on_client_welcomed(assigned_slot: int, payload: Dictionary) -> void:
 		get_tree().quit(1)
 		return
 	sync.game_client = game_client
+	game_client = game_client
 	# Route the GUI's End Turn through the network from now on: the controller would
 	# otherwise resolve a turn locally against a galaxy the server does not hold.
 	game_client.controller.turn_submitter = sync

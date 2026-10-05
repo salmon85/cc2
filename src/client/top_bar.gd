@@ -91,6 +91,15 @@ func _build() -> void:
 
 ## Show the ready button only when there is a server to be ready to, and label it with
 ## whatever it would do next.
+##
+## The label carries the lobby tally -- "Ready 1/2" -- so a player is never left guessing
+## whether pressing it did anything. The count comes from the server, so both players see
+## the same number at the same instant.
+##
+## Colour carries the same state twice over: green while you still need to press, red
+## once you have and can take it back. Colour alone would not do -- roughly one man in
+## twelve cannot reliably distinguish these two hues, so the wording has to survive
+## without it.
 func _refresh_ready_button() -> void:
 	if _ready_button == null:
 		return
@@ -98,7 +107,17 @@ func _refresh_ready_button() -> void:
 	_ready_button.visible = networked
 	if not networked:
 		return
-	_ready_button.text = "NOT READY" if _controller.is_ready_flagged() else "READY"
+	var tally := _controller.ready_tally()
+	var total := maxi(1, tally.y)
+	var mine := _controller.is_ready_flagged()
+	# Never report a count below this player's own state: the server's tally arrives by
+	# packet, so for the frame between pressing and hearing back the button would
+	# otherwise read "Ready 0/2" while sitting in its red, pressed-looking state.
+	var shown := maxi(tally.x, 1 if mine else 0)
+	_ready_button.text = "Ready %d/%d" % [shown, total]
+	var tint := CC2Theme.ALERT if mine else CC2Theme.PHOSPHOR
+	_ready_button.add_theme_color_override(&"font_color", tint)
+	_ready_button.add_theme_color_override(&"font_hover_color", tint)
 	_ready_button.disabled = false
 
 

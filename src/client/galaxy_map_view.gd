@@ -123,9 +123,13 @@ func _draw_systems(galaxy: GalaxyState) -> void:
 		draw_circle(pos, 9.0, Color(colour.r, colour.g, colour.b, 0.16))
 		draw_circle(pos, 4.5, colour)
 
-		if sys.owner >= 0:
-			# Owner ring in the faction colour; the player's own systems get the bright
-			# phosphor variant so the home territory reads instantly.
+		# Ownership is only shown where the player has a legitimate reason to know it.
+		#
+		# Fog of war hides *unexplored* space; this hides what has been explored but is
+		# somebody else's. Seeing every opponent's territory outlined across the whole map
+		# gives away fleet deployments and border strength at a glance, which is most of
+		# what the scouting layer exists to withhold.
+		if _ownership_known(galaxy, sys):
 			var owner_colour := CC2Theme.faction_color(sys.owner)
 			draw_arc(pos, 8.0, 0.0, TAU, 20, owner_colour, 1.5)
 
@@ -262,6 +266,34 @@ func _travel_fraction(galaxy: GalaxyState, f: FleetState) -> float:
 	if leg <= 0.0:
 		return 1.0
 	return clampf(f.travelled / leg, 0.0, 1.0)
+
+
+## Whether this player is entitled to see who owns `sys`.
+##
+## Two cases qualify, and only two:
+##   - it is the player's own system, which they of course know; or
+##   - the player has a fleet actually parked there, which is the same "my ships are
+##     sitting in it" knowledge a real player would have.
+##
+## A fleet merely *heading* somewhere does not count. It reveals the origin now and the
+## destination when it arrives, which is the information a player is entitled to -- not
+## a permanent mark on every system within sensor range.
+##
+## An unowned system is always "known": there is no owner to reveal, and drawing the
+## neutral ring is what makes empty space read as empty rather than as redacted.
+func _ownership_known(galaxy: GalaxyState, sys: SystemState) -> bool:
+	if sys.owner < 0:
+		return true
+	if sys.owner == _controller.player_id:
+		return true
+	for key: int in galaxy.fleets:
+		var f: FleetState = galaxy.fleets[key]
+		if not f.active or f.owner != _controller.player_id:
+			continue
+		# In orbit only: `system` is cleared or left behind once a fleet is under way.
+		if f.system == sys.index and f.destination < 0:
+			return true
+	return false
 
 
 ## Whether the player can see a system right now.

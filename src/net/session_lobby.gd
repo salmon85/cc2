@@ -214,6 +214,20 @@ func is_ready(peer_id: int) -> bool:
 	return entry != null and entry.is_ready
 
 
+## How many connected peers have readied up.
+##
+## Counts only *occupied* slots: a player who dropped is not "ready", and neither is one
+## who has not joined yet. An AI-managed empire never counts -- a match must not report
+## itself ready on the strength of a seat nobody is playing.
+func ready_count() -> int:
+	var n := 0
+	for slot: int in occupied_slots():
+		var peer := peer_of(slot)
+		if peer != 0 and is_ready(peer):
+			n += 1
+	return n
+
+
 ## Slots currently held by a connected peer, ascending.
 func occupied_slots() -> PackedInt32Array:
 	var out := PackedInt32Array()

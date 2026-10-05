@@ -177,7 +177,18 @@ func apply_ready(peer_id: int, is_ready: bool) -> void:
 	if lobby == null:
 		return
 	lobby.set_ready(peer_id, is_ready)
+	# Everyone is told, including whoever did not just change. A button reading
+	# "Ready 1/2" on one screen and "Ready 2/2" on another is the lobby looking broken,
+	# and only the server knows the true count.
+	_broadcast_ready_count()
 	try_start_match()
+
+
+## Push the current readiness tally to every seated client.
+func _broadcast_ready_count() -> void:
+	if lobby == null or not is_inside_tree():
+		return
+	rpc_lobby_ready_count(lobby.ready_count(), lobby.total_slots)
 
 
 ## Start the match if the lobby says everyone is ready.
@@ -215,6 +226,10 @@ func send_welcome(peer_id: int, assigned_slot: int) -> bool:
 		return false
 	var payload := build_payload({})
 	rpc_welcome.rpc_id(peer_id, assigned_slot, str(payload.get("state_hash", "")), payload)
+	# Told on arrival, not only on the next toggle, so a client is never sitting on a
+	# button reading "Ready 0/2" while somebody else has already pressed theirs.
+	if lobby != null:
+		rpc_lobby_ready_count.rpc_id(peer_id, lobby.ready_count(), lobby.total_slots)
 	return true
 
 

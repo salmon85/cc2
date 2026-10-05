@@ -59,6 +59,7 @@ Each client should print:
 > **The match does not start yet.** A game waits for every empire `--slots`
 > admits to be connected *and* ready. With `--slots=2` you now have two
 > windows, and both must press **READY** in the top bar before turn 1 exists.
+> Each button reads `Ready n/2`, so you can see who is still holding things up.
 > The server prints `[cc2] match started` when the gate opens. Headless
 > clients pass `--ready` instead of pressing anything — see
 > [The lobby](#the-lobby).
@@ -205,6 +206,33 @@ through and never reported as unknown.
 
 ---
 
+## What the map shows
+
+The galaxy map draws two different kinds of hidden space, and they are worth
+keeping apart:
+
+**Unexplored.** A system outside sensor range is an anonymous hollow marker.
+You can see that a star is there; you cannot see its class, name, or who owns
+it.
+
+**Explored but not yours.** A system you *can* see but do not own shows no
+owner ring unless you have a reason to know who holds it:
+
+- it is **your** system, or
+- you have a **fleet parked in it**.
+
+A fleet merely *sailing toward* a system does not reveal its owner. It reveals
+the origin now and the destination when it arrives — which is what a real
+player would know. Without this rule every opponent's territory would be
+outlined across the whole map, giving away deployments and border strength at a
+glance, which is most of what scouting exists to withhold.
+
+An unowned system always shows no owner: there is nothing to reveal, and
+drawing it neutral is what makes empty space read as empty rather than as
+redacted.
+
+---
+
 ## Single player (works today, no networking)
 
 ```bash
@@ -251,7 +279,12 @@ flag back, and the match waits again if it had not started yet.
 | | GUI client | headless client |
 |---|---|---|
 | declare ready | press **READY** in the top bar | `--ready` (or `--auto-ready`) |
-| take it back | press **NOT READY** | — |
+| take it back | press it again | — |
+
+The button reads **`Ready 1/2`** and colours itself to match: green while you
+still need to press, red once you have. The count is the server's, not a local
+guess, so both players see the same number at the same instant — a lobby where
+one window says 1/2 and the other says 2/2 just looks broken.
 
 `--ready` exists because a headless client has no button to press. Without it,
 `--server --slots=2` plus one headless client is a lobby that waits forever —
@@ -265,7 +298,12 @@ Once the gate opens, the server announces the match to everyone:
 
 ### Losing a player
 
-If a client disconnects, its empire is **held**, not deleted:
+If *another* player closes their window, nothing happens to yours. The session
+is still live: you keep your galaxy, your turn, and your window, and your event
+log records the departure. Only losing the *server* ends a client session.
+
+If a client disconnects from the server's point of view, its empire is
+**held**, not deleted:
 
 - The empire stops holding the turn open immediately. The resolver can only wait
   for someone who can answer, so a departed player must not be able to stall the

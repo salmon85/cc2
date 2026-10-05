@@ -33,6 +33,11 @@ var awaiting: bool = false
 ## without asking the server every frame.
 var _ready_flagged: bool = false
 
+## The server's authoritative readiness tally. Authoritative because a client counting
+## its own flags would disagree with every other client about who is ready.
+var ready_count: int = 0
+var total_slots: int = 0
+
 ## Orders staged locally for the coming turn, in submission order.
 var staged: Array[Order] = []
 
@@ -137,6 +142,13 @@ func set_ready(is_ready: bool = true) -> bool:
 	rpc_set_ready.rpc_id(1, is_ready)
 	_ready_flagged = is_ready
 	return true
+
+
+## Adopt a lobby readiness broadcast.
+func apply_ready_count(count: int, total: int) -> void:
+	ready_count = maxi(0, count)
+	total_slots = maxi(0, total)
+	lobby_ready_changed.emit(ready_count, total_slots)
 
 
 ## Whether this client has sent a ready flag the server has not retracted.

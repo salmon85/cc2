@@ -354,6 +354,17 @@ func is_networked() -> bool:
 	return turn_submitter != null
 
 
+## How many players the server says have readied, and how many it is waiting for.
+##
+## From the server rather than counted locally: only the server knows whether a flag
+## actually landed, and a tally each client computes for itself is a tally they can
+## disagree about.
+func ready_tally() -> Vector2i:
+	if turn_submitter == null:
+		return Vector2i.ZERO
+	return Vector2i(turn_submitter.ready_count, turn_submitter.total_slots)
+
+
 ## The orders this player has staged, ready for the wire.
 func orders_to_submit() -> Array[Order]:
 	if queue == null:

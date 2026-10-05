@@ -170,6 +170,14 @@ func _wire() -> void:
 	controller.turn_resolved.connect(_on_turn_resolved)
 	controller.state_changed.connect(_refresh)
 	controller.action_rejected.connect(_on_action_rejected)
+	# The server's ready tally drives the top bar's READY button, so the two have to be
+	# refreshed from the same place whether the change came from this window's button or
+	# from the other player's.
+	if controller.turn_submitter != null \
+			and not controller.turn_submitter.lobby_ready_changed.is_connected(
+				_refresh_ready_button):
+		controller.turn_submitter.lobby_ready_changed.connect(func(_r: int, _t: int) -> void:
+			_refresh_ready_button())
 
 
 ## Pass the lobby ready flag to the server.

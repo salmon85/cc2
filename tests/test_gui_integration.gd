@@ -17,6 +17,7 @@ extends SceneTree
 ## laid-out node is deferred to `_process` and the suite runs as a state machine there.
 
 const CLIENT_SCENE := preload("res://scenes/client/GameClient.tscn")
+const NetworkManagerScript := preload("res://src/net/network_manager.gd")
 const DefsScript := preload("res://src/data/defs.gd")
 const DBScript := preload("res://src/data/game_db.gd")
 
@@ -40,6 +41,9 @@ var _step: int = 0
 ## Set once every step has run, so the summary is reported on a later frame.
 var _finished: bool = false
 
+## Which disconnect signals fired, recorded through a member so a lambda can write it.
+var _depart_flags: Dictionary = {}
+
 
 func _initialize() -> void:
 	sup = TestSupport.new()
@@ -52,7 +56,8 @@ func _initialize() -> void:
 		"map_draw", "fleet_orders", "illegal_orders", "macro_tax", "macro_research",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
-		"reproducible", "teardown",
+		"resolution_panels", "peer_departure", "fog_ownership", "reproducible",
+		"teardown",
 	])
 	# The tree only lays out nodes from `_process` onward; `_initialize` runs before the
 	# first frame, when nothing added here is inside the tree yet.
@@ -93,6 +98,9 @@ func _process(_delta: float) -> bool:
 		"end_turn": _step_end_turn()
 		"networked_end_turn": _step_networked_end_turn()
 		"end_turn_again": _step_end_turn_again()
+		"resolution_panels": _step_resolution_reaches_panels()
+		"peer_departure": _step_peer_departure_does_not_quit()
+		"fog_ownership": _step_fog_of_war_ownership()
 		"reproducible": _step_reproducible()
 		"teardown": _step_teardown()
 	return false
@@ -222,8 +230,8 @@ func _step_ready_button() -> void:
 	_client.top_bar.refresh()
 	sup.ok(_client.top_bar.ready_button().visible,
 		"the ready button appears once the session is networked")
-	sup.eq(_client.top_bar.ready_button().text, "READY",
-		"and offers to set the flag")
+	sup.eq(_client.top_bar.ready_button().text, "Ready 0/1",
+		"and shows the lobby tally, unpressed")
 
 	var seen: Array[bool] = []
 	# The callable is kept, not re-typed at disconnect: a fresh lambda is a *different*
@@ -242,13 +250,20 @@ func _step_ready_button() -> void:
 		sup.ok(not seen[1], "the second press takes the flag back, so it toggles")
 
 	# And the label follows the flag, so the player can see which state they are in.
+	# The count comes from the server, so it only ever moves *up*; the local flag is what
+	# the pressed state means.
 	recorder.flagged = true
+	recorder.ready_count = 2
+	recorder.total_slots = 3
 	_client.top_bar.refresh()
-	sup.eq(_client.top_bar.ready_button().text, "NOT READY",
-		"the button says so once the flag is set")
+	sup.eq(_client.top_bar.ready_button().text, "Ready 2/3",
+		"the button counts the server's tally once the flag is set")
 	recorder.flagged = false
+	recorder.ready_count = 1
+	recorder.total_slots = 3
 	_client.top_bar.refresh()
-	sup.eq(_client.top_bar.ready_button().text, "READY", "and returns when it is cleared")
+	sup.eq(_client.top_bar.ready_button().text, "Ready 1/3",
+		"and decrements when the flag is taken back")
 
 	_client.top_bar.ready_pressed.disconnect(record)
 	# Released, not just nulled: `recorder` is a RefCounted that stays reachable from the
@@ -277,6 +292,9 @@ class RecordingSubmitter extends TurnSyncClient:
 
 	func is_ready_flagged() -> bool:
 		return flagged
+
+	func ready_tally() -> Vector2i:
+		return Vector2i(ready_count, total_slots)
 
 
 func _step_panels() -> void:
@@ -867,6 +885,229 @@ func _step_end_turn_again() -> void:
 		"%d -> %d" % [before, c.galaxy.turn])
 	sup.eq(_client.top_bar.stardate_label().text, str(c.galaxy.turn + 1),
 		"the HUD tracks the stardate across turns")
+
+
+## A resolved turn must reach the panels, not just the sync peer.
+##
+## This is the regression that stardates appeared not to advance. `apply_snapshot()`
+## replaced `galaxy` with a freshly built object, while the controller -- and through it
+## every panel -- still held the original. The sync peer's copy was always correct, so
+## nothing looked wrong from the network side; the interface simply kept rendering a
+## galaxy one turn stale, forever.
+func _step_resolution_reaches_panels() -> void:
+	sup.begin("resolution reaches the panels")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var live := c.galaxy
+	sup.ok(live != null, "the controller holds a galaxy")
+
+	# The exact object identity the whole rendering chain hangs off.
+	var before_id: int = live.get_instance_id()
+	live.turn = 4
+
+	var peer := TurnSyncClient.new()
+	peer.galaxy = live
+	var incoming := GalaxyState.new()
+	sup.ok(incoming.from_dict(live.to_dict()), "the authoritative state round-trips")
+	incoming.turn = 5
+	var applied := peer.apply_snapshot({
+		"state": incoming.to_dict(),
+		"state_hash": str(incoming.state_hash()),
+	})
+	sup.ok(applied >= 0, "the client accepted the resolution (%d)" % applied)
+
+	# The controller's own object, not the peer's, is what the panels read.
+	sup.eq(c.galaxy.get_instance_id(), before_id,
+		"the controller still holds the object it was bound to")
+	sup.eq(c.galaxy.turn, 5, "and that object now carries the resolved stardate")
+	sup.eq(peer.galaxy, c.galaxy, "the peer and the controller agree on one galaxy")
+
+	# Fleet positions live on the same object, so movement has to survive too.
+	for key: int in live.fleets:
+		var f: FleetState = live.fleets[key]
+		if f.active:
+			f.system = 3
+			f.destination = 7
+			f.travelled = 12.0
+			break
+	var moved := -1
+	for key: int in live.fleets:
+		var f: FleetState = live.fleets[key]
+		if f.active:
+			moved = key
+			break
+	if moved >= 0:
+		var after := GalaxyState.new()
+		after.from_dict(c.galaxy.to_dict())
+		var rf: FleetState = after.fleets[moved]
+		sup.eq(rf.system, 3, "a fleet's position survives serialisation")
+		sup.eq(rf.destination, 7, "and so does its destination")
+		sup.near(rf.travelled, 12.0, 0.001, "and how far along the lane it is")
+	else:
+		sup.ok(true, "this galaxy has no active fleet to move")
+
+	# A desynced payload must not be adopted at all: the hash check is the only thing
+	# standing between a client and the server's bad state.
+	var poisoned := GalaxyState.new()
+	poisoned.from_dict(live.to_dict())
+	poisoned.turn = 99
+	var rejected := peer.apply_snapshot({
+		"state": poisoned.to_dict(),
+		"state_hash": str(poisoned.state_hash() + 1),
+	})
+	sup.ok(rejected < 0, "a mismatched hash is rejected")
+	sup.eq(c.galaxy.turn, 5, "and the client keeps the last state it trusted")
+	peer.free()
+
+
+## Another player's departure must not be mistaken for the server dying.
+##
+## ENet reports every peer on the connection, so a client sees other players come and go.
+## Routing that through the same signal as "the server is gone" made one player's closing
+## their window end everybody's game.
+func _step_peer_departure_does_not_quit() -> void:
+	sup.begin("peer departure does not end the session")
+	var net: NetworkManager = NetworkManagerScript.new() as NetworkManager
+	root.add_child(net)
+	net.is_host = false
+
+	# Recorded through members, not locals: a GDScript lambda captures its enclosing
+	# scope *by value*, so a local bool flipped inside the callback is a copy and the
+	# assertion reads the untouched original.
+	_depart_flags = {"peer_left": false, "departed": false}
+	net.peer_left.connect(func(_p: int, _s: int) -> void:
+		_depart_flags["peer_left"] = true)
+	net.peer_departed.connect(func(_p: int) -> void:
+		_depart_flags["departed"] = true)
+
+	# Drive the handler the engine would call when a *different* peer drops. Called
+	# directly rather than over a socket: what is under test is which signal a client
+	# receives, and the transport already delivers this one reliably.
+	net._on_peer_disconnected(4242)
+
+	sup.ok(bool(_depart_flags["departed"]), "a client is told another peer departed")
+	sup.ok(not bool(_depart_flags["peer_left"]),
+		"but NOT that a peer left -- that signal means the server is gone")
+
+	# The host, which owns seats, still hears the session-level event.
+	var host: NetworkManager = NetworkManagerScript.new() as NetworkManager
+	root.add_child(host)
+	host.is_host = true
+	_depart_flags = {"peer_left": false, "departed": false}
+	host.peer_left.connect(func(_p: int, _s: int) -> void:
+		_depart_flags["peer_left"] = true)
+	host._on_peer_disconnected(99)
+	sup.ok(bool(_depart_flags["peer_left"]),
+		"the server still receives peer_left for a departing peer")
+
+	net.dispose()
+	host.dispose()
+
+
+## Ownership is only shown where the player is entitled to know it.
+##
+## Fog of war hides unexplored space; this hides explored-but-foreign territory. A map
+## outlined with every opponent's holdings leaks fleet deployments and border strength at
+## a glance, which is most of what scouting is for.
+func _step_fog_of_war_ownership() -> void:
+	sup.begin("ownership visibility")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var me := c.player_id
+	var gal := c.galaxy
+	var view := _client.map.view()
+	if view == null:
+		sup.ok(false, "the map exposes its view layer")
+		return
+
+	# Find a system the player can see, and one it cannot.
+	var seen := -1
+	for sys in gal.systems:
+		if view._visible(sys.index) and seen < 0:
+			seen = sys.index
+	sup.ok(seen >= 0, "at least one system is in sensor range")
+
+	if seen >= 0:
+		var sys: SystemState = gal.systems[seen]
+
+		# Unowned: always known, so empty space reads as empty rather than as redacted.
+		var saved := sys.owner
+		sys.owner = -1
+		sup.ok(view._ownership_known(gal, sys), "an unowned system shows no ownership")
+		sys.owner = me
+		sup.ok(view._ownership_known(gal, sys), "your own system shows your colour")
+
+		# Somebody else's, with nothing of yours there. Every one of your fleets is moved
+		# well clear first: the galaxy starts with ships already parked somewhere, and a
+		# leftover fleet in this very system would make the "nothing of yours here" claim
+		# quietly untrue.
+		sys.owner = 1 - me if me < 1 else me + 1
+		var elsewhere := -1
+		for other in gal.systems:
+			if other.index != sys.index:
+				elsewhere = other.index
+				break
+		for f_key: int in gal.fleets:
+			var f: FleetState = gal.fleets[f_key]
+			if f.owner == me:
+				f.system = elsewhere
+				f.destination = -1
+		sup.ok(not _own_fleet_in(gal, me, sys.index),
+			"the fixture really does have none of your ships there")
+		sup.ok(not view._ownership_known(gal, sys),
+			"a rival's system is hidden while you have nothing in it")
+
+		# A fleet merely sailing toward it is not presence in it. It reveals the origin
+		# now and the destination on arrival -- not a permanent mark on every system in
+		# sensor range.
+		var sailing := -1
+		for f_key: int in gal.fleets:
+			var f: FleetState = gal.fleets[f_key]
+			if f.owner == me:
+				f.active = true
+				f.system = sys.index
+				f.destination = elsewhere
+				sailing = f_key
+				break
+		sup.ok(sailing >= 0, "a fleet of yours can be sent toward it")
+		if sailing >= 0:
+			sup.ok(not view._ownership_known(gal, sys),
+				"a fleet merely heading there does not reveal ownership")
+
+			# A fleet actually parked there does.
+			var f: FleetState = gal.fleets[sailing]
+			f.destination = -1
+			sup.ok(view._ownership_known(gal, sys),
+				"a fleet in orbit reveals who owns the system")
+		sys.owner = saved
+
+		# The rule is only worth anything if the drawing actually consults it. Asserted
+		# by reading the call site: a test that calls `_ownership_known()` directly passes
+		# just as happily if `_draw_systems()` stops asking it, which is precisely the
+		# shape of regression this change is meant to prevent.
+		sup.ok(_draw_consults_ownership(),
+			"the map consults the ownership rule when drawing systems")
+
+
+## Whether `_draw_systems()` gates the owner ring on the ownership rule.
+##
+## Read from the script source rather than by rendering: the drawing path needs a live
+## viewport to produce pixels, and what is under test is a conditional, not a picture.
+func _draw_consults_ownership() -> bool:
+	var src := FileAccess.get_file_as_string("res://src/client/galaxy_map_view.gd")
+	return src.contains("if _ownership_known(galaxy, sys):")
+
+
+## Whether `faction` has an active, stationary fleet sitting in `system_index`.
+func _own_fleet_in(galaxy: GalaxyState, faction: int, system_index: int) -> bool:
+	for key: int in galaxy.fleets:
+		var f: FleetState = galaxy.fleets[key]
+		if f.active and f.owner == faction and f.system == system_index \
+				and f.destination < 0:
+			return true
+	return false
 
 
 func _step_reproducible() -> void:
