@@ -298,6 +298,7 @@ const _SCENARIOS := {
 	2: "disconnect during a turn",
 	3: "join handshake",
 	4: "network equals local",
+	5: "lobby ready sync",
 }
 
 ## Phase to begin on the frame after a settle.
@@ -385,6 +386,151 @@ func _start_disconnect() -> void:
 		harness.client_syncs.append(sync)
 
 
+## The ready button was drawn from a tally that never arrived.
+##
+## `apply_ready()` called `rpc_lobby_ready_count(...)` as a bare local call rather than
+## `.rpc(...)`, so the server dutifully told *itself* the new count and sent nothing. Every
+## other RPC in that file carried `.rpc()` or `.rpc_id()`, which is exactly why the omission
+## was invisible: the code read correctly and did the wrong thing.
+##
+## A button reading "Ready 1/2" on one screen and "Ready 2/2" on another is the lobby
+## looking broken, and only the server knows the true count. This drives two real clients
+## over real ENet and asserts each one sees the other's readiness.
+func _start_ready_sync() -> void:
+	_rs_tallies.clear()
+	_rs_checked = false
+	_rs_readied = false
+
+	var port := NetworkManager.reserve_ephemeral_port()
+	var harness := Harness.new()
+	_harnesses.append(harness)
+
+	harness.server_net = NetworkManagerScript.new() as NetworkManager
+	root.add_child(harness.server_net)
+	_t.eq(harness.server_net.host_game(port, 2), OK, "the lobby server is listening")
+
+	_rs_galaxy = _make_galaxy(77)
+	harness.server_sync = harness.server_net.add_sync_endpoint(TurnSyncServer) \
+		as TurnSyncServer
+	harness.server_sync.net = harness.server_net
+	_t.ok(harness.server_sync.begin(_rs_galaxy, PackedInt32Array()), "the lobby server bound a galaxy")
+
+	# A real lobby, wired exactly as `_start_dedicated_server` wires it.
+	var lobby := SessionLobby.new(2)
+	harness.server_sync.lobby = lobby
+	harness.server_sync.ready_changed.connect(harness.server_sync.apply_ready)
+	lobby.match_start_requested.connect(func() -> void:
+		harness.server_sync.try_start_match())
+
+	harness.server_net.peer_joined.connect(func(peer_id: int, slot: int) -> void:
+		lobby.join(peer_id)
+		harness.server_sync.add_active_slot(slot)
+		harness.server_sync.send_welcome(peer_id, slot))
+
+	for i in 2:
+		var c := NetworkManagerScript.new() as NetworkManager
+		root.add_child(c)
+		_t.eq(c.join_game(CC2CLI.DEFAULT_LOOPBACK, port), OK, "lobby client %d dials" % i)
+		harness.client_nets.append(c)
+		var sync := c.add_sync_endpoint(TurnSyncClient) as TurnSyncClient
+		sync.net = c
+		# The tally this test is about, recorded per client.
+		sync.lobby_ready_changed.connect(func(count: int, total: int) -> void:
+			_rs_tallies.append([count, total]))
+		harness.client_syncs.append(sync)
+
+
+## Tally state for the lobby scenario.
+var _rs_tallies: Array = []
+var _rs_checked: bool = false
+var _rs_readied: bool = false
+var _rs_galaxy: GalaxyState = null
+
+
+func _step_ready_sync() -> void:
+	if _frames < 30:
+		return
+	var harness := _harnesses[_index]
+
+	# Both clients must have been welcomed (and therefore sent the tally on arrival)
+	# before anything is asserted.
+	var seated := 0
+	for sync in harness.client_syncs:
+		var cs := sync as TurnSyncClient
+		if cs.slot >= 0:
+			seated += 1
+	if seated < 2 and _frames < 120:
+		return
+
+	if not _rs_checked:
+		_rs_checked = true
+		_t.begin("lobby ready count reaches every peer")
+		_t.eq(seated, 2, "both clients hold a seat")
+
+		# The late-joiner path: `send_welcome` tells the arriving client the tally at once,
+		# so nobody sits on a stale "Ready 0/2" while the other player has already pressed.
+		for sync in harness.client_syncs:
+			var cs := sync as TurnSyncClient
+			_t.ok(_rs_has_tally_for(cs), "a joining client is sent the tally on arrival",
+				"client %d recorded %s" % [cs.slot, str(_rs_tallies)])
+
+		# Nobody is ready yet.
+		for sync in harness.client_syncs:
+			var cs := sync as TurnSyncClient
+			_t.eq(cs.ready_count, 0, "the tally starts at zero ready")
+			_t.eq(cs.total_slots, 2, "the tally carries the total slot count")
+
+		_rs_tallies.clear()
+		var first := harness.client_syncs[0] as TurnSyncClient
+		_t.ok(first.set_ready(true), "a client can send its ready flag")
+		_rs_readied = true
+		return
+
+	if _rs_readied:
+		# One client readied. Both must be told -- the one that did not press anything
+		# especially, since that is the screen that was silently going stale.
+		if _rs_tallies.is_empty() and _frames < 120:
+			harness.server_sync.resolve_if_ready()
+			return
+		var seen_by_each := 0
+		for sync in harness.client_syncs:
+			var cs := sync as TurnSyncClient
+			_t.ok(_rs_has_tally_for(cs),
+				"a peer that did not toggle is still told the new count",
+				"client %d recorded %s" % [cs.slot, str(_rs_tallies)])
+			if _rs_has_tally_for(cs):
+				seen_by_each += 1
+			_t.eq(cs.ready_count, 1, "the client shows one player ready")
+			_t.eq(cs.total_slots, 2, "and still two slots")
+
+		_t.ok(harness.server_sync.lobby.ready_count() == 1,
+			"the server agrees one player is ready")
+
+		# The rule is only worth anything if the broadcast really goes over the wire.
+		# Asserted at the call site, because a bare local call satisfies every behavioural
+		# check above in a single-peer test and only fails with a second peer watching.
+		_t.ok(_server_broadcasts_ready_count(),
+			"the server sends the tally to all peers rather than calling itself")
+		_next()
+		return
+
+	_next()
+
+
+## Whether the server broadcasts the readiness tally instead of calling it locally.
+func _server_broadcasts_ready_count() -> bool:
+	var src := FileAccess.get_file_as_string("res://src/net/turn_sync_server.gd")
+	return src.contains("rpc_lobby_ready_count.rpc(lobby.ready_count(), lobby.total_slots)")
+
+
+func _rs_has_tally_for(cs: TurnSyncClient) -> bool:
+	for entry in _rs_tallies:
+		var pair: Array = entry
+		if pair[0] == cs.ready_count and pair[1] == cs.total_slots:
+			return true
+	return false
+
+
 ## Free every peer from the finished scenario. Leaking an ENet host would leave the port
 ## bound and make the next scenario fail for reasons that have nothing to do with it.
 func _teardown() -> void:
@@ -429,6 +575,8 @@ func _process(_delta: float) -> bool:
 				_start_handshake()
 			"network equals local":
 				_start_parity()
+			"lobby ready sync":
+				_start_ready_sync()
 		return false
 	_frames += 1
 	match _phase:
@@ -442,6 +590,8 @@ func _process(_delta: float) -> bool:
 			_step_handshake()
 		"network equals local":
 			_step_parity()
+		"lobby ready sync":
+			_step_ready_sync()
 	if _phase == "done":
 		_finish()
 		return true

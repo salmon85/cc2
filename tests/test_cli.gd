@@ -20,6 +20,7 @@ func _initialize() -> void:
 	_test_server_beats_client()
 	_test_port_and_seed()
 	_test_validation_and_warnings()
+	_test_slots_get_empires()
 
 	var code := _t.finish("test_cli")
 	print("---test_cli-exit=%d---" % code)
@@ -193,6 +194,48 @@ func _test_validation_and_warnings() -> void:
 	_t.ok(
 		real_unknown.warnings[0].contains("--warp=9"),
 		"warning names the offending flag")
+
+
+## `--slots=N` opened N seats over a galaxy that only had 2 empires, because `--factions`
+## defaults to 2 and nothing tied the two together. The server then shrank itself back to
+## two and the third and fourth players were refused with no visible reason.
+##
+## This asserts the *pair* is consistent, which is the whole claim: a dedicated server with
+## four slots must ask the generator for at least four empires.
+func _test_slots_get_empires() -> void:
+	_t.begin("slots are backed by empires")
+	var four := _parse(["--server", "--slots=4"])
+	_t.eq(four.slots, 4, "--slots=4 is four slots")
+	_t.ok(four.faction_count >= four.slots,
+		"a four-slot server asks for at least four empires",
+		"got %d factions for %d slots" % [four.faction_count, four.slots])
+	_t.ok(four.system_count >= four.slots * CLI.MIN_SYSTEMS_PER_FACTION,
+		"the map is sized for the empires it will seat",
+		"got %d systems" % four.system_count)
+
+	# Every slot count in range, not just four.
+	for n in range(CLI.MIN_SLOTS, CLI.MAX_SLOTS + 1):
+		var opts := _parse(["--server", "--slots=%d" % n])
+		_t.ok(opts.faction_count >= opts.slots,
+			"--slots=%d is backed by enough factions" % n,
+			"got %d factions" % opts.faction_count)
+
+	var eight := _parse(["--server", "--slots=8"])
+	_t.eq(eight.faction_count, 8, "the maximum slot count is playable")
+
+	# An explicit --factions is an operator's decision and is not overruled. Someone
+	# running `--slots=8 --factions=2` wants a two-human game, not a silent correction.
+	var explicit := _parse(["--server", "--slots=8", "--factions=2"])
+	_t.eq(explicit.faction_count, 2, "an explicit --factions is left alone")
+	_t.ok(explicit.faction_count_given, "the parser records that --factions was given")
+
+	# Fewer slots than factions must not *reduce* the empire count either.
+	var roomy := _parse(["--server", "--slots=2", "--factions=6"])
+	_t.eq(roomy.faction_count, 6, "asking for more factions than slots is untouched")
+
+	# Single player and clients never seat remote humans, so nothing is derived for them.
+	var solo := _parse([])
+	_t.eq(solo.faction_count, 2, "the setup menu keeps the plain default")
 
 
 func _describe_check() -> void:

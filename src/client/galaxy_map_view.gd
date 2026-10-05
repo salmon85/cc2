@@ -181,8 +181,16 @@ func _draw_fleets(galaxy: GalaxyState) -> void:
 		var f: FleetState = galaxy.fleets[key]
 		if not f.active:
 			continue
-		var here := _fleet_position(galaxy, f)
 		var mine := f.owner == _controller.player_id
+		# An enemy fleet is only drawn where a sensor sweep would actually find it.
+		#
+		# This was the largest hole in the fog: every star was correctly hidden and every
+		# owner ring correctly suppressed, while a diamond was still drawn on the map for
+		# every fleet of every empire, stationary or in transit, anywhere on the board --
+		# which is not a scout's snapshot but the opponent's entire deployment, free.
+		if not mine and not _fleet_visible(galaxy, f):
+			continue
+		var here := _fleet_position(galaxy, f)
 		var colour := CC2Theme.faction_color(f.owner) if mine else CC2Theme.WHITE_DIM
 		var radius := 4.0 if mine else 3.0
 
@@ -268,32 +276,26 @@ func _travel_fraction(galaxy: GalaxyState, f: FleetState) -> float:
 	return clampf(f.travelled / leg, 0.0, 1.0)
 
 
+## Whether a fleet the player does not own is on the map at all.
+##
+## An enemy fleet parked in a system is spotted by that system's sensor sweep, and one
+## under way is spotted only while it is physically inside a system the player can see --
+## between two stars it belongs to nobody's sensors, so it is not drawn there either.
+func _fleet_visible(galaxy: GalaxyState, f: FleetState) -> bool:
+	if f.system >= 0 and _visible(f.system):
+		return true
+	return f.destination >= 0 and _visible(f.destination)
+
+
 ## Whether this player is entitled to see who owns `sys`.
 ##
-## Two cases qualify, and only two:
-##   - it is the player's own system, which they of course know; or
-##   - the player has a fleet actually parked there, which is the same "my ships are
-##     sitting in it" knowledge a real player would have.
-##
-## A fleet merely *heading* somewhere does not count. It reveals the origin now and the
-## destination when it arrives, which is the information a player is entitled to -- not
-## a permanent mark on every system within sensor range.
-##
-## An unowned system is always "known": there is no owner to reveal, and drawing the
-## neutral ring is what makes empty space read as empty rather than as redacted.
+## Delegates to `SessionController.knows_owner_of`, which is where the rule is written
+## down. The map was the only place that consulted it, which is precisely how the map
+## could be clean while the inspector printed `OWNER FACTION 3` for the same system.
 func _ownership_known(galaxy: GalaxyState, sys: SystemState) -> bool:
-	if sys.owner < 0:
-		return true
-	if sys.owner == _controller.player_id:
-		return true
-	for key: int in galaxy.fleets:
-		var f: FleetState = galaxy.fleets[key]
-		if not f.active or f.owner != _controller.player_id:
-			continue
-		# In orbit only: `system` is cleared or left behind once a fleet is under way.
-		if f.system == sys.index and f.destination < 0:
-			return true
-	return false
+	if galaxy == null or sys == null or _controller == null:
+		return false
+	return _controller.knows_owner_of(sys.index)
 
 
 ## Whether the player can see a system right now.

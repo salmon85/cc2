@@ -28,6 +28,7 @@ func _initialize() -> void:
 	_test_planet_population()
 	_test_warp_lane_connectivity()
 	_test_faction_seeding()
+	_test_every_requested_faction_exists()
 	_test_determinism()
 	_test_edge_cases()
 
@@ -275,6 +276,63 @@ func _test_faction_seeding() -> void:
 	for id: int in g.fleets:
 		fleet_ids[id] = true
 	_t.eq(fleet_ids.size(), g.fleets.size(), "fleet ids are unique")
+
+
+## The generator used to clamp the empire count to one per five systems
+## (`clampi(faction_count, 1, count / 5)`). On the 30-system minimum map that ceiling is 6,
+## so `--factions=8` silently produced six empires and a server opening eight slots had
+## fewer empires than seats. A request the caller made explicitly must be honoured.
+func _test_every_requested_faction_exists() -> void:
+	_t.begin("requested factions are actually generated")
+	for want in range(1, 9):
+		for systems in [30, 50, 100]:
+			var g := _generate(4242 + want * 7 + systems, systems, want)
+			_t.ok(g != null, "generating %d factions in %d systems succeeds" % [want, systems])
+			if g == null:
+				continue
+			_t.eq(g.factions.size(), want,
+				"%d factions in %d systems yields %d empires" % [want, systems, want])
+
+	# The claim the whole thing rests on: every empire is playable, not merely counted.
+	# A fourth slot with no homeworld, no colony and no fleet is a seat at an empty table.
+	var g8 := _generate(90210, 40, 8)
+	_t.ok(g8 != null, "an eight-empire galaxy generates")
+	if g8 != null:
+		for f in g8.factions:
+			var home := -1
+			for s in g8.systems:
+				if s.owner == f.id:
+					home = s.index
+					break
+			_t.ok(home >= 0, "%s owns a homeworld system" % f.name)
+			if home < 0:
+				continue
+			var colonies := 0
+			for p_index in g8.systems[home].planet_indices:
+				var p := g8.planet(p_index)
+				if p != null and p.owner == f.id and p.colonized:
+					colonies += 1
+			_t.ok(colonies >= 1, "%s holds a founding colony" % f.name)
+			_t.ok(f.fleets.size() >= 1, "%s starts with a fleet" % f.name)
+
+	# Player slots 2 and 3 in particular: these are the seats that were refused.
+	_t.ok(g8.factions.size() >= 4, "at least four empires exist for a --slots=4 server")
+	if g8.factions.size() >= 4:
+		for slot in [2, 3]:
+			var f: FactionState = g8.factions[slot]
+			var playable := false
+			for s in g8.systems:
+				if s.owner == f.id:
+					playable = true
+					break
+			_t.ok(playable, "slot %d (0-indexed) has an empire with territory" % slot)
+
+	# A cramped map is allowed to crowd the homeworlds; it is not allowed to drop an
+	# empire. Separately checked here because the old clamp traded one for the other.
+	var tight := _generate(31337, 30, 8)
+	_t.ok(tight != null, "eight empires on the minimum map still generates")
+	if tight != null:
+		_t.eq(tight.factions.size(), 8, "the minimum map still seats eight empires")
 
 
 func _test_determinism() -> void:

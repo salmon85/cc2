@@ -577,3 +577,90 @@ is now asserted rather than left to chance.
 - The ownership test asserts that `_draw_systems()` *consults* the rule, not just that
   the rule behaves — the first version of that test passed happily while the drawing
   path ignored the rule entirely.
+
+---
+
+# Round 7: multiplayer lobby, galaxy generation, and Fog of War defects
+
+Three reported defects, each diagnosed by driving the real engine rather than by reading
+the source, and each with a root cause that the source alone did not make obvious.
+
+## Defect 1: the READY button never received the tally
+
+`TurnSyncServer._broadcast_ready_count()` called
+
+```gdscript
+rpc_lobby_ready_count(lobby.ready_count(), lobby.total_slots)
+```
+
+as a **bare local call**. In Godot a bare call invokes the method in-process only; `.rpc()`
+is what puts it on the wire. So the server dutifully applied the new count to *itself* and
+sent nothing. Every other RPC in that file already carried `.rpc()` or `.rpc_id()`, which
+is exactly why the omission survived review: the line reads correctly and does the wrong
+thing. The late-joiner path in `send_welcome()` was already correct and is retained.
+
+The regression test drives two real clients over real ENet with a real `SessionLobby` and
+asserts that the peer which *did not toggle* is told the new count — that client is the
+one whose button was silently going stale.
+
+## Defect 2: `--slots=4` seated two players
+
+Two problems, not one:
+
+1. `--factions` defaults to 2 and nothing tied it to `--slots`, so `--slots=4` asked the
+   generator for a two-empire galaxy and then silently shrank itself back to two seats.
+2. `GalaxyGenerator` clamped the empire count to `count / 5`. On the 30-system minimum
+   map that ceiling is 6, so even `--factions=8` yielded six — the same bug one layer
+   down, invisible from the CLI.
+
+`CC2CLI.reconcile_slot_empires()` now raises `faction_count` to `slots` (and sizes the
+system count to match) whenever `--factions` was *not* given explicitly; an operator who
+writes `--slots=8 --factions=2` is running a two-human game and is honoured. The
+generator's clamp is now against `MAX_SYSTEMS` rather than a spacing heuristic, because a
+crowded homeworld is merely cramped while a missing empire is a missing player.
+
+Probed before the fix: `ask-8-in-30-systems -> 6`, versus `ask-8 systems=50 -> 8`.
+
+## Defect 3: colony and fleet markers leaked through the fog
+
+The map's owner ring was already correctly gated (`ring-leaks=0` on a fresh galaxy), so the
+reported "squares and markers" were somewhere else. Four real leaks:
+
+- **`InspectorPanel._body_caption()`** drew an `x` beside every foreign `colonized` body.
+- **`InspectorPanel._refresh_system()`** printed `OWNER` in the owning faction's colour
+  for any visible system — a free, always-accurate roster of every empire's holdings.
+- **`InspectorPanel._refresh_planet()`** then spelled out a rival colony's entire economy:
+  population, farm/mine/shield counts, reserves, build queue.
+- **`GalaxyMapView._draw_fleets()`** had no visibility check whatsoever. Every star was
+  hidden and every owner ring suppressed, while a diamond was still drawn on the map for
+  every fleet of every empire, anywhere on the board. The fog was on the background and
+  off the foreground.
+
+The map was the only place the ownership rule lived, which is precisely how the map could
+be clean while the inspector reported the same system two panels to the right. The rule is
+now `SessionController.knows_owner_of()` — *own empire, or own fleet parked in orbit* —
+and every renderer consults that one function.
+
+`FowStage.redact()` remains unused on the network path: `build_payload()` ships the raw
+galaxy, so client-side gating is the only protection. Left as-is deliberately — it is the
+cheaper of the two, and moving redaction to the server would be a bandwidth change nobody
+asked for.
+
+### A fourth bug the new test found
+
+`_refresh_bodies()` cached on the system index alone, so a body that changed owner or
+colony status kept its old caption until the player left and returned. A world settled by
+somebody else was still drawn with the player's own `*` beside it. The cache key now
+includes what the rows would actually say.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 0 failed, ALL GREEN**, exit 0.
+- `test_galaxy_gen`: 609 checks (was ~530) — every requested faction count in 1..8 across
+  30/50/100 systems, and every empire asserted to hold a homeworld, a colony and a fleet.
+- `test_cli`: 78 checks (was 62) — every slot count in 1..8 is backed by enough empires.
+- `test_enet_sync`: 150 checks — the new two-client lobby scenario.
+- `test_gui_integration`: 233 checks (was 207).
+- The Defect 3 fixture is **constructed**, not searched for: a single-player galaxy has
+  one empire, so a rival colony would never appear naturally and the behavioural half of
+  the test would silently never run.

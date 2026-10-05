@@ -108,7 +108,7 @@ loopback authority, so offline and networked play run the same turn resolution.
 | `--slots=<int>` | `2` | 1–8, clamped. Empire slots the server admits. |
 | `--seed=<int>` | random | Integer, **or any string** — `aurora-7` is hashed to a reproducible seed. |
 | `--systems=<int>` | `50` | 30–100, clamped. Star systems generated. |
-| `--factions=<int>` | `2` | 1–8, clamped. AI empires. Not the same as `--slots`. |
+| `--factions=<int>` | `2` | 1–8, clamped. Total empires. Raised to `--slots` if not given explicitly. |
 
 A healthy startup prints:
 
@@ -136,6 +136,15 @@ Easy to confuse, and they mean different things:
 
 `--slots=2 --factions=2` is two humans and no AI. `--slots=2 --factions=4` is two
 humans plus two AI factions competing for the same systems.
+
+**`--slots` implies a faction floor.** An empire *is* a faction, so a slot with no
+faction behind it seats a player in a game they cannot play. When you give `--slots`
+without giving `--factions` explicitly, the server raises the faction count to match
+the slot count (and sizes the map to fit), so `--slots=4` gives four empires and the
+third and fourth players each get a real homeworld, colony and starting fleet.
+
+Giving `--factions` explicitly overrides this: `--slots=8 --factions=2` is honoured
+as written, and the server reports that it can only seat 2.
 
 ---
 

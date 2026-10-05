@@ -109,10 +109,11 @@ func _start_dedicated_server(opts: CC2CLI.Options) -> bool:
 	for i in opts.slots:
 		server_slots.append(i)
 	# An empire is a faction, so a slot with no faction behind it would seat a player in
-	# a game they cannot play. `--factions` defaults to 2 while `--slots` allows up to 8,
-	# so this is reachable by typing, not just by accident.
+	# a game they cannot play. `CC2CLI.reconcile_slot_empires` has already raised the
+	# faction count to match `--slots`, so reaching here means the operator explicitly
+	# asked for fewer empires than seats and this is reported rather than swallowed.
 	if opts.slots > galaxy.factions.size():
-		push_warning("[cc2] %d slots requested but only %d factions exist; seating %d" % [
+		push_error("[cc2] %d slots requested but only %d factions exist; seating %d" % [
 			opts.slots, galaxy.factions.size(), galaxy.factions.size()])
 		server_slots = PackedInt32Array()
 		for i in galaxy.factions.size():

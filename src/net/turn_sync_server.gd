@@ -188,7 +188,7 @@ func apply_ready(peer_id: int, is_ready: bool) -> void:
 func _broadcast_ready_count() -> void:
 	if lobby == null or not is_inside_tree():
 		return
-	rpc_lobby_ready_count(lobby.ready_count(), lobby.total_slots)
+	rpc_lobby_ready_count.rpc(lobby.ready_count(), lobby.total_slots)
 
 
 ## Start the match if the lobby says everyone is ready.

@@ -56,7 +56,8 @@ func _initialize() -> void:
 		"map_draw", "fleet_orders", "illegal_orders", "macro_tax", "macro_research",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
-		"resolution_panels", "peer_departure", "fog_ownership", "reproducible",
+		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
+		"fog_fleet_markers", "reproducible",
 		"teardown",
 	])
 	# The tree only lays out nodes from `_process` onward; `_initialize` runs before the
@@ -101,6 +102,8 @@ func _process(_delta: float) -> bool:
 		"resolution_panels": _step_resolution_reaches_panels()
 		"peer_departure": _step_peer_departure_does_not_quit()
 		"fog_ownership": _step_fog_of_war_ownership()
+		"fog_colony_markers": _step_fog_colony_markers()
+		"fog_fleet_markers": _step_fog_fleet_markers()
 		"reproducible": _step_reproducible()
 		"teardown": _step_teardown()
 	return false
@@ -1098,6 +1101,270 @@ func _step_fog_of_war_ownership() -> void:
 func _draw_consults_ownership() -> bool:
 	var src := FileAccess.get_file_as_string("res://src/client/galaxy_map_view.gd")
 	return src.contains("if _ownership_known(galaxy, sys):")
+
+
+## The panel that used to leak: the inspector printed `OWNER FACTION n`, drew an `x` beside
+## every foreign world in a system's body list, and then spelled out the whole economy of a
+## rival colony -- population, farms, reserves, build queue -- as soon as a sensor sweep
+## brushed the system. The stars were correctly hidden and the owner rings correctly
+## suppressed while all of that sat two panels to the right.
+func _step_fog_colony_markers() -> void:
+	sup.begin("colony markers stay behind the fog")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var me := c.player_id
+	var gal := c.galaxy
+	var inspector := _client.inspector
+	if inspector == null:
+		sup.ok(false, "the client exposes its inspector panel")
+		return
+
+	# A rival-owned, colonised world the player can see but does not own.
+	#
+	# Constructed rather than searched for: a single-player galaxy has one empire, so a
+	# rival colony would never naturally appear and the behavioural half of this test would
+	# never run. Taking the nearest system the player can already see and planting a rival
+	# colony on it reproduces the exact situation a sensor sweep produces in a real game.
+	var foreign_sys := -1
+	var foreign_planet := -1
+	var rival := me + 1
+	for sys in gal.systems:
+		if c.can_see(sys.index):
+			foreign_sys = sys.index
+			break
+	if foreign_sys >= 0:
+		var host: SystemState = gal.systems[foreign_sys]
+		for p_index in host.planet_indices:
+			var candidate := gal.planet(p_index)
+			if candidate != null and candidate.is_colonizable():
+				foreign_planet = candidate.index
+				break
+		if foreign_planet < 0 and host.planet_indices.size() > 0:
+			foreign_planet = host.planet_indices[0]
+
+	sup.ok(foreign_sys >= 0, "a system is in sensor range to hang a rival colony on")
+	sup.ok(foreign_planet >= 0, "that system has a body to colonise")
+	if foreign_planet < 0:
+		return
+
+	# Every fleet of ours is moved well clear: the claim under test is that a rival system
+	# with nothing of ours in it stays hidden, and a leftover scout would make that untrue.
+	var parked := {}
+	for f_key: int in gal.fleets:
+		var f: FleetState = gal.fleets[f_key]
+		if f.owner == me:
+			parked[f_key] = [f.system, f.destination]
+			f.destination = -1
+			if f.system == foreign_sys:
+				f.system = -1 if f.system >= 0 else 0
+
+	var sys: SystemState = gal.systems[foreign_sys]
+	var p: PlanetState = gal.planet(foreign_planet)
+	var saved_sys_owner := sys.owner
+	var saved_p_owner := p.owner
+	var saved_colonized := p.colonized
+	var saved_pop := p.population
+	var saved_structures := p.structures.duplicate()
+
+	# The rival settles it, richly populated and heavily built, so any leak is unmistakable.
+	sys.owner = rival
+	p.owner = rival
+	p.colonized = true
+	p.population = 7.5
+	p.structures = {&"farm": 9, &"mine": 8, &"garrison": 5}
+
+	# The system line must not name or colour the owner.
+	sup.ok(not c.knows_owner_of(foreign_sys),
+		"a rival's system with nothing of yours in it hides its owner")
+	c.select_system(foreign_sys)
+	c.select_planet(foreign_planet)
+	inspector.refresh()
+	var sys_text := inspector.system_label().text
+	sup.ok(not sys_text.contains("FACTION %d" % rival),
+		"the system readout does not name the rival empire")
+	sup.ok(not sys_text.contains("YOUR TERRITORY"),
+		"the system readout does not claim rival space")
+
+	# The body list must not mark the foreign world as taken. Scoped to that one row:
+	# the player's *own* colonies are meant to carry the `*`, and the fixture may well
+	# have hung the rival on the player's own doorstep.
+	var list := inspector.body_list()
+	sup.ok(list.item_count > 0, "the system has bodies listed")
+	var foreign_row := -1
+	var own_marked := 0
+	for row in list.item_count:
+		var text := list.get_item_text(row)
+		if text.begins_with("*"):
+			own_marked += 1
+	var mine := 0
+	for p_index in gal.systems[foreign_sys].planet_indices:
+		mine += 1
+		if gal.planet(p_index).index == foreign_planet:
+			foreign_row = mine
+	sup.ok(foreign_row >= 0, "the rival world has a row in the body list")
+	if foreign_row >= 0 and foreign_row < list.item_count:
+		var foreign_text := list.get_item_text(foreign_row)
+		sup.ok(not foreign_text.begins_with("x"),
+			"the rival world is not marked as colonised by somebody else",
+			"row reads '%s'" % foreign_text)
+		sup.ok(not foreign_text.begins_with("*"),
+			"the rival world is not marked as the player's own",
+			"row reads '%s'" % foreign_text)
+		sup.ok(not foreign_text.contains("pop"),
+			"the rival world shows no population figure",
+			"row reads '%s'" % foreign_text)
+	# Sanity check in the other direction: the marking was not simply switched off.
+	sup.ok(own_marked <= 1,
+		"at most the player's own world is marked, never the rival's")
+
+	# And the planet readout must not report its economy.
+	var label := inspector.planet_label().text
+	sup.ok(not label.contains("YOURS"),
+		"a rival world is not captioned as the player's")
+	sup.ok(not label.contains("FACTION %d" % rival),
+		"a rival world is not captioned with its empire's name")
+	sup.ok(not label.contains("POPULATION"),
+		"a rival world hides its population")
+	sup.ok(not label.contains("FARMS"),
+		"a rival world hides its farm count")
+	sup.ok(not label.contains("STORES"),
+		"a rival world hides its reserves")
+	sup.ok(label.contains("UNCOLONISED"),
+		"a rival world reads exactly like an uncolonised one")
+
+	# Flying a ship there is how a player earns the right to see it. The gate has to open
+	# on the same trigger as the map's, or the map would show a world the inspector refuses.
+	var moved := false
+	for f_key: int in gal.fleets:
+		var f: FleetState = gal.fleets[f_key]
+		if f.owner == me and f.active:
+			f.system = foreign_sys
+			f.destination = -1
+			moved = true
+			break
+	sup.ok(moved, "a player fleet can be parked in the rival system")
+	inspector.refresh()
+	var revealed := inspector.planet_label().text
+	sup.ok(revealed.contains("POPULATION"),
+		"parking a ship there reveals the world's detail")
+
+	# Put the galaxy back, so later steps run against the state they expect. The fixture was
+	# synthesised rather than borrowed, so this is not a courtesy -- the ownership, the
+	# colony and the parked fleets all have to be returned to what generation left.
+	sys.owner = saved_sys_owner
+	p.owner = saved_p_owner
+	p.colonized = saved_colonized
+	p.population = saved_pop
+	p.structures = saved_structures
+	for f_key: int in parked:
+		var f3: FleetState = gal.fleets[f_key]
+		var prior: Array = parked[f_key]
+		f3.system = int(prior[0])
+		f3.destination = int(prior[1])
+	inspector.refresh()
+	sup.ok(gal.planet(foreign_planet).owner == saved_p_owner,
+		"the fixture was restored")
+
+	# The rule is asserted at the call sites as well as in behaviour: a direct test of the
+	# gate passes just as happily if a panel stops consulting it, and the previous
+	# inspector consulted nothing at all.
+	sup.ok(_inspector_gates_everything(),
+		"the inspector gates ownership, colony marks and colony detail")
+
+
+## The inspector's leak was ungated rather than mis-gated, so the rule is asserted at the
+## call sites: a direct test of the rule's behaviour passes just as happily if a panel
+## stops consulting it.
+func _inspector_gates_everything() -> bool:
+	var src := FileAccess.get_file_as_string("res://src/client/inspector_panel.gd")
+	var owner_gated := src.contains("_controller.knows_owner_of(sys.index)")
+	var detail_gated := src.contains("_controller.knows_owner_of(_controller.system_of_planet(p.index))")
+	# No bare foreign-colony marker may come back.
+	var no_foreign_x := not src.contains("elif p.colonized:")
+	var no_foreign_owner := not src.contains("if sys.owner >= 0:")
+	return owner_gated and detail_gated and no_foreign_x and no_foreign_owner
+
+
+## The map drew a diamond for *every* fleet of *every* empire while correctly hiding the
+## stars those fleets were parked in -- so the fog was on the background and off the
+## foreground. Enemy ships are now drawn only where a sensor sweep would find them.
+func _step_fog_fleet_markers() -> void:
+	sup.begin("enemy fleets respect sensor range")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var me := c.player_id
+	var gal := c.galaxy
+	var view := _client.map.view()
+	if view == null:
+		sup.ok(false, "the map exposes its view layer")
+		return
+
+	# Somewhere well outside sensor range for every fleet that is not the player's.
+	var hidden_system := -1
+	for sys in gal.systems:
+		if c.can_see(sys.index):
+			continue
+		if _own_fleet_in(gal, me, sys.index):
+			continue
+		hidden_system = sys.index
+		break
+
+	if hidden_system < 0:
+		sup.ok(true, "no system lies outside sensor range to test against")
+		sup.ok(_fleets_consult_visibility(),
+			"the map consults sensor range before drawing enemy fleets")
+		return
+
+	var enemy := -1
+	for f_key: int in gal.fleets:
+		var f: FleetState = gal.fleets[f_key]
+		if f.active and f.owner != me:
+			enemy = f_key
+			break
+
+	sup.ok(enemy >= 0, "a rival fleet exists to place out of range")
+	if enemy < 0:
+		return
+	var ef: FleetState = gal.fleets[enemy]
+	var saved_system := ef.system
+	var saved_dest := ef.destination
+
+	ef.system = hidden_system
+	ef.destination = -1
+	sup.ok(not view._fleet_visible(gal, ef),
+		"an enemy fleet outside sensor range is not drawn")
+
+	# A fleet sailing between two stars is between two stars. It becomes visible only
+	# where one of the endpoints is in range.
+	ef.system = hidden_system
+	ef.destination = hidden_system
+	sup.ok(not view._fleet_visible(gal, ef),
+		"an enemy fleet in transit between unseen systems is not drawn")
+
+	ef.system = hidden_system
+	ef.destination = _first_seen_system(gal, c)
+	sup.ok(view._fleet_visible(gal, ef),
+		"an enemy fleet bound for a system in range is drawn once it is near it")
+
+	ef.system = saved_system
+	ef.destination = saved_dest
+	sup.ok(_fleets_consult_visibility(),
+		"the map consults sensor range before drawing enemy fleets")
+
+
+func _first_seen_system(galaxy: GalaxyState, c: SessionController) -> int:
+	for sys in galaxy.systems:
+		if c.can_see(sys.index):
+			return sys.index
+	return -1
+
+
+## Whether `_draw_fleets()` filters enemy fleets by sensor range.
+func _fleets_consult_visibility() -> bool:
+	var src := FileAccess.get_file_as_string("res://src/client/galaxy_map_view.gd")
+	return src.contains("if not mine and not _fleet_visible(galaxy, f):")
 
 
 ## Whether `faction` has an active, stationary fleet sitting in `system_index`.

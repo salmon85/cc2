@@ -65,7 +65,12 @@ static func generate(
 		return null
 
 	var count: int = clampi(system_count, MIN_SYSTEMS, MAX_SYSTEMS)
-	var factions: int = clampi(faction_count, 1, maxi(1, count / 5))
+	# One empire per five stars is the *comfortable* spacing, not a hard cap. Clamping to
+	# it meant a request for eight empires on the minimum map silently produced six, so
+	# a server opening eight slots had fewer empires than seats and could not seat them
+	# all. Crowded homeworlds are merely cramped; a missing empire is a missing player, so
+	# the ask wins and `_seed_factions` relaxes separation instead of under-delivering.
+	var factions: int = clampi(faction_count, 1, MAX_SYSTEMS)
 
 	var galaxy := GalaxyState.new()
 	galaxy.seed_value = rng.seed

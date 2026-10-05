@@ -129,6 +129,58 @@ func can_see(system_index: int) -> bool:
 	return FowStage.can_see(galaxy, player_id, system_index)
 
 
+## The system a planet sits in, or -1.
+##
+## `PlanetState` deliberately does not cache its system, so this walks `planet_indices`.
+## It is only ever called for the one body the player has selected, so the cost is a
+## single pass and a second cache would be a place for the two to disagree.
+func system_of_planet(planet_index: int) -> int:
+	if galaxy == null or planet_index < 0:
+		return -1
+	for s in galaxy.systems:
+		if s.planet_indices.has(planet_index):
+			return s.index
+	return -1
+
+
+## Whether the player is entitled to see who owns a system.
+##
+## Two cases qualify, and only two:
+##   - it is the player's own system, which they of course know; or
+##   - the player has a fleet actually parked there, which is the same "my ships are
+##     sitting in it" knowledge a real player would have.
+##
+## A fleet merely *heading* somewhere does not count. It reveals the origin now and the
+## destination when it arrives, which is the information a player is entitled to -- not
+## a permanent mark on every system within sensor range.
+##
+## An unowned system is always "known": there is no owner to reveal, and rendering the
+## neutral form is what makes empty space read as empty rather than as redacted.
+##
+## This lives here rather than in the map view because it is not only a drawing rule.
+## Every panel that renders ownership has to agree on it, and two copies of "own empire
+## or own fleet in orbit" is how the map stopped leaking while the inspector went on
+## reporting each empire's holdings.
+func knows_owner_of(system_index: int) -> bool:
+	if galaxy == null or system_index < 0:
+		return false
+	var sys := galaxy.system(system_index)
+	if sys == null:
+		return false
+	if sys.owner < 0:
+		return true
+	if sys.owner == player_id:
+		return true
+	for key: int in galaxy.fleets:
+		var f: FleetState = galaxy.fleets[key]
+		if not f.active or f.owner != player_id:
+			continue
+		# In orbit only: `system` is cleared or left behind once a fleet is under way.
+		if f.system == system_index and f.destination < 0:
+			return true
+	return false
+
+
 ## Orders the player has staged but not yet submitted.
 func pending_orders() -> Array[Order]:
 	if queue == null:

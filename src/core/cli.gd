@@ -21,6 +21,10 @@ const DEFAULT_NET_PORT := 7777
 const DEFAULT_SLOTS := 2
 const MIN_SLOTS := 1
 const MAX_SLOTS := 8
+## Stars the generator wants per empire, matching its own homeworld spacing rule. Kept
+## here as well as in `GalaxyGenerator` so the CLI can size a map for the empires it is
+## about to ask for rather than discovering the shortfall after generation.
+const MIN_SYSTEMS_PER_FACTION := 5
 const DEFAULT_BIND_IP := "0.0.0.0"
 const DEFAULT_CLIENT_IP := "127.0.0.1"
 ## Single player runs its authority in-process on the loopback interface.
@@ -55,6 +59,10 @@ class Options extends RefCounted:
 	var seed_given: bool = false
 	var system_count: int = 50
 	var faction_count: int = 2
+	## Whether --factions was given explicitly. Without this a derived floor (see
+	## `reconcile_slot_empires`) could not tell "the operator asked for two" from "nobody
+	## said, and two is just the default", and would silently overrule the first.
+	var faction_count_given: bool = false
 	## Empire slots a dedicated server opens. One slot per connected human; the server
 	## itself is not a slot, so `--slots=2` admits two remote players.
 	var slots: int = DEFAULT_SLOTS
@@ -127,6 +135,7 @@ static func parse(argv: PackedStringArray) -> Options:
 				elif arg.begins_with("--factions="):
 					opts.faction_count = _parse_clamped_int(
 						arg.substr(11), opts, 1, 8, "factions", 2)
+					opts.faction_count_given = true
 				elif arg.begins_with("--slots="):
 					opts.slots = _parse_clamped_int(
 						arg.substr(8), opts, MIN_SLOTS, MAX_SLOTS,
@@ -179,7 +188,32 @@ static func parse(argv: PackedStringArray) -> Options:
 	if opts.mode == Mode.DEDICATED_SERVER:
 		opts.ip = DEFAULT_BIND_IP
 
+	reconcile_slot_empires(opts)
+
 	return opts
+
+
+## Make `--slots=N` actually playable: an empire is a faction, so a slot with no faction
+## behind it seats a player in a game they cannot play.
+##
+## `--factions` defaults to 2 while `--slots` goes up to 8, so `--slots=4` used to open
+## four seats over a two-empire galaxy and the server then quietly shrank itself back to
+## two -- the third and fourth players were refused with no error anyone could see. Raising
+## the faction count to match is the fix; the two flags describe one game and were never
+## meant to be set independently.
+##
+## An explicit `--factions` wins: an operator who says `--slots=8 --factions=2` is running
+## a two-human game with spectators' seats, not a mistake, so it is honoured and left to
+## `App` to report. The system count is raised alongside the factions because the generator
+## keeps roughly one homeworld per five systems, and a cramped map would quietly cap the
+## empire count back down to below the slot count -- the same bug one layer down.
+static func reconcile_slot_empires(opts: Options) -> void:
+	if opts.mode != Mode.DEDICATED_SERVER:
+		return
+	if opts.faction_count_given or opts.slots <= opts.faction_count:
+		return
+	opts.faction_count = opts.slots
+	opts.system_count = maxi(opts.system_count, opts.slots * MIN_SYSTEMS_PER_FACTION)
 
 
 ## Convenience wrapper reading the real process command line.

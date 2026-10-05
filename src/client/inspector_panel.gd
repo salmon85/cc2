@@ -116,7 +116,11 @@ func _refresh_system() -> void:
 	lines.append(Format.field("BODIES", str(sys.body_count())))
 	lines.append(Format.field("VALUE", Format.fixed(sys.strategic_value, 2)))
 	lines.append(Format.field("LANES", str(sys.warp_lanes.size())))
-	if sys.owner >= 0:
+	# Ownership is only reported for the player's own empire. Sensor sweeps can reveal a
+	# foreign star, but not its flag: naming the owner here handed every player a free,
+	# always-accurate roster of where every other empire had settled, which is the whole
+	# game. A foreign system with no claim of our own reads exactly like uncharted.
+	if sys.owner == _controller.player_id and _controller.knows_owner_of(sys.index):
 		lines.append(Format.field(
 			"OWNER", "[color=#%s]%s[/color]" % [
 				CC2Theme.faction_color(sys.owner).to_html(false), _faction_name(sys.owner)
@@ -135,8 +139,12 @@ func _refresh_bodies() -> void:
 	var sys: SystemState = null
 	if _controller.selected_system >= 0:
 		sys = _controller.galaxy.system(_controller.selected_system)
-	var key := sys.index if sys != null else -1
-	if _body_list.get_meta("system", -1) != key:
+	# The key is the system *plus* what the rows actually say about it. Keying on the
+	# index alone meant a body that changed owner or colony status kept its old caption
+	# until the player left and came back -- so a world that had just been settled by
+	# somebody else was still drawn with the player's own `*` beside it.
+	var key := _body_list_key(sys)
+	if str(_body_list.get_meta("system", "")) != key:
 		_body_list.set_meta("system", key)
 		_body_list.clear()
 		if sys != null and _controller.can_see(sys.index):
@@ -146,6 +154,19 @@ func _refresh_bodies() -> void:
 					continue
 				_body_list.add_item(_body_caption(p))
 		_select_selected_body(sys)
+
+
+## A cache key that changes whenever any row would render differently.
+func _body_list_key(sys: SystemState) -> String:
+	if sys == null:
+		return "-"
+	var parts := PackedStringArray()
+	for p_index in sys.planet_indices:
+		var p := _controller.galaxy.planet(p_index)
+		if p == null:
+			continue
+		parts.append("%d:%d:%s" % [p.index, p.owner, "1" if p.colonized else "0"])
+	return "%d|%s" % [sys.index, "|".join(parts)]
 
 
 ## Highlight the row for the controller's selected planet. `ItemList` indexes rows, so
@@ -166,14 +187,20 @@ func _select_selected_body(sys: SystemState) -> void:
 	_body_list.deselect_all()
 
 
+## One row per body in the system list.
+##
+## Only the player's *own* colonies are marked. The `x` this used to draw for any
+## foreign `colonized` planet was a colony-status indicator that no amount of fog could
+## hide: the moment a sensor sweep brushed a neighbouring empire, the list reported which
+## of its worlds were settled and which were empty, at zero cost to the other player.
+## Foreign bodies render as the blank they are until the player actually lands there.
 func _body_caption(p: PlanetState) -> String:
 	var flag := " "
 	if p.owner == _controller.player_id and p.colonized:
 		flag = "*"
-	elif p.colonized:
-		flag = "x"
 	var type_name := String(p.type_id).capitalize()
-	var pop := "  pop %s" % Format.fixed(p.population, 2) if p.population > 0.0 else ""
+	var pop := "  pop %s" % Format.fixed(p.population, 2) \
+		if p.colonized and p.owner == _controller.player_id and p.population > 0.0 else ""
 	return "%s %-14s%s" % [flag, type_name, pop]
 
 
@@ -218,6 +245,18 @@ func _refresh_planet() -> void:
 		_ownership_caption(p),
 	]))
 	lines.append(Format.field("HABITABILITY", Format.percent(p.habitability())))
+
+	# Everything past habitability is a readout of an economy. A world belonging to
+	# another empire is surveyed rock: its population, farms, reserves and build queue
+	# are exactly the "squares and markers" the fog is supposed to withhold, and they were
+	# reachable by clicking any row a sensor sweep happened to light up. Habitability is
+	# kept because it is a property of the planet, not of its owner.
+	if not _planet_detail_known(p):
+		lines.append("")
+		lines.append("[color=#%s]UNSURVEYED[/color]" % CC2Theme.WHITE_DIM.to_html(false))
+		_planet_label.text = "\n".join(lines)
+		return
+
 	lines.append(Format.field("POPULATION", Format.fixed(p.population, 2)))
 	lines.append(Format.field("CAPACITY", Format.fixed(p.max_population(), 2)))
 	lines.append(Format.field("FOOD BALANCE", Format.signed_colored(_food_balance(p))))
@@ -263,6 +302,20 @@ func _refresh_planet() -> void:
 	_planet_label.text = "\n".join(lines)
 
 
+## Whether this player's survey knows a body's economics.
+##
+## The player's own worlds, always. A foreign body only once the player has a fleet
+## actually parked in that system -- the same "my ships are sitting in it" standard
+## `SessionController.knows_owner_of` applies to ownership, so the two never disagree
+## about whether a player is allowed to see what is there.
+func _planet_detail_known(p: PlanetState) -> bool:
+	if _controller == null or p == null:
+		return false
+	if p.owner == _controller.player_id:
+		return true
+	return _controller.knows_owner_of(_controller.system_of_planet(p.index))
+
+
 ## Food balance per turn: production from farms and habitability, minus consumption from
 ## population. Mirrors `ColonySim` closely enough to preview without running a turn, and is
 ## labelled as a projection in the UI copy.
@@ -276,12 +329,15 @@ func _is_economic(id: StringName) -> bool:
 		&"missile_battery", &"garrison", &"shipyard"]
 
 
+## Heading caption for a selected body.
+##
+## A body belonging to another empire reads UNCOLONISED, exactly like an empty one. The
+## player learns an opponent's holdings by putting a ship in orbit, not by clicking a row
+## the sensors happened to light up.
 func _ownership_caption(p: PlanetState) -> String:
-	if not p.colonized:
+	if not p.colonized or p.owner != _controller.player_id:
 		return "UNCOLONISED"
-	if p.owner == _controller.player_id:
-		return "YOURS"
-	return _faction_name(p.owner)
+	return "YOURS"
 
 
 func _faction_name(id: int) -> String:
