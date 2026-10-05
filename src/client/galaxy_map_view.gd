@@ -6,8 +6,9 @@ class_name GalaxyMapView
 ## That is cheap enough at this scale (hundreds of systems, a handful of draw calls each)
 ## and it means the view can never drift out of sync with the model.
 ##
-## All drawing is done in galaxy coordinates; `GalaxyMap` parents this inside a SubViewport
-## so the Camera2D handles zoom and pan without any transform maths here.
+## All drawing is done in the node's own coordinates, which is galaxy coordinates shifted so
+## the SubViewport's centre lands on the star; the parent hosts this inside a SubViewport so
+## the Camera2D handles zoom and pan without any transform maths here.
 
 ## Emitted when a system is clicked, with its galaxy index.
 signal system_clicked(system_index: int)
@@ -75,22 +76,17 @@ const BOUNDS_PAD := 1.04
 const UNKNOWN_MARKER_RADIUS := 7.0
 const UNKNOWN_MARKER_COLOUR := Color(0.42, 0.55, 0.50, 0.55)
 
+## How close, in galaxy units, a click has to be to count as hitting a body.
+##
+## A named constant because it is the yardstick the hit-testing tolerance is measured
+## against: a transform can be wrong by less than this and still select the intended
+## planet, which is how an approximate inverse passes a "does it pick the right one" test.
+const PICK_RADIUS := 18.0
+
 ## Radius of a planet's disc, and of the star's. A star is drawn larger than any planet so
 ## the centre of the system reads as the centre.
 const STAR_RADIUS := 13.0
 const PLANET_RADIUS := 5.5
-
-
-func _draw() -> void:
-	if _controller == null or _controller.galaxy == null:
-		return
-	var galaxy := _controller.galaxy
-
-	_draw_field(galaxy)
-	_draw_bounds(galaxy)
-	_draw_systems(galaxy)
-	_draw_fleets(galaxy)
-	_draw_order_line(galaxy)
 
 
 ## The backdrop: a flat black field with a crosshair at the star.
@@ -116,9 +112,9 @@ func _draw_field(galaxy: GalaxyState) -> void:
 ## planet at maximum inclination actually occupies -- telling the player the corner is
 ## out of bounds when it is not.
 func _draw_bounds(galaxy: GalaxyState) -> void:
-	var half := world_size(galaxy) * BOUNDS_PAD
-	var lo := Vector2(-half, -half)
-	var hi := Vector2(half, half)
+	var r := world_rect(galaxy)
+	var lo := r.position
+	var hi := r.end
 	draw_line(lo, Vector2(hi.x, lo.y), BOUNDS_COLOUR, BOUNDS_WIDTH)
 	draw_line(Vector2(hi.x, lo.y), hi, BOUNDS_COLOUR, BOUNDS_WIDTH)
 	draw_line(hi, Vector2(lo.x, hi.y), BOUNDS_COLOUR, BOUNDS_WIDTH)
@@ -207,7 +203,11 @@ func _system_of(galaxy: GalaxyState, p: PlanetState) -> SystemState:
 
 
 ## The placeholder shown in place of a world the player has not named.
-const UNKNOWN_NAME := "Unknown Planet"
+##
+## An alias for the controller's constant rather than a second copy of it. The two were
+## separate strings that happened to agree, which is exactly the arrangement that survives
+## until one of them is edited.
+const UNKNOWN_NAME := SessionController.UNKNOWN_NAME
 
 
 ## A planet's display name, or the placeholder when the player is not entitled to it.
@@ -216,22 +216,37 @@ const UNKNOWN_NAME := "Unknown Planet"
 ## refer to a place, so a map that named every rival world would be handing over a survey
 ## nobody performed -- and unlike the economy it is *free* to withhold, since an unnamed
 ## world is still perfectly clickable.
+##
+## Note this is the *eligibility* half only. It says what the world would be called if it
+## were named on screen; whether a label is drawn at all is `_label_worth_drawing`'s call,
+## and the two are deliberately different questions.
 func planet_label(p: PlanetState) -> String:
-	if not _controller.knows_name_of(p.index):
+	if _controller == null:
 		return UNKNOWN_NAME
-	if p.name != "":
-		return p.name
-	# The fallback is a position-derived designation rather than a real name, so it leaks
-	# nothing the player could not already count off the planets they can see.
-	return "P-%d" % (p.index + 1)
+	return _controller.display_name(p.index)
 
 
-## Names get expensive to read once a hundred bodies are on screen, so only label the
-## ones the player can act on or is looking at.
+## Whether this planet gets a name drawn beside it.
+##
+## Deliberately the same bar as `SessionController.knows_name_of` -- owned, or one of the
+## player's own fleets parked in orbit -- and no looser. A selected body is *not* an
+## exception: selecting a world is a camera and inspector action, and honouring it here
+## would hand out the name of every rival planet the player ever clicked on, which is a
+## quicker route to the same leak than scanning the board ever was.
+##
+## What remains is the whole visible map. Everything else draws as an unnamed marker.
 func _label_worth_drawing(galaxy: GalaxyState, p: PlanetState) -> bool:
-	if p.index == _controller.selected_planet:
-		return true
-	return p.owner == _controller.player_id
+	return label_worth_drawing(p)
+
+
+## Public form of the label rule, so the test exercises the decision itself rather than
+## parsing the source for it.
+##
+## The duplication is deliberate and one-directional: `_draw_planet` calls this, and the
+## test calls this, so there is a single implementation that both the drawing and the test
+## go through. A test that greps the source for a string only proves the string is there.
+func label_worth_drawing(p: PlanetState) -> bool:
+	return _controller != null and _controller.knows_name_of(p.index)
 
 
 ## Fleet markers. Travelling fleets are drawn at their interpolated position with a
@@ -381,7 +396,7 @@ func _visible(index: int) -> bool:
 ## the star is more likely to mean the world next to it than the star itself. Returns -1
 ## when nothing is close enough. Radius is in galaxy units so the pick feels the same at
 ## every zoom level once the camera transform is undone by the caller.
-func pick(galaxy_pos: Vector2, radius: float = 18.0) -> int:
+func pick(galaxy_pos: Vector2, radius: float = PICK_RADIUS) -> int:
 	if _controller == null or _controller.galaxy == null:
 		return -1
 	var best := -1
@@ -405,6 +420,12 @@ func pick(galaxy_pos: Vector2, radius: float = 18.0) -> int:
 
 
 ## Update the hover highlight, in galaxy coordinates.
+## The pick radius, so a test can measure transform error against it rather than against a
+## tolerance it picked to match the bug it was written after.
+func pick_radius() -> float:
+	return PICK_RADIUS
+
+
 func set_hover(index: int) -> void:
 	if _hover != index:
 		_hover = index
@@ -415,6 +436,55 @@ func hover() -> int:
 	return _hover
 
 
-## Convert a point in this control's local space to galaxy coordinates.
-func to_galaxy(local: Vector2) -> Vector2:
-	return local - size * 0.5
+# --- Culling ---------------------------------------------------------------
+
+## Why the draw layer needs a custom rect at all.
+##
+## A `Control`'s own rect is what the renderer uses to decide whether to draw it at all.
+## Left alone, a rectless `Control` laid out at `PRESET_FULL_RECT` reports a
+## zero-minimum-size rect that its own `_draw` immediately draws far outside of, so the
+## first frame the camera is offset by anything at all the whole layer is culled -- and
+## every marker, the backdrop and the bounds frame go with it. That is the "map vanishes
+## when I pan" report: the map is not being hidden, it is being skipped.
+##
+## Setting a custom rect tells the renderer where the drawing actually goes, so the cull
+## follows the world rather than the widget.
+func _apply_custom_rect() -> void:
+	if not is_inside_tree() or _controller == null or _controller.galaxy == null:
+		return
+	# A generous margin over the drawn field: the field is square and the rect is square,
+	# but stroke widths, line caps and the float rounding in the camera transform all reach
+	# a few pixels past it, and a cull that is a hair too tight is invisible until the day it
+	# is not.
+	#
+	# This follows the galaxy rather than being fixed at build time, because the field is
+	# sized from the map radius -- a per-game property now that `--map-size` can pick it. A
+	# rect sized once would enclose a `tiny` map and cull half of an `extreme` one.
+	var w := world_size(_controller.galaxy) * BOUNDS_PAD * 1.1 + 64.0
+	# The Godot 4 signature is (item, enable, rect). Passing the rect as the second
+	# argument type-checks in neither direction, so the enable flag is not optional here
+	# even though it looks like the rect is the payload.
+	RenderingServer.canvas_item_set_custom_rect(
+		get_canvas_item(), true, Rect2(-w, -w, w * 2.0, w * 2.0)
+	)
+
+
+func _draw() -> void:
+	_apply_custom_rect()
+	if _controller == null or _controller.galaxy == null:
+		return
+	var galaxy := _controller.galaxy
+
+	_draw_field(galaxy)
+	_draw_bounds(galaxy)
+	_draw_systems(galaxy)
+	_draw_fleets(galaxy)
+	_draw_order_line(galaxy)
+
+
+## The half-extent of the drawn field in *this node's own* coordinates, which are
+## `GalaxyMapView` coordinates -- the galaxy coordinates shifted so the viewport's centre
+## lands on the star.
+func world_rect(galaxy: GalaxyState) -> Rect2:
+	var w := world_size(galaxy) * BOUNDS_PAD
+	return Rect2(-w, -w, w * 2.0, w * 2.0)

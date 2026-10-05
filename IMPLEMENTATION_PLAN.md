@@ -899,3 +899,109 @@ first assertion in the new tier block.
   fallback warning.
 - `test_gui_integration`: 250 (was 238) — name fog in both the map and the inspector, the
   black field, and the bounds frame enclosing every planet.
+
+---
+
+# Map viewport and UI polish
+
+## The click offset had two causes, and only one was visible
+
+`GalaxyMap._to_galaxy()` inverted the camera by hand:
+
+```gdscript
+return (screen_pos - get_rect().size * 0.5) / _camera.zoom.x + _camera.position
+```
+
+That assumes a camera with no rotation, no anchor offset, no sub-pixel rounding — and it
+ignores the `SubViewportContainer` entirely. The container's `stretch` puts the map in a
+second coordinate frame between the mouse and the camera, so the offset between where the
+player clicks and where the game thinks they clicked has two independent sources, which is
+why it reproduced at some zoom levels and not others.
+
+Both collapse into one expression, because the renderer already works out both:
+
+```gdscript
+return _sub_viewport.get_canvas_transform().affine_inverse() * _to_subviewport(local_pos)
+```
+
+`get_canvas_transform()` is what the engine itself uses to place a world point on screen,
+so inverting it is correct by construction for whatever the camera is doing. The forward
+direction (`_to_screen`) inverts the same way, and `click_at_galaxy()` routes the
+programmatic click through it so a synthetic click travels the transform a real one does.
+
+## Why the map vanished
+
+Three separate causes, all reachable:
+
+1. **Control rect culling.** A rectless `Control` at `PRESET_FULL_RECT` reports a
+   zero-minimum-size rect, so `_draw()` is skipped the moment the camera moves off the
+   origin. Fixed with `RenderingServer.canvas_item_set_custom_rect()` over the world
+   bounds. Note the Godot 4 signature is `(item, use_custom_rect, rect)` — the bool is
+   not optional, and there is no getter; read it back with
+   `RenderingServer.debug_canvas_item_get_rect()`.
+2. **A zoom floor that let the camera leave the map.** `MIN_ZOOM` was a pure runaway
+   guard, so a player could zoom out until the galaxy was entirely off screen. The floor
+   is now `max()` of that guard and a visibility fit.
+3. **Camera limits constrain the centre, not the edges.** `limit_left/right` keep the
+   *middle* of the screen over the map while the edges still hang off it, so
+   `clamp_camera()` gets its own `camera_bounds()`: the field inset by half the viewport
+   diagonal. `clampf` over an inverted range returns its first argument, so the bounds
+   collapse to the origin rather than swapping — hence the explicit `_axis_bounds` guard.
+
+## Fog of war had four readers and one authority
+
+`SessionController.display_name()` is now the single place that decides whether a world may
+be named, and the map marker, the inspector heading, the selection log and the fleet
+registry all call it. They previously each re-derived the fallback, and the log was the
+one that leaked.
+
+The fleet registry was still reaching for `p.name` directly — in the list caption *and* in
+"IN TRANSIT TO", which would have named the destination of every order in the game.
+
+### The log was untestable, which is why it leaked
+
+`GameClient` appended straight to a `RichTextLabel`. A `RichTextLabel`'s `text` property
+is empty in a headless run — the buffer is only populated once the text server shapes it,
+which needs a rasteriser. Every assertion against the log therefore compared against `""`
+and passed vacuously. The lines are now mirrored into a plain buffer that the panel also
+displays, so the log has one source and a leaked name is visible to a test.
+
+## A cache key that hid half the fleet panel
+
+`FleetPanel._refresh_list()` rebuilt its captions only when the roster *ids* changed, so
+ordering a fleet somewhere left every caption stale — the registry showed the location a
+fleet had left. The key now covers each fleet's system, destination and ship count as well.
+
+## Labels, habitability and the system survey
+
+A map label is drawn only for a world the player owns or has a fleet parked on
+(`view.label_worth_drawing()`), and even then it reads through `display_name()`. Worlds the
+player may not name get *no* label rather than a hundred identical "Unknown Planet"
+strings covering the board. "HABITABILITY" and the "SYSTEM SURVEY" section are gone; the
+inspector heading and "TYPE" are inside the known branch, so an unknown world shows neither
+its type nor its name.
+
+## Two tests that had no teeth
+
+The hit-testing sweep passed against the original buggy transform, three times over:
+
+- Zooms written as absolutes are meaningless on a 6000-parsec map — the error being
+  hunted scales with zoom and was under a pixel. Now derived from the map's own span.
+- `stretch = true` pins the SubViewport's size to the container's and its position to zero,
+  so the hand-rolled formula agrees with the correct one *to the last bit* in a headless
+  run. Adding a `Camera2D.offset` to the sweep does not help either, because the forward
+  and inverse functions are a mutually consistent pair: a wrong-but-consistent pair
+  round-trips perfectly, so `worst_error` was measuring self-consistency, not correctness.
+- The assertion that bites compares against **the renderer**: where the canvas transform
+  actually puts the planet, versus where the map says to click for it. The old transform
+  fails it by 141 px; the correct one is exact.
+
+The same lesson applied to the fog work: an assertion is only worth having if it fails when
+the bug is present. Reverting each fix in turn confirmed the new assertions catch it.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 1929 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_gui_integration`: 274 (was 250) — the renderer-grounded hit-testing sweep across
+  span-derived zooms, pans and camera offsets; culling and camera bounds; label rules; fog
+  across the map, inspector, log and fleet registry.

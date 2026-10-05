@@ -39,6 +39,18 @@ signal end_turn_requested
 ## own star.
 const MIN_ZOOM_FACTOR := 0.01 / 6000.0
 
+## How much of the viewport the smallest allowed zoom must still fill.
+##
+## The floor is the only zoom at which the player can pull back, so if the map does not fit
+## at that zoom then zooming out -- the control a player reaches for on losing track of
+## where their empire is -- leaves them looking at an empty field with the galaxy off the
+## edge of it. That is worse than being unable to zoom in any further.
+##
+## Below 1.0, so the outermost planet is not hard against the frame at the minimum; the
+## runaway guard's job is to stop the camera being dragged to infinity, not to define the
+## framing.
+const MIN_ZOOM_FIT_MARGIN := 0.75
+
 ## Largest useful zoom, in absolute terms.
 ##
 ## Deliberately *not* scaled by the map span. Markers are drawn at a fixed size in galaxy
@@ -73,7 +85,39 @@ func map_radius() -> float:
 
 ## Zoom bounds for the current span.
 func min_zoom() -> float:
-	return maxf(MIN_ZOOM_FLOOR, MIN_ZOOM_FACTOR * map_radius())
+	return _min_zoom(get_rect().size, _sub_viewport.size if _sub_viewport != null
+		else Vector2i.ZERO)
+
+
+## `min_zoom` for an explicit area, so the caller and the clamping cannot disagree.
+func _min_zoom(control_size: Vector2, viewport_size: Vector2i) -> float:
+	var guard := maxf(MIN_ZOOM_FLOOR, MIN_ZOOM_FACTOR * map_radius())
+	if control_size.x < MIN_AREA or control_size.y < MIN_AREA:
+		return guard
+	var visible := control_size
+	if viewport_size.x > 0 and viewport_size.y > 0:
+		visible = Vector2(viewport_size)
+	# Measured against the outermost planet rather than the drawn field: the field is empty
+	# space by design, so a floor that protected the field would also forbid the player
+	# from seeing their own empire.
+	var fit := minf(visible.x, visible.y) * MIN_ZOOM_FIT_MARGIN / (2.0 * _body_extent())
+	# Only binding when the map is genuinely larger than the viewport. When it is smaller,
+	# the fit is a *magnification* above 1, and treating that as a floor would forbid the
+	# player from zooming out on a `tiny` map -- the one map size where pulling back is the
+	# only way to see anything at all.
+	if fit >= 1.0:
+		return guard
+	return maxf(guard, fit)
+
+
+## The furthest any planet sits from the star, in galaxy units; the drawn field if unknown.
+func _body_extent() -> float:
+	if _controller == null or _controller.galaxy == null:
+		return _view.world_size(null)
+	var reach := 0.0
+	for p in _controller.galaxy.planets:
+		reach = maxf(reach, p.position.length())
+	return maxf(reach, 1.0)
 
 
 func max_zoom() -> float:
@@ -83,6 +127,110 @@ func max_zoom() -> float:
 ## Slack left around the disk when fitting, so edge systems are not flush against the
 ## panel border and the crosshair still reads as the galactic centre.
 const FIT_MARGIN := 1.25
+
+## Slack beyond the drawn field for the camera limits.
+##
+## The camera is not allowed inside the field. Without a limit, one hard pan leaves the
+## star off screen with nothing but the edge of the bounds frame to go on, and the
+## player's own expansion is off in whichever direction they nudged the mouse.
+const CAMERA_MARGIN_FACTOR := 1.1
+
+
+## Keep the camera over the map, and keep the SubViewport black behind it.
+##
+## `limit_*` are applied by the camera itself, in world units, so they hold under every
+## route into the camera -- wheel, arrow keys, drag, `frame_galaxy`, `recentre` -- rather
+## than only the ones whose clamping we remembered to write. The widest of the four is
+## used for all four because the map is a square; a limit derived from the viewport's own
+## aspect would be reshaped under the player on every resize, and a rule that changes shape
+## is one that cannot be reasoned about.
+##
+## The clear colour is the other half of "the map must not vanish". Outside the drawn
+## field the viewport fell back to the project's clear colour, which is not black, so
+## panning past the edge produced a panel of foreign colour -- readable as a rendering
+## fault even on the frames when the map behind it was drawn correctly.
+func _apply_camera_limits() -> void:
+	if _camera == null or _sub_viewport == null:
+		return
+	var w := _view.world_size(
+		_controller.galaxy if _controller != null else null
+	) * CAMERA_MARGIN_FACTOR
+	_camera.limit_left = int(-w)
+	_camera.limit_top = int(-w)
+	_camera.limit_right = int(w)
+	_camera.limit_bottom = int(w)
+	_sub_viewport.render_target_clear_mode = SubViewport.CLEAR_MODE_ALWAYS
+	_sub_viewport.canvas_item_default_texture_filter = \
+		Viewport.DEFAULT_CANVAS_ITEM_TEXTURE_FILTER_LINEAR
+
+
+## Whether the camera limits currently enclose the whole drawn field, with margin.
+##
+## Exposed so a test asserts the real constraint instead of re-deriving it. A limit tight
+## to the outermost planet still lets the centre of the screen drift off the map at the
+## corner of the window, which is where a player ends up after zooming out to see
+## everything.
+func camera_limits_cover_map() -> bool:
+	if _camera == null or _controller == null or _controller.galaxy == null:
+		return false
+	var w := _view.world_size(_controller.galaxy) * CAMERA_MARGIN_FACTOR
+	return is_equal_approx(float(_camera.limit_left), -w) \
+		and is_equal_approx(float(_camera.limit_right), w) \
+		and is_equal_approx(float(_camera.limit_top), -w) \
+		and is_equal_approx(float(_camera.limit_bottom), w)
+
+
+## Keep the camera's centre inside `camera_bounds()`.
+##
+## Called after every route that moves the camera, and deliberately immediate rather than
+## left to the camera's own limits alone. Those are a *centre* constraint: they keep the
+## middle of the screen over the map while still letting the edges hang off it, and they
+## are applied while the camera renders rather than when the value is written. Anything
+## reading `position` in the gap -- a hit test, a drawn order line -- would then disagree
+## with what is on screen.
+##
+## The bound depends on the zoom, which is the last thing set when reframing, so it is
+## recomputed on every zoom as well as every pan.
+func clamp_camera() -> void:
+	if _camera == null:
+		return
+	var b := camera_bounds()
+	_camera.position.x = clampf(_camera.position.x, b.position.x, b.end.x)
+	_camera.position.y = clampf(_camera.position.y, b.position.y, b.end.y)
+
+
+## The rectangle the camera's centre is allowed to occupy.
+##
+## The field, shrunk by the visible half-extent of the viewport in galaxy units: the
+## constraint is on the centre, so letting the centre reach the field's edge would put
+## half the screen outside it. By the *diagonal*, not per-axis -- a pan is diagonal, and a
+## bound that only holds per axis lets the screen hang off the very corner the player
+## pushed it towards.
+func camera_bounds() -> Rect2:
+	var w := _view.world_size(
+		_controller.galaxy if _controller != null else null
+	) * CAMERA_MARGIN_FACTOR
+	if _camera == null:
+		return Rect2(-w, -w, w * 2.0, w * 2.0)
+	var view := _sub_viewport.size if _sub_viewport != null else Vector2i(640, 480)
+	var z := maxf(0.0001, _camera.zoom.x)
+	var half := Vector2(float(view.x), float(view.y)) * 0.5 / z
+	var span := _axis_bounds(-w, w, half.length())
+	return Rect2(span.x, span.y, span.y - span.x, span.y - span.x)
+
+
+## The camera centre's range on one axis, given a half-extent of `inset`.
+##
+## Collapses to the origin when the screen is wider than the map at this zoom -- the only
+## centre that keeps the field in frame is then its middle, not either of its edges. It is
+## collapsed rather than swapped for that reason: an inverted range would make `clampf`
+## return its first argument, which is an edge, not a centre.
+func _axis_bounds(lo: float, hi: float, inset: float) -> Vector2:
+	var a := lo + inset
+	var b := hi - inset
+	if b < a:
+		return Vector2.ZERO
+	return Vector2(a, b)
 
 var _controller: SessionController = null
 var _view: GalaxyMapView = null
@@ -148,6 +296,8 @@ func _build() -> void:
 	_camera.zoom = Vector2.ONE
 	_sub_viewport.add_child(_camera)
 
+	_apply_camera_limits()
+
 	_view.system_clicked.connect(_on_view_system_clicked)
 	_view.background_clicked.connect(func() -> void: background_picked.emit())
 	gui_input.connect(_on_gui_input)
@@ -161,6 +311,8 @@ func bind(controller: SessionController) -> void:
 	if _controller == null:
 		return
 	_view.bind(controller)
+	# The span is only known once a galaxy is bound, so the limits have to be reapplied.
+	_apply_camera_limits()
 	# The map is unusable until it is framed: an unfitted camera leaves the player staring
 	# at empty space because systems are small relative to the viewport. `bind()` runs
 	# before the container has laid this node out, so the fit is deferred to a frame when
@@ -210,7 +362,13 @@ func _on_gui_input(event: InputEvent) -> void:
 		_drag_distance = maxf(_drag_distance, mm.position.distance_to(_pressed_mouse))
 		if _panning:
 			_user_framed = true
-			_camera.position -= mm.relative / _camera.zoom.x
+			# `relative` is in Control-local units while the camera thinks in galaxy
+			# units, so the drag has to cross both the container scale and the zoom --
+			# dividing by the zoom alone lets the map slide under the cursor at a rate
+			# that changes with the window size.
+			var dragged := _to_subviewport(mm.position) - _to_subviewport(mm.position - mm.relative)
+			_camera.position -= dragged / _camera.zoom.x
+			clamp_camera()
 			accept_event()
 			return
 		# Hover highlight in galaxy coordinates: undo the camera transform and the
@@ -252,6 +410,9 @@ func _unhandled_key_input(event: InputEvent) -> void:
 			_zoom_at(get_rect().size * 0.5, 1.0 / ZOOM_STEP)
 		_:
 			return
+	# The zoom cases above have already clamped themselves; this catches the pan cases and
+	# costs nothing on the others.
+	clamp_camera()
 	accept_event()
 
 
@@ -268,12 +429,72 @@ func _zoom_at(screen_pos: Vector2, factor: float) -> void:
 	_camera.zoom = Vector2(next, next)
 	var after := _to_galaxy(screen_pos)
 	_camera.position += before - after
+	# After, not before: the bound depends on the zoom, so re-clamping against the old
+	# one would either fight the zoom or leave a limit the new zoom has outgrown.
+	clamp_camera()
+
+
+## A position in this Control's local space, as it arrives in a gui_input event.
+##
+## A `SubViewportContainer` with `stretch` scales its SubViewport to fill its own rect, so
+## local units and SubViewport pixels are two different units and the gap between them is
+## the window's aspect ratio. Before this existed the code assumed they were the same,
+## which is true at exactly one window size and drifts from there -- the reason a click
+## landed on the right planet in the test's 1280x720 layout and the wrong one in a
+## maximised window. Deriving it from the containers means there is no constant to get
+## wrong.
+func _to_subviewport(local_pos: Vector2) -> Vector2:
+	if _container == null or _sub_viewport == null:
+		return local_pos
+	var dst := _sub_viewport.size
+	var src := _container.size
+	if src.x <= 0.0 or src.y <= 0.0 or dst.x <= 0 or dst.y <= 0:
+		return local_pos
+	return Vector2(
+		(local_pos.x - _container.position.x) * float(dst.x) / src.x,
+		(local_pos.y - _container.position.y) * float(dst.y) / src.y
+	)
+
+
+## The inverse of `_to_subviewport`: a point in the SubViewport back into this Control.
+func _to_local(viewport_pos: Vector2) -> Vector2:
+	if _container == null or _sub_viewport == null:
+		return viewport_pos
+	var dst := _sub_viewport.size
+	var src := _container.size
+	if src.x <= 0.0 or src.y <= 0.0 or dst.x <= 0 or dst.y <= 0:
+		return viewport_pos
+	return Vector2(
+		_container.position.x + viewport_pos.x * src.x / float(dst.x),
+		_container.position.y + viewport_pos.y * src.y / float(dst.y)
+	)
 
 
 ## Map a point in this Control to galaxy coordinates.
-func _to_galaxy(screen_pos: Vector2) -> Vector2:
-	var centre := get_rect().size * 0.5
-	return (screen_pos - centre) / _camera.zoom.x + _camera.position
+##
+## Two transforms have to be undone to get here, and they are separate because the engine
+## keeps them separate: the container's own scale, and the camera's canvas transform. Only
+## the second was being inverted before, by hand --
+## `(pos - centre) / zoom + camera.position` -- which silently assumes a camera with no
+## rotation, no anchor offset and no sub-pixel rounding. Each assumption that fails is an
+## offset between where the player clicks and where the game thinks they clicked, and the
+## symptom is "I clicked the planet and it selected the one next to it" at some zoom
+## levels and not others: exactly the class of bug nobody reproduces on the settings they
+## wrote it on.
+##
+## `get_canvas_transform()` is what the renderer itself uses to place a world point on
+## screen, so inverting it is correct by construction for whatever the camera is doing.
+func _to_galaxy(local_pos: Vector2) -> Vector2:
+	return _sub_viewport.get_canvas_transform().affine_inverse() * _to_subviewport(local_pos)
+
+
+## The inverse: galaxy coordinates back to a point in this Control.
+##
+## The programmatic click path runs through here so a synthetic click travels exactly the
+## transform a real one does, rather than the test driving a shortcut the player's mouse
+## does not take -- which is how a hit-testing bug passes its own test.
+func _to_screen(galaxy_pos: Vector2) -> Vector2:
+	return _to_local(_sub_viewport.get_canvas_transform() * galaxy_pos)
 
 
 ## Route a click: to a planet's owner as a move destination if a fleet is selected and
@@ -351,9 +572,7 @@ func order_mode() -> bool:
 
 ## Programmatic click path, used by the automated GUI test.
 func click_at_galaxy(galaxy_pos: Vector2) -> int:
-	var centre := get_rect().size * 0.5
-	var screen := (galaxy_pos - _camera.position) * _camera.zoom.x + centre
-	_click_at(screen)
+	_click_at(_to_screen(galaxy_pos))
 	return _view.pick(galaxy_pos)
 
 
@@ -393,13 +612,17 @@ func frame_galaxy() -> void:
 		for p in galaxy.planets:
 			need_x = maxf(need_x, absf(p.position.x - centre.x))
 			need_y = maxf(need_y, absf(p.position.y - centre.y))
+	# The floor is taken against the same area the fit was computed from. Using
+	# `get_rect()` for one and the sub-viewport for the other would be two numbers that are
+	# equal only while the map fills its container exactly.
 	var zoom := clampf(minf(
 		visible.x / (2.0 * need_x * FIT_MARGIN),
 		visible.y / (2.0 * need_y * FIT_MARGIN)
-	), min_zoom(), max_zoom())
+	), _min_zoom(get_rect().size, _sub_viewport.size), max_zoom())
 
 	_camera.position = centre
 	_camera.zoom = Vector2(zoom, zoom)
+	clamp_camera()
 
 
 ## Re-frame whenever the map gains area, unless the player has framed it themselves.

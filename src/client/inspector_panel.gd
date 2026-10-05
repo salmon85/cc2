@@ -1,14 +1,22 @@
 extends PanelContainer
 class_name InspectorPanel
-## System / planet readout.
+## Planet readout.
 ##
-## Shows the selected system's summary and, below it, a body list; selecting a body shows
-## its class, habitability, population, food balance, structures and defence. Everything is
-## a sunk, monospaced-style readout rather than a form, matching the terminal aesthetic.
+## Shows the selected body's type, population, food balance, structures and defence.
+## Everything is a sunk, monospaced-style readout rather than a form, matching the terminal
+## aesthetic.
+##
+## The SYSTEM SURVEY panel that used to sit above this -- name, class, bodies, value, owner
+## -- is gone. There is one system, it has one name that the player sees written on the
+## map's crosshair every time they look at the centre of the screen, and the other four
+## rows described the star rather than anything the player can act on. What it really cost
+## was the half of the left column that a five-row readout of the only star in the game
+## occupied, which the planet detail and the fleet registry both needed. Removing it is
+## also a fog fix in its own right: OWNER is a rival-empire roster, and it was the one
+## panel row with no route for the name fog to reach.
 
 var _controller: SessionController = null
 
-var _system_label: RichTextLabel = null
 var _planet_label: RichTextLabel = null
 
 
@@ -24,16 +32,7 @@ func _build() -> void:
 	col.add_theme_constant_override("separation", 6)
 	add_child(col)
 
-	col.add_child(_heading("SYSTEM SURVEY"))
-
-	_system_label = RichTextLabel.new()
-	_system_label.bbcode_enabled = true
-	_system_label.fit_content = true
-	_system_label.scroll_active = false
-	_system_label.custom_minimum_size = Vector2(0, 150)
-	col.add_child(_system_label)
-
-	# The BODIES list is gone. Planets are picked by clicking them on the map, which is
+	# The BODIES list is gone too. Planets are picked by clicking them on the map, which is
 	# where a player is already looking to decide what to do; a duplicate list here made
 	# the map and the panel two controls for one job, and the one in the panel could not
 	# show anything the map did not.
@@ -67,47 +66,7 @@ func bind(controller: SessionController) -> void:
 func refresh() -> void:
 	if _controller == null or _controller.galaxy == null:
 		return
-	_refresh_system()
 	_refresh_planet()
-
-
-func _refresh_system() -> void:
-	var sys: SystemState = null
-	if _controller.selected_system >= 0:
-		sys = _controller.galaxy.system(_controller.selected_system)
-	if sys == null:
-		_system_label.text = "[color=#%s]NO SYSTEM SELECTED[/color]" % CC2Theme.WHITE_DIM.to_html(false)
-		return
-
-	var seen := _controller.can_see(sys.index)
-	var lines := PackedStringArray()
-	lines.append(Format.field("NAME", sys.name if sys.name != "" else "UNNAMED"))
-	if not seen:
-		# Unsurveyed systems must not leak detail the player has paid to discover.
-		lines.append(Format.field("CLASS", "UNSURVEYED"))
-		lines.append(Format.field("BODIES", "?"))
-		lines.append(Format.field("VALUE", "??"))
-		_system_label.text = "\n".join(lines)
-		return
-
-	lines.append(Format.field("CLASS", _star_class_name(sys.star_class)))
-	lines.append(Format.field("BODIES", str(sys.body_count())))
-	lines.append(Format.field("VALUE", Format.fixed(sys.strategic_value, 2)))
-	# Ownership is only reported for the player's own empire. Sensor sweeps can reveal a
-	# foreign star, but not its flag: naming the owner here handed every player a free,
-	# always-accurate roster of where every other empire had settled, which is the whole
-	# game. A foreign system with no claim of our own reads exactly like uncharted.
-	if sys.owner == _controller.player_id and _controller.knows_owner_of(sys.index):
-		lines.append(Format.field(
-			"OWNER", "[color=#%s]%s[/color]" % [
-				CC2Theme.faction_color(sys.owner).to_html(false), _faction_name(sys.owner)
-			]
-		))
-	else:
-		lines.append(Format.field("OWNER", "UNCLAIMED"))
-	if sys.owner == _controller.player_id:
-		lines.append("[color=#%s]>> YOUR TERRITORY[/color]" % CC2Theme.PHOSPHOR.to_html(false))
-	_system_label.text = "\n".join(lines)
 
 
 ## The currently selected planet, or null when nothing is picked.
@@ -133,26 +92,22 @@ func _refresh_planet() -> void:
 		_known_name(p),
 		_ownership_caption(p),
 	]))
-	# Habitability is a property of the rock, not of whoever holds it, so it survives the
-	# fog. Naming is not: a name is something somebody surveyed and recorded, and it is the
-	# identifier a player reuses across turns.
-	if not _planet_detail_known(p):
-		lines.append(Format.field("HABITABILITY", Format.percent(p.habitability())))
-	else:
-		lines.append(Format.field("TYPE", String(p.type_id).capitalize()))
-		lines.append(Format.field("HABITABILITY", Format.percent(p.habitability())))
-
-	# Everything past habitability is a readout of an economy. A world belonging to
-	# another empire is surveyed rock: its population, farms, reserves and build queue
-	# are exactly the "squares and markers" the fog is supposed to withhold, and they were
-	# reachable by clicking any row a sensor sweep happened to light up. Habitability is
-	# kept because it is a property of the planet, not of its owner.
+	# Habitability is not shown. It was on both sides of this fog -- it survived the survey
+	# rule because it is a property of the rock rather than of whoever holds it -- and that
+	# was the reasoning that let it stay. But the player has no decision that turns on it:
+	# they cannot terraform, they cannot pick a world by it, and the food balance that does
+	# depend on it is reported directly. All the row did was put a number next to a name and
+	# imply the name mattered for something.
+	#
+	# Naming is the part that does cross the fog: a name is something somebody surveyed and
+	# recorded, and it is the identifier a player reuses across turns.
 	if not _planet_detail_known(p):
 		lines.append("")
 		lines.append("[color=#%s]UNSURVEYED[/color]" % CC2Theme.WHITE_DIM.to_html(false))
 		_planet_label.text = "\n".join(lines)
 		return
 
+	lines.append(Format.field("TYPE", String(p.type_id).capitalize()))
 	lines.append(Format.field("POPULATION", Format.fixed(p.population, 2)))
 	lines.append(Format.field("CAPACITY", Format.fixed(p.max_population(), 2)))
 	lines.append(Format.field("FOOD BALANCE", Format.signed_colored(_food_balance(p))))
@@ -200,23 +155,15 @@ func _refresh_planet() -> void:
 
 ## The planet's name, or the fog placeholder.
 ##
-## Delegates to `SessionController.knows_name_of`, which is where the rule is written down.
-## The map consults the same function, so a world cannot be nameless on the map and named
-## in the panel two inches to the right of it.
+## Delegates to `SessionController.display_name`, which is where the rule and the fallback
+## formatting both live. The map and the selection log call the same function, so a world
+## cannot be nameless on the map and named in the log two inches to its right.
 func _known_name(p: PlanetState) -> String:
-	if _controller == null or not _controller.knows_name_of(p.index):
+	if _controller == null:
 		return GalaxyMapView.UNKNOWN_NAME
-	# Same fallback the map uses, so a world with no drawn name still gets a stable
-	# position-derived one rather than a blank heading.
-	return p.name if p.name != "" else "P-%d" % (p.index + 1)
+	return _controller.display_name(p.index)
 
 
-## Whether this player's survey knows a body's economics.
-##
-## The player's own worlds, always. A foreign body only once the player has a fleet
-## actually parked in that system -- the same "my ships are sitting in it" standard
-## `SessionController.knows_owner_of` applies to ownership, so the two never disagree
-## about whether a player is allowed to see what is there.
 ## Whether the player may see this body's economy.
 ##
 ## A world the player owns is always known. A world owned by somebody else is known only
@@ -262,27 +209,5 @@ func _ownership_caption(p: PlanetState) -> String:
 	return "YOURS"
 
 
-func _faction_name(id: int) -> String:
-	# Factions carry no display name in the state model — Phase 2 keyed them by id and
-	# colour, so the UI names them positionally rather than inventing a roster.
-	return "FACTION %d" % id
-
-
-func _star_class_name(star_class: int) -> String:
-	match star_class:
-		0: return "M RED DWARF"
-		1: return "K ORANGE DWARF"
-		2: return "G YELLOW STAR"
-		3: return "F WHITE-YELLOW"
-		4: return "A WHITE STAR"
-		5: return "B BLUE GIANT"
-		6: return "O BLUE SUPERGIANT"
-		_: return "CLASS ?"
-
-
 func planet_label() -> RichTextLabel:
 	return _planet_label
-
-
-func system_label() -> RichTextLabel:
-	return _system_label

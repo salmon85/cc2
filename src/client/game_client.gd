@@ -23,6 +23,14 @@ var inspector: InspectorPanel = null
 var macros: MacroPanel = null
 var fleets: FleetPanel = null
 var _log: RichTextLabel = null
+## Every line the session log has shown, kept as plain strings.
+##
+## The log is a security surface -- it is where a leaked world name shows up -- and a
+## `RichTextLabel` cannot be read back in a headless run: its `text` property stays empty
+## until the text server shapes the buffer, which needs a rasteriser. Testing against it
+## means testing against "", which passes everything. Mirroring the lines here gives both
+## the panel and the tests one source, so a name cannot be displayed but unverifiable.
+var _log_lines_buffer := PackedStringArray()
 
 
 func _ready() -> void:
@@ -55,7 +63,14 @@ func _build_layout() -> void:
 	body.add_theme_constant_override("separation", 0)
 	root_col.add_child(body)
 
-	# Left column: survey readout over the fleet registry.
+	# Left column: the planet readout over the fleet registry.
+	#
+	# This is the column that lost the system survey, so the proportions moved rather than
+	# the panels. The registry gets the larger share because a fleet's detail block is
+	# what a player opens this column for, and the planet readout above it is a summary of
+	# something already visible on the map. `stretch_ratio` rather than minimum heights:
+	# hard pixel minimums only describe one window height, and the ratio keeps the split
+	# sensible in a short window where both panels are squeezed.
 	var left := VBoxContainer.new()
 	left.custom_minimum_size = Vector2(280, 0)
 	left.add_theme_constant_override("separation", 0)
@@ -63,13 +78,16 @@ func _build_layout() -> void:
 
 	inspector = InspectorPanel.new()
 	inspector.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	inspector.size_flags_stretch_ratio = 3.0
 	left.add_child(inspector)
 
 	var left_split := VSeparator.new()
 	left.add_child(left_split)
 
 	fleets = FleetPanel.new()
-	fleets.custom_minimum_size = Vector2(280, 300)
+	fleets.custom_minimum_size = Vector2(280, 220)
+	fleets.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	fleets.size_flags_stretch_ratio = 2.0
 	left.add_child(fleets)
 
 	# Centre: the map owns the remaining space.
@@ -210,7 +228,16 @@ func _refresh() -> void:
 func _log_line(line: String) -> void:
 	if _log == null:
 		return
+	_log_lines_buffer.append(line)
 	_log.append_text("[color=#%s]%s[/color]\n" % [CC2Theme.WHITE_DIM.to_html(false), line])
+
+
+## Everything the session log currently shows.
+##
+## The log is the panel a player reads when they are not sure what they just clicked, so a
+## name must not be readable here merely because it was readable elsewhere.
+func log_text() -> String:
+	return "\n".join(_log_lines_buffer)
 
 
 func _log_lines(count: int) -> void:
@@ -245,6 +272,8 @@ func _on_end_turn() -> void:
 	_log_line("STARDATE %d -> %d" % [before + 1, controller.galaxy.turn + 1])
 
 
+## The star was clicked. Its name is not fogged: there is one system, it is drawn and named
+## on the map's crosshair, and the survey panel that used to repeat it here is gone.
 func _on_system_picked(index: int) -> void:
 	controller.select_system(index)
 	var sys := controller.galaxy.system(index)
@@ -254,12 +283,16 @@ func _on_system_picked(index: int) -> void:
 
 ## A body was clicked. The map already selected it before emitting, so this is the log
 ## line and nothing else -- the inspector redraws through `state_changed`.
+##
+## The name is not read from the state here. This line was the one reader still bypassing
+## the fog: the map drew "Unknown Planet" over a rival world and the inspector headed the
+## detail the same way, while the log -- which is what a player actually reads to confirm
+## what they just clicked -- printed the real name in plain text. Fog that a player can
+## switch off by clicking harder is not fog.
 func _on_planet_picked(index: int) -> void:
-	var p := controller.galaxy.planet(index)
-	if p == null:
+	if controller.galaxy.planet(index) == null:
 		return
-	var name := p.name if p.name != "" else "P-%03d" % (p.index + 1)
-	_log_line("SELECTED %s" % name)
+	_log_line("SELECTED %s" % controller.display_name(index))
 
 
 func _on_refused(reason: String) -> void:

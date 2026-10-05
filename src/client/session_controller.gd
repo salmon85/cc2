@@ -224,6 +224,39 @@ func knows_name_of(planet_index: int) -> bool:
 	return false
 
 
+## Shown in place of the name of a world the player is not entitled to.
+##
+## Lives here rather than in the panel or the map, because the rule is the controller's and
+## every caller must reach the same verdict -- a name the map will not draw but the log will
+## print is still a leak, and the log is where a player looks when they are not sure what
+## they just clicked.
+const UNKNOWN_NAME := "Unknown Planet"
+
+
+## A world's display name, or the fog placeholder.
+##
+## The `knows_name_of` gate and the formatting are bound together here so the map marker,
+## the inspector heading and the selection log cannot drift apart. All three previously
+## re-derived the fallback themselves: the map said "Unknown Planet", the panel said
+## "Unknown Planet", and the log said the real name -- the one reader that was leaking did
+## so precisely because nobody had put all three on one function.
+##
+## The `P-N` fallback is position-derived, not a real name, so a world nobody named still
+## has a stable handle without revealing anything the player could not count off the bodies
+## they can already see.
+func display_name(planet_index: int) -> String:
+	if galaxy == null:
+		return UNKNOWN_NAME
+	var p := galaxy.planet(planet_index)
+	if p == null:
+		return UNKNOWN_NAME
+	if not knows_name_of(planet_index):
+		return UNKNOWN_NAME
+	if p.name != "":
+		return p.name
+	return "P-%d" % (p.index + 1)
+
+
 ## The lowest-indexed body in `system_index`, or -1. With one system this is planet 0.
 func _first_planet_of(system_index: int) -> int:
 	var sys := galaxy.system(system_index) if galaxy != null else null

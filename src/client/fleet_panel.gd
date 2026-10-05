@@ -100,11 +100,19 @@ func refresh() -> void:
 func _refresh_list() -> void:
 	var fleets := _controller.player_fleets()
 
-	# Rebuild only when the roster actually changed; otherwise selecting a row would
-	# clear the selection on every refresh.
+	# Rebuild only when something the caption shows has actually changed; otherwise
+	# selecting a row would clear the selection on every refresh.
+	#
+	# The key has to cover each fleet's *where* and its order destination, not just the
+	# roster. Keying on ids alone -- which is what this did -- meant that ordering a fleet
+	# somewhere left every caption stale, so the registry showed the location a fleet had
+	# left rather than the one it is bound for.
 	var ids := PackedInt32Array()
 	for f in fleets:
 		ids.append(f.id)
+		ids.append(f.system)
+		ids.append(f.destination)
+		ids.append(f.ship_count())
 	if ids != _list.get_meta("ids", PackedInt32Array()):
 		_list.set_meta("ids", ids)
 		_rebuilding = true
@@ -139,21 +147,16 @@ func _selected_row() -> int:
 
 
 ## Where a fleet is, as a short name. Fleets sit on planets now, so a fleet's location is
-## a world; `FowStage.survey_system` naming guarantees the label is either a real name or a
-## catalogue designation, never blank.
+## a world. The name comes from the controller so this panel cannot disagree with the map,
+## the inspector and the log about which worlds the player is entitled to read.
 func _caption(f: FleetState) -> String:
 	var here := _controller.galaxy.planet(f.system)
-	var where := _planet_name(here) if here != null else "IN TRANSIT"
+	var where := _controller.display_name(f.system) if here != null else "IN TRANSIT"
 	if f.destination >= 0:
 		var dest := _controller.galaxy.planet(f.destination)
 		if dest != null:
-			where = "-> %s" % _planet_name(dest)
+			where = "-> %s" % _controller.display_name(f.destination)
 	return "%s  %-12s %d ships" % [f.name if f.name != "" else "F%03d" % f.id, where, f.ship_count()]
-
-
-## A planet's display name, falling back to its catalogue designation.
-func _planet_name(p: PlanetState) -> String:
-	return p.name if p.name != "" else "P-%03d" % (p.index + 1)
 
 
 func _refresh_detail() -> void:
@@ -181,7 +184,8 @@ func _refresh_detail() -> void:
 
 	if f.destination >= 0:
 		var dest := _controller.galaxy.planet(f.destination)
-		lines.append(Format.field("IN TRANSIT TO", _planet_name(dest) if dest != null else "?"))
+		lines.append(Format.field("IN TRANSIT TO",
+			_controller.display_name(f.destination) if dest != null else "?"))
 		lines.append("[color=#%s]  ordered - awaiting resolution[/color]" % CC2Theme.CYAN.to_html(false))
 	else:
 		_order_hint.text = "STAGE MOVE armed. Click a planet on the map to queue the order."
@@ -211,6 +215,22 @@ func _on_order_toggled(on: bool) -> void:
 
 func list() -> ItemList:
 	return _list
+
+
+## Every string this panel is currently showing, in one place.
+##
+## A panel that hides a world behind a placeholder in its caption but prints the real name
+## in its detail readout leaks exactly as much as one that never hid it, and the two are
+## refreshed by different code. Tests need to ask the panel what it displays rather than
+## recompute the rule they are trying to check.
+func visible_text() -> String:
+	var parts := PackedStringArray()
+	if _list != null:
+		for i in _list.item_count:
+			parts.append(_list.get_item_text(i))
+	if _detail != null:
+		parts.append(_detail.text)
+	return "\n".join(parts)
 
 
 func detail() -> RichTextLabel:

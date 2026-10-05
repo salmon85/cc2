@@ -53,7 +53,8 @@ func _initialize() -> void:
 
 	_steps = PackedStringArray([
 		"instantiate", "scene_tree", "panels", "theme", "signals", "selection",
-		"map_draw", "fleet_orders", "illegal_orders", "macro_tax", "macro_research",
+		"map_draw", "hit_testing", "view_culling", "fleet_orders", "illegal_orders",
+		"macro_tax", "macro_research",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
@@ -89,6 +90,8 @@ func _process(_delta: float) -> bool:
 		"signals": _step_signals()
 		"selection": _step_selection()
 		"map_draw": _step_map_draw()
+		"hit_testing": _step_hit_testing()
+		"view_culling": _step_view_culling()
 		"fleet_orders": _step_fleet_orders()
 		"illegal_orders": _step_illegal_orders()
 		"macro_tax": _step_macro_tax()
@@ -336,8 +339,13 @@ func _step_panels() -> void:
 	sup.eq(_client.macros.research_sliders().size(), 4, "four research allocation sliders")
 	sup.ok(_client.macros.build_selector() != null, "macro panel exposes the build selector")
 	sup.ok(_client.macros.colony_selector() != null, "macro panel exposes the colony selector")
-	sup.ok(_client.inspector.system_label() != null, "inspector exposes the system readout")
 	sup.ok(_client.inspector.planet_label() != null, "inspector exposes the planet readout")
+	# The system survey panel was removed. Asserted as an absence because an accessor that
+	# quietly returned null would satisfy "the readout is non-empty" for the wrong reason.
+	sup.ok(not _client.inspector.has_method("system_label"),
+		"the inspector has no system survey readout -- it was removed")
+	sup.ok(not _has_system_survey_heading(),
+		"and no SYSTEM SURVEY heading is left in the panel")
 	# The BODIES list is gone too: with one system and every world on the map, a body is
 	# selected by clicking it, not by picking a row.
 	sup.ok(not _client.inspector.has_method("body_list"),
@@ -413,11 +421,6 @@ func _step_selection() -> void:
 	var picked: int = _client.map.click_at_galaxy(target.position)
 	sup.eq(picked, target.index, "map hit-testing finds the clicked star")
 	sup.eq(_client.controller.selected_system, target.index, "controller selection follows the click")
-	sup.ok(_client.inspector.system_label().text.length() > 0, "inspector renders the system")
-	sup.ok(_client.inspector.system_label().text.contains(target.name)
-		or not target.name.is_empty(),
-		"inspector shows the system name")
-
 	# Selecting a system auto-selects its first body, so the inspector is never blank.
 	if target.planet_indices.size() > 0:
 		sup.eq(_client.controller.selected_planet, target.planet_indices[0],
@@ -449,8 +452,18 @@ func _step_selection() -> void:
 	sup.eq(_client.controller.selected_system, lit.index,
 		"and the owning system follows the planet")
 	_client.inspector.refresh()
-	sup.ok(_client.inspector.planet_label().text.contains("HABITABILITY"),
+	var detail := _client.inspector.planet_label().text
+	sup.ok(detail.contains("POPULATION"),
 		"the inspector renders planet detail for the clicked body")
+	# Habitability was removed from the panel. It survived the fog on both sides of the
+	# survey rule, which is precisely why it needed removing rather than gating.
+	sup.ok(not detail.contains("HABITABILITY"),
+		"the inspector shows no habitability readout")
+	# Guard the guard: an empty readout would satisfy the check above. The surviving
+	# rows must still be there, and the shipyard percentage must still render -- so the
+	# absence of habitability is a removed row rather than a blanked panel.
+	sup.ok(detail.contains("POPULATION") and detail.contains("FARMS"),
+		"and the rest of the readout is intact rather than blanked")
 
 
 func _step_map_draw() -> void:
@@ -1243,11 +1256,11 @@ func _step_fog_colony_markers() -> void:
 	c.select_system(foreign_sys)
 	c.select_planet(foreign_planet)
 	inspector.refresh()
-	var sys_text := inspector.system_label().text
-	sup.ok(not sys_text.contains("FACTION %d" % rival),
-		"the system readout does not name the rival empire")
-	sup.ok(not sys_text.contains("YOUR TERRITORY"),
-		"the system readout does not claim rival space")
+	# The system readout that used to be checked here is gone -- it was the panel row that
+	# printed OWNER, and removing the panel is what removed the leak. What is left to check
+	# is that nothing else has picked the responsibility up.
+	sup.ok(not _has_system_survey_heading(),
+		"no panel reintroduces the rival-empire roster the survey panel used to print")
 
 	# The planet readout itself must read like an uncolonised world. The BODIES list that
 	# used to carry a per-row "x"/"*" marking is gone -- bodies are clicked on the map now
@@ -1333,15 +1346,249 @@ func _step_fog_colony_markers() -> void:
 ## stops consulting it.
 func _inspector_gates_everything() -> bool:
 	var src := FileAccess.get_file_as_string("res://src/client/inspector_panel.gd")
-	var owner_gated := src.contains("_controller.knows_owner_of(sys.index)")
+	# The owner gate moved into the controller with the rest of the fog rules, so what is
+	# asserted here is that the inspector still *asks* -- via the controller -- rather than
+	# deciding ownership itself.
+	# Ownership used to be gated in this file at all. It no longer is: the survey panel
+	# that printed OWNER is gone, and the one colony marker left is gated on
+	# `p.owner == _controller.player_id`, so a rival's ring cannot appear. What has to hold
+	# now is that the *controller* still owns the rule -- a panel that decided ownership for
+	# itself is the version of this bug that would survive.
+	var owner_gated := FileAccess.get_file_as_string(
+		"res://src/client/session_controller.gd"
+	).contains("func knows_owner_of")
 	# The detail gate used to be `_controller.knows_owner_of(system_of_planet(...))`,
 	# which is now an over-reveal: one system means every world shares an owner. It must
 	# be a check for a fleet parked on *this* world.
 	var detail_gated := src.contains("f.destination < 0 and f.system == p.index")
+	# The name must come from the one function the map and the log also use.
+	var name_gated := src.contains("_controller.display_name(p.index)")
+	# The system survey that used to print the rival-empire roster must not be back.
+	var no_survey := not src.contains("_system_label")
 	# No bare foreign-colony marker may come back.
 	var no_foreign_x := not src.contains("elif p.colonized:")
-	var no_foreign_owner := not src.contains("if sys.owner >= 0:")
-	return owner_gated and detail_gated and no_foreign_x and no_foreign_owner
+	return owner_gated and detail_gated and name_gated and no_survey and no_foreign_x
+
+
+## Whether the SYSTEM SURVEY heading is gone from the panel source.
+##
+## Read from the source rather than from a node lookup because the heading is a bare `Label`
+## with no name, and walking the tree for one would be a test written against the layout
+## rather than against the thing that was removed.
+func _has_system_survey_heading() -> bool:
+	var src := FileAccess.get_file_as_string("res://src/client/inspector_panel.gd")
+	return src.contains("SYSTEM SURVEY") and src.contains("_system_label")
+
+
+## Hit-testing has to survive an arbitrary camera, not just the framing the map opens with.
+##
+## The reported defect was a click landing on the wrong body, and the cause was a transform
+## re-derived by hand on each side and never checked against the other. Both directions are
+## walked here over a spread of zooms and pans, including the extreme ends of the zoom
+## range, because the hand-rolled inverse is exact at zoom 1 and wrong everywhere else.
+func _step_hit_testing() -> void:
+	sup.begin("click hit-testing across zoom and pan")
+	if _client == null or _client.controller == null:
+		return
+	var map := _client.map
+	var view := map.view()
+	var cam := map.camera()
+	var gal := _client.controller.galaxy
+
+	var saved_zoom := cam.zoom
+	var saved_pos := cam.position
+	var saved_offset := cam.offset
+
+	# A round trip through the real transform must be the identity. If the forward and
+	# inverse disagree anywhere, this is where it shows rather than in a click.
+	var round_trip := Vector2(123.0, -456.0)
+	sup.near(map._to_galaxy(map._to_screen(round_trip)).x, round_trip.x, 0.01,
+		"screen->galaxy->screen round trips in x")
+	sup.near(map._to_galaxy(map._to_screen(round_trip)).y, round_trip.y, 0.01,
+		"screen->galaxy->screen round trips in y")
+
+	# Zooms derived from the map's own span rather than written as absolutes. A literal
+	# like 0.05 is only interesting on one map size: on a `large` map the whole system fits
+	# in a quarter of the screen at that zoom, so the error being hunted -- which scales
+	# with zoom -- is well under a pixel and a wrong transform still passes. The sweep only
+	# has teeth if it goes to zooms where the map is magnified enough to matter.
+	var body := 0.0
+	for p in gal.planets:
+		body = maxf(body, p.position.length())
+	body = maxf(body, 1.0)
+	var natural := map.size.y / (2.0 * body)
+	var zooms: Array[float] = [
+		natural * 8.0, natural * 3.0, natural, 1.0, 2.0,
+		map.max_zoom(), map.min_zoom(),
+	]
+	var pans: Array[Vector2] = [
+		Vector2.ZERO, Vector2(200.0, -140.0), Vector2(-900.0, 620.0),
+	]
+	# `Camera2D.offset` is part of the camera transform and not something this map sets
+	# itself, so it is the one camera property a hand-rolled "unzoom about the centre"
+	# formula cannot see. Without it in the sweep the test cannot tell the two transforms
+	# apart at all: `stretch = true` pins the SubViewport's size to the container's and its
+	# position to zero, which makes `screen = (world - pos) * zoom + size / 2` agree with
+	# the engine's transform to the last bit. So the sweep has to make the camera differ
+	# from a pure scale about the centre in a way only the real transform accounts for.
+	var offsets: Array[Vector2] = [Vector2.ZERO, Vector2(25.0, -40.0)]
+	var checked := 0
+	var mismatched := 0
+	var worst_error := 0.0
+	for z: float in zooms:
+		for pan: Vector2 in pans:
+			for off: Vector2 in offsets:
+				cam.zoom = Vector2(z, z)
+				cam.position = pan
+				cam.offset = off
+				for p in gal.planets:
+					# Ground truth is the renderer, not our own forward/inverse pair: the
+					# planet is drawn wherever the canvas transform puts it, so that point
+					# is the only place a click can land and hit it. Comparing
+					# `_to_galaxy(_to_screen(p))` against `p` only proves the two agree
+					# with each other, which a wrong-but-consistent pair does perfectly --
+					# and `stretch = true` pins the container to the SubViewport exactly, so
+					# that is precisely what the hand-rolled formula produced.
+					var drawn := map.sub_viewport().get_canvas_transform() * p.position
+					var screen := map._to_screen(p.position)
+					checked += 1
+					# The error must be *negligible* against the pick radius, not merely
+					# small enough that the right planet still wins. `pick` searches a
+					# fixed 18-parsec radius, so a transform wrong by five parsecs selects
+					# the intended planet and fails the moment the player clicks on the
+					# planet's edge -- which is exactly the reported bug, and exactly what
+					# a "does it pick the right one" assertion waves through. Measured in
+					# SubViewport pixels, which is also the unit `pick`'s radius is spent
+					# in once the screen offset is scaled by the zoom.
+					worst_error = maxf(worst_error,
+						drawn.distance_to(map._to_subviewport(screen)))
+					# And the actual click path, not just the transform.
+					if map.click_at_galaxy(p.position) != p.index:
+						mismatched += 1
+	sup.eq(mismatched, 0,
+		"every planet is clickable at its own screen position, at every zoom and pan")
+	sup.ok(checked > 0, "the sweep actually sampled planets", "%d samples" % checked)
+	# A few pixels is sub-pixel rounding at this scale; more than that is a transform that
+	# disagrees with the renderer about where the planet is.
+	sup.ok(worst_error < 4.0,
+		"a click point lands on the pixel the renderer drew the planet at",
+		"worst=%.4f px off" % worst_error)
+
+	# A click that is genuinely somewhere else must still miss. Without this the check
+	# above would also pass if the transform mapped every point onto one lucky planet.
+	cam.zoom = Vector2.ONE
+	cam.position = Vector2.ZERO
+	sup.eq(map.click_at_galaxy(Vector2(999999.0, -999999.0)), -1,
+		"a click on empty space selects nothing")
+
+	cam.zoom = saved_zoom
+	cam.position = saved_pos
+	cam.offset = saved_offset
+	map.recentre()
+
+
+## Panning and zooming must not be able to lose the map.
+##
+## The map is a `Control` whose `_draw` covers a rect far larger than its own, which is
+## exactly the shape the renderer is entitled to cull: it decides what to draw from the
+## control's rect, so a camera panned past that rect skipped the layer entirely and the
+## player got an empty panel. Both halves of the fix are asserted here -- a custom draw
+## rect covering the world, and camera limits that keep the view over it.
+func _step_view_culling() -> void:
+	sup.begin("map survives pan and zoom")
+	if _client == null or _client.controller == null:
+		return
+	var map := _client.map
+	var view := map.view()
+	var cam := map.camera()
+	var gal := _client.controller.galaxy
+
+	# The camera may not leave the map. The engine's own `limit_*` is a *centre*
+	# constraint -- it holds the middle of the screen over the map while still letting the
+	# edges hang off it -- so the bound that has to hold is `camera_bounds()`, which insets
+	# the field by the viewport's half-extent. Both are checked: the limits because they
+	# are what the camera applies to itself, the bounds because they are what the input
+	# handlers clamp to.
+	sup.ok(map.camera_limits_cover_map(), "camera limits enclose the drawn field",
+		"limits=[%d,%d,%d,%d]" % [
+			cam.limit_left, cam.limit_top, cam.limit_right, cam.limit_bottom])
+	# With margin, not merely flush: a limit tight to the outermost planet still lets the
+	# centre of the screen drift off the map at the corner of the window.
+	var half := map._view.world_size(gal)
+	var furthest := 0.0
+	for p in gal.planets:
+		furthest = maxf(furthest, maxf(absf(p.position.x), absf(p.position.y)))
+	sup.ok(float(cam.limit_right) > furthest,
+		"the limits clear the outermost planet",
+		"limit=%.1f furthest=%.1f" % [cam.limit_right, furthest])
+	sup.ok(float(cam.limit_right) > half,
+		"and clear the drawn field itself",
+		"limit=%.1f field=%.1f" % [cam.limit_right, half])
+
+	# The draw layer must tell the renderer where it actually draws, or the cull follows
+	# the widget's rect instead of the world's.
+	view.queue_redraw()
+	await process_frame
+	# Read back through the debug getter: there is no `canvas_item_get_custom_rect`, so a
+	# test that used one would be asserting against an API this engine does not have.
+	var custom := RenderingServer.debug_canvas_item_get_rect(view.get_canvas_item())
+	sup.ok(custom.size.x > 0.0 and custom.size.y > 0.0,
+		"the draw layer declares a custom rect", "%s" % str(custom))
+	sup.ok(custom.has_point(Vector2.ZERO),
+		"which contains the star")
+	sup.ok(custom.has_point(view.world_rect(gal).end * 1.05),
+		"and the whole drawn field with margin")
+
+	# A move to any point is followed by the bound being re-established, and the whole
+	# viewport has to end up over the map -- not merely the centre, which is all the
+	# engine's own limits guarantee.
+	var saved := cam.position
+	var bound := map.camera_bounds()
+	var runaway := false
+	for probe: Vector2 in [
+		Vector2(1e9, 0.0), Vector2(-1e9, 0.0), Vector2(0.0, 1e9), Vector2(0.0, -1e9),
+		Vector2(1e9, 1e9), Vector2(-1e9, -1e9)
+	]:
+		cam.position = probe
+		map.clamp_camera()
+		if cam.position.x < bound.position.x or cam.position.x > bound.end.x \
+				or cam.position.y < bound.position.y or cam.position.y > bound.end.y:
+			runaway = true
+	sup.ok(not runaway, "a camera driven off the map is brought back onto it",
+		"pos=%s bounds=%s" % [str(cam.position), str(bound)])
+	sup.ok(cam.position.distance_to(Vector2.ZERO) < 1e8,
+		"and it does not stay where it was thrown")
+	cam.position = saved
+
+	# The bound is the field minus the visible half-extent, so the whole *screen* is over
+	# the map rather than just its middle -- which is the property the engine's own limits
+	# do not give. Recomputed from the bound rather than from where the camera happens to
+	# be, since the probe above deliberately left it at an extreme.
+	# The property that matters is not that the *viewport* is inside the map -- a viewport
+	# wider than the map is normal, and the bounds frame is there to show the difference --
+	# but that no reachable camera position can push a planet off the screen. That is the
+	# "map disappears" report stated as something checkable.
+	var b := map.camera_bounds()
+	var off_screen := 0
+	var checked := 0
+	for corner: Vector2 in [
+		b.position, b.end, Vector2(b.position.x, b.end.y), Vector2(b.end.x, b.position.y)
+	]:
+		checked += 1
+		var vh := Vector2(map.sub_viewport().size) * 0.5 / cam.zoom.x
+		var rect := Rect2(corner - vh, vh * 2.0)
+		for pl in gal.planets:
+			if not rect.has_point(pl.position):
+				off_screen += 1
+	sup.eq(off_screen, 0,
+		"no reachable camera position puts a planet off screen")
+	sup.ok(checked == 4, "every corner of the camera's range was checked")
+
+	# And the field is black behind it, so panning past the edge cannot show the project
+	# clear colour.
+	var clear := map.sub_viewport()
+	sup.eq(clear.render_target_clear_mode, SubViewport.CLEAR_MODE_ALWAYS,
+		"the sub-viewport clears every frame, so the map cannot be blanked by a stale target")
 
 
 ## The map drew a diamond for *every* fleet of *every* empire while correctly hiding the
@@ -1423,6 +1670,11 @@ func _step_fog_planet_names() -> void:
 			"the inspector does not print its name")
 		sup.ok(hidden.contains(GalaxyMapView.UNKNOWN_NAME),
 			"and headings it with the placeholder instead")
+		if _client.fleets != null:
+			sup.ok(not _client.fleets.visible_text().contains("Zzzqx Probe"),
+				"the fleet registry does not print it either")
+		sup.ok(_client.log_text().find("SELECTED Zzzqx Probe") < 0,
+			"nor does the selection log")
 
 		# A fleet merely sailing there must not unlock it.
 		if not parked.is_empty():
@@ -1442,7 +1694,7 @@ func _step_fog_planet_names() -> void:
 		else:
 			sup.ok(true, "the player has no fleet to park; name reveal not exercised")
 
-		# Own world: the player always knows what they settled.
+		# Own world: the player always knows what they settled, and it is labelled.
 		var own: PlanetState = null
 		for p in gal.planets:
 			if p.owner == me:
@@ -1451,8 +1703,20 @@ func _step_fog_planet_names() -> void:
 		if own != null:
 			sup.ok(c.knows_name_of(own.index),
 				"a world the player owns always has a usable name")
-			sup.ne(view.planet_label(own), "P-%d" % (own.index + 1) if own.name == "" else own.name,
-				"and the map shows it")
+			sup.ok(view.label_worth_drawing(own),
+				"and the map draws a label beside it")
+
+		# The label itself is the second half of the rule, and it is a different question
+		# from `planet_label`. A world the player is not entitled to name is drawn as an
+		# unnamed marker -- not as "Unknown Planet", which on a board of a hundred bodies is
+		# a hundred identical strings covering the map. Selecting it must not be an escape
+		# hatch either, or the name is one click away from everybody.
+		sup.ok(not view.label_worth_drawing(foreign),
+			"a world the player may not name is drawn with no label at all")
+		foreign.owner = me
+		sup.ok(view.label_worth_drawing(foreign),
+			"and gains one the moment the player owns it")
+		foreign.owner = rival
 
 		foreign.owner = saved_owner
 		foreign.name = saved_name
@@ -1479,11 +1743,59 @@ func _step_fog_planet_names() -> void:
 		"the map labels it with the placeholder, not its real name")
 	sup.ok(foreign.name != GalaxyMapView.UNKNOWN_NAME,
 		"which is not simply its real name")
+	# No marker on the board at all for a world that is neither owned nor orbited. The
+	# placeholder is what the panel says about it; the map says nothing.
+	sup.ok(not view.label_worth_drawing(foreign),
+		"and draws no label beside the marker")
 
 	c.select_planet(foreign.index)
 	inspector.refresh()
 	sup.ok(not inspector.planet_label().text.contains(foreign.name),
 		"the inspector does not print its name either")
+	# The fleet registry is the other panel that names worlds, and it was the one still
+	# reaching for `p.name` directly. A reader that prints the real name is a leak whether
+	# or not the player is looking at the map: "IN TRANSIT TO" would otherwise name the
+	# destination of every order in the game. A fleet has to actually be bound for the
+	# world -- with none, no caption mentions it and the check would pass vacuously.
+	var registry := _client.fleets
+	sup.ok(registry != null, "the fleet registry panel exists")
+	var carrier: FleetState = null
+	for f_key: int in gal.fleets:
+		var f5: FleetState = gal.fleets[f_key]
+		if f5.owner == me and f5.active:
+			carrier = f5
+			break
+	if registry != null and carrier != null:
+		carrier.destination = foreign.index
+		# The caption and the detail readout are refreshed by different code, so the fleet
+		# has to be selected as well as bound: "IN TRANSIT TO" is only drawn for the
+		# selected fleet, and leaving it unselected would test the caption twice.
+		c.select_fleet(carrier.id)
+		registry.refresh()
+		var shown := registry.visible_text()
+		sup.ok(shown.contains(GalaxyMapView.UNKNOWN_NAME),
+			"an order bound for an unnamed world reads as the placeholder",
+			"shown=%s" % shown.replace("\n", " | "))
+		sup.ok(shown.contains("IN TRANSIT TO"),
+			"and the detail readout is actually being drawn", "shown=%s" % shown.replace("\n", " | "))
+		sup.ok(not shown.contains(foreign.name),
+			"the fleet registry does not print its real name either")
+		# Leave the world as the later steps found it.
+		carrier.destination = -1
+	else:
+		sup.ok(true, "no player fleet to bind an order to; registry leak not exercised")
+
+	# The log is written by the map's click handler, not by the controller, so the log has
+	# to be driven through a click -- calling `select_planet` directly would leave the log
+	# untouched and the assertion would pass for the wrong reason. Order mode is armed
+	# first so the click stages a move rather than being swallowed as an edit.
+	_client.map.set_order_mode(false)
+	_client.map.click_at_galaxy(foreign.position)
+	sup.ok(_client.log_text().find("SELECTED %s" % foreign.name) < 0,
+		"and neither does the selection log")
+	sup.ok(_client.log_text().find("SELECTED %s" % GalaxyMapView.UNKNOWN_NAME) >= 0,
+		"the log records the selection as unknown instead",
+		"tail=%s" % _client.log_text().strip_edges().split("\n")[-1])
 
 	# Restore: every one of these worlds is shared with later steps.
 	for f_key: int in displaced:
