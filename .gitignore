@@ -2,3 +2,5 @@
 # which tools/verify.sh runs before every test invocation.
 .godot/
 *.import
+.claude/
+*.uid
