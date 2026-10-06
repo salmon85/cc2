@@ -64,7 +64,7 @@ func _initialize() -> void:
 		"map_visuals", "economy_rows", "background_music",
 		"worker_scrap_ui", "live_capacity", "food_net_sync", "metal_rate_sync",
 		"undiscovered_labels",
-		"transit_resolution", "transit_persistence",
+		"transit_resolution", "transit_persistence", "manifest_arrives",
 		"flight_path_toggle", "space_port_gating",
 		"travel_prompt_paths", "camera_snap_uncolonized",
 		"orbit_labels", "cargo_slider",
@@ -130,6 +130,7 @@ func _process(_delta: float) -> bool:
 		"undiscovered_labels": _step_undiscovered_world_labels()
 		"transit_resolution": _step_transit_resolves_and_docks()
 		"transit_persistence": _step_transit_persists_and_draws()
+		"manifest_arrives": _step_manifest_travel_arrives()
 		"flight_path_toggle": _step_flight_path_toggle()
 		"space_port_gating": _step_space_port_gates_the_ship_list()
 		"travel_prompt_paths": _step_travel_prompt_and_paths()
@@ -3546,6 +3547,109 @@ func _step_travel_flow() -> void:
 	_client._abandon_travel()
 
 
+## The player's actual travel flow, carried through to arrival.
+##
+## This is the path the manifest modal takes -- a `TRAVEL` order with a hull manifest -- and
+## it is a different code path from `queue_move`, which is a plain `MOVE_FLEET`. The travel
+## path used to build the departing fleet without copying the source's `system`, which
+## defaults to -1 and is the one value `issue_move` refuses. The dispatch was therefore
+## rejected and the emptied source fleet deleted, leaving the selected ships in a fleet
+## registered at nowhere: not in orbit, not in transit, drawn nowhere, and never arriving. The
+## turn still resolved and the log still announced the journey, which is what made it look
+## like a rendering fault rather than a lost order.
+##
+## So this drives the manifest the way a player does and then runs the turns out. The
+## regression is caught at the cheapest possible assertion -- the departing fleet knows which
+## world it left from -- long before the arrival check at the end.
+func _step_manifest_travel_arrives() -> void:
+	sup.begin("a manifest travel order puts ships under way and delivers them")
+	if _client == null or _client.controller == null or _client.manifest == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+
+	# Two hulls of one kind and one of another, so a manifest can be a strict subset and the
+	# remainder is observable.
+	var source := FleetState.new()
+	source.bind_hulls(_defs.get("ship_hulls") as Dictionary)
+	source.owner = c.player_id
+	source.system = colony.index
+	source.name = "Manifest Probe"
+	source.add_ships(&"corvette", 2)
+	source.add_ships(&"frigate", 1)
+	c.galaxy.add_fleet(source)
+	c.select_planet(colony.index)
+
+	var dest := -1
+	var nearest := INF
+	for p in c.galaxy.planets:
+		if p.index == colony.index:
+			continue
+		var gap := MovementStage.orbit_distance(colony, p)
+		if gap > 0.0 and gap < nearest:
+			nearest = gap
+			dest = p.index
+	sup.ok(dest >= 0, "a world to travel to")
+	if dest < 0:
+		return
+
+	# The manifest modal's own commit, rather than the controller called directly, so the
+	# order that is staged is the one a player would have produced.
+	c.queue.clear()
+	_client.manifest.set_all(false)
+	_client.manifest.adjust(&"corvette", 1, {&"corvette": 2, &"frigate": 1})
+	_client._on_manifest_confirmed(colony.index, dest, {&"corvette": 1})
+	var staged: Array[Order] = c.orders_to_submit() as Array[Order]
+	sup.eq(staged.size(), 1, "the manifest stages one travel order")
+	if staged.is_empty():
+		return
+	sup.eq(staged[0].type, int(Enums.OrderType.TRAVEL),
+		"and it is the TRAVEL kind, not a whole-fleet move")
+
+	# Resolve the turn. This is where the split happens.
+	c.end_turn()
+
+	var travelling: Array[FleetState] = []
+	for f in c.galaxy.fleets_of(c.player_id):
+		if f.destination >= 0:
+			travelling.append(f)
+	sup.eq(travelling.size(), 1, "exactly one fleet on the board is under way")
+	if travelling.is_empty():
+		return
+	var going := travelling[0]
+	sup.ok(going.system >= 0, "and the departing fleet knows the world it left from",
+		"system=%d" % going.system)
+	sup.eq(going.system, colony.index, "which is the source world")
+	sup.eq(going.destination, dest, "and it is bound for the destination")
+	sup.eq(int(going.ships.get(&"corvette", 0)), 1,
+		"carrying exactly the corvette the manifest named")
+	sup.eq(going.ship_count(), 1, "and nothing else")
+	# The ships left behind are still over the colony, in a fleet that still exists.
+	sup.ok(c.fleets_in_orbit_at(colony.index).has(source),
+		"the source world still holds the ships that were not sent")
+
+	# The overlay has something to draw, which is the "flight paths shows nothing" half of
+	# the report: not a painting fault, an empty input.
+	_client.set_flight_paths(true)
+	sup.ok(c.flight_paths_shown(), "the flight-path overlay can be turned on")
+	sup.ok(_client.map.flight_paths_enabled(), "and the map that draws it agrees")
+
+	var quoted := MovementStage.transit_turns(c.galaxy, colony.index, dest)
+	for _turn in maxi(1, quoted + 2):
+		if going.destination < 0:
+			break
+		c.end_turn()
+	sup.eq(going.destination, -1, "the fleet arrives rather than crossing for ever")
+	sup.eq(going.system, dest, "docking at the destination")
+	sup.ok(c.fleets_in_orbit_at(dest).has(going),
+		"and the destination's orbit holds it")
+	_client.set_flight_paths(false)
+	c.queue.clear()
+
+
 ## Load / Unload: the button's visibility, and what the dialog will and will not move.
 func _step_cargo_modal() -> void:
 	sup.begin("load / unload")
@@ -4438,8 +4542,14 @@ func _step_food_net_matches_the_turn() -> void:
 	# What the panel shows, and what the turn will do, side by side.
 	var shown := _row_for(_client.inspector.planet_label().text, "FOOD")
 	var shown_net := _signed_in(shown)
-	# One worked farm (5) + the kit's own 5 - two civilians.
-	var resolver_net := per_farm + 5.0 - 2.0
+	# Read from the resolver's own projection rather than re-deriving the net here.
+	#
+	# The hand-rolled version (`worked_farms + 5 - 2`) was the resolver's arithmetic from
+	# before `food_bonus` existed, so it agreed only while the empire had researched nothing
+	# that touches food. It then failed as a *fixture* problem -- an earlier step that
+	# advances a few turns can complete hydroponics -- rather than as a statement about the
+	# panel, which is exactly the failure mode a test that restates the arithmetic invites.
+	var resolver_net := ColonySim.get_projected_food_delta(colony, buildings, c.player(), c.db)
 	sup.ok(shown_net > 0.0, "the panel reports a surplus",
 		"reads '%s'" % shown)
 	sup.ok(absf(shown_net - resolver_net) <= 0.001,
@@ -4450,8 +4560,7 @@ func _step_food_net_matches_the_turn() -> void:
 	# which is the assertion the original bug failed.
 	for _i in 5:
 		var bank := colony.food_stock
-		var people := colony.population
-		var net_now := ColonySim._food_output(colony, buildings) - people
+		var net_now := ColonySim.get_projected_food_delta(colony, buildings, c.player(), c.db)
 		c.end_turn()
 		sup.ok(absf(colony.food_stock - (bank + net_now)) <= 1.01,
 			"a turn in surplus moved the bank by exactly the promised net",
@@ -4469,8 +4578,11 @@ func _step_food_net_matches_the_turn() -> void:
 	shown = _row_for(_client.inspector.planet_label().text, "FOOD")
 	sup.ok(_signed_in(shown) < 0.0, "and a colony with nobody on its farms shows a deficit",
 		"reads '%s'" % shown)
-	sup.near(_signed_in(shown), 5.0 - 30.0, 0.001,
-		"of exactly the kit's output less thirty mouths")
+	# The kit's own output less thirty mouths, again through the resolver rather than as a
+	# literal, so an empire with `food_bonus` does not make this a test of the balance table.
+	sup.near(_signed_in(shown),
+		ColonySim.get_projected_food_delta(colony, buildings, c.player(), c.db), 0.001,
+		"and that deficit is the figure the turn resolver will use")
 
 
 ## Undiscovered worlds carry no name on the map and no real name anywhere.

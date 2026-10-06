@@ -35,6 +35,7 @@ func _initialize() -> void:
 	_test_map_size_travel()
 	_test_combat()
 	_test_no_transit_combat()
+	_test_travel_split_keeps_ships()
 	_test_defense_suppression()
 	_test_invasion()
 	_test_colony_sim()
@@ -2224,6 +2225,106 @@ static func galaxy_survey_logged(g: GalaxyState, faction_id: int, planet_index: 
 ## of every other one -- so "these two fleets' paths cross" is a statement that is true of
 ## almost every pair of fleets on the board, and a stage that fought on proximity rather than
 ## on position would turn the entire map into one battle by turn three.
+## A partial travel manifest must split the fleet, and the split must actually be under way.
+##
+## The defect: `_apply_travel` built the travelling fleet by copying the source's owner, name
+## and ships -- but not its `system`, which defaults to -1, the "in transit, position unknown"
+## value that `issue_move` refuses. So the dispatch was rejected, the emptied source fleet was
+## then deleted, and every ship the player had selected was left in a fleet registered at
+## nowhere. From the outside that is precisely the reported symptom: the order resolves and
+## the log announces the fleet travelled, the map draws neither a fleet nor a line, and the
+## ships never arrive.
+##
+## Asserted in the order that catches it cheapest: the split fleet has a position, is under
+## way, keeps moving, and finally docks -- with the unselected remainder left behind.
+func _test_travel_split_keeps_ships() -> void:
+	sup.begin("a partial travel manifest splits the fleet under way")
+	var g := _galaxy(8701)
+	var home := g.planets[g.planets.size() - 1]
+	# Pick a destination and park the fleet on a different world so the leg is real.
+	var source := g.planets[0]
+	var target := g.planets[1]
+	sup.ok(source.index != target.index, "two distinct worlds to travel between")
+	var hulls: Dictionary = _defs.get("ship_hulls") as Dictionary
+	var f := FleetState.new()
+	f.bind_hulls(hulls)
+	f.owner = 0
+	f.system = source.index
+	f.name = "Split Probe"
+	f.add_ships(&"corvette", 2)
+	f.add_ships(&"frigate", 2)
+	g.add_fleet(f)
+	var source_id := f.id
+
+	var quoted := MovementStage.transit_turns(g, source.index, target.index)
+	sup.ok(quoted >= 1, "the crossing takes at least one turn")
+
+	# The manifest the modal builds when the player picks some of the ships.
+	TurnResolver.resolve_turn(g, [
+		Order.make_travel(0, f.id, target.index, {&"corvette": 1})
+	], _defs, _db, _rng(1), 0)
+
+	# The remainder stayed, and it is not the fleet that left.
+	var left: FleetState = g.fleet(source_id)
+	sup.ok(left != null, "the source fleet still exists")
+	if left != null:
+		sup.eq(int(left.ships.get(&"frigate", 0)), 2, "keeping the frigates that were not named")
+		sup.eq(int(left.ships.get(&"corvette", 0)), 1, "and one corvette")
+		sup.eq(left.system, source.index, "and it is still over the world it started at")
+
+	# The travelling fleet exists, is positioned, and is under way.
+	var travellers: Array[FleetState] = []
+	for id: int in g.fleets.keys():
+		var fl: FleetState = g.fleets[id] as FleetState
+		if fl != null and fl.id != source_id:
+			travellers.append(fl)
+	sup.eq(travellers.size(), 1, "exactly one new fleet was created for the manifest")
+	if travellers.is_empty():
+		return
+	var going: FleetState = travellers[0]
+	# The regression, stated directly: this is the field whose absence orphaned the ships.
+	sup.ok(going.system >= 0,
+		"the travelling fleet knows which world it left from",
+		"system=%d" % going.system)
+	sup.eq(going.system, source.index, "which is the source world")
+	sup.eq(going.destination, target.index, "and it is bound for the destination")
+	sup.eq(int(going.ships.get(&"corvette", 0)), 1, "carrying the corvette that was named")
+	sup.eq(going.ship_count(), 1, "and nothing else")
+
+	# It is discoverable as being in transit, which is what the map and the overlay read.
+	var in_transit := 0
+	for id: int in g.fleets.keys():
+		var fl: FleetState = g.fleets[id] as FleetState
+		if fl != null and fl.destination >= 0:
+			in_transit += 1
+	sup.eq(in_transit, 1, "and exactly one fleet on the board is under way")
+
+	# It moves, and it arrives. Nothing here needed the map or the client.
+	#
+	# The delta is checked *after* each turn and only while the fleet is still under way: the
+	# turn in which it lands clears `travelled`, so comparing on the following turn would
+	# measure the reset rather than the pace.
+	var moved := true
+	for _turn in quoted + 2:
+		if going.destination < 0:
+			break
+		var before := going.travelled
+		TurnResolver.resolve_turn(g, [], _defs, _db, _rng(2 + _turn), 0)
+		if going.destination < 0:
+			break
+		if absf(going.travelled - before - MovementStage.DOTS_PER_TURN) > 0.001:
+			moved = false
+	sup.ok(moved, "each turn covers exactly one dot of the leg")
+	sup.eq(going.destination, -1, "and it arrives rather than crossing for ever")
+	sup.eq(going.system, target.index, "docking at the destination")
+	sup.eq(int(going.ships.get(&"corvette", 0)), 1, "with the corvette still aboard")
+	sup.ok(MovementStage.fleets_in_system(g, target.index, 0).has(going),
+		"and the destination's orbit holds it")
+	# And the world it left still holds the ships that never went.
+	sup.ok(MovementStage.fleets_in_system(g, source.index, 0).has(left),
+		"while the remainder is still orbiting the source")
+
+
 func _test_no_transit_combat() -> void:
 	sup.begin("no combat during transit")
 

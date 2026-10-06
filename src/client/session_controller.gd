@@ -952,9 +952,25 @@ func queue_travel(target_planet: int, ships: Dictionary = {}, fleet_id: int = -1
 
 	var order := Order.make_travel(player_id, f.id, target_planet, ships)
 	if queue.submit(order):
-		# Mirror onto the live galaxy so the map draws the transit line immediately rather
-		# than only after the turn resolves.
-		MovementStage.issue_move(galaxy, f.id, player_id, target_planet)
+		# Mirrored, but only when the mirror is safe.
+		#
+		# Every other order here carries an *absolute* target -- a worker count, a metal
+		# figure paid -- precisely because the client applies it locally and the authority
+		# applies it again. A travel manifest is a delta, and deltas do not survive being
+		# applied twice: mirroring the split leaves the corvette in a new fleet, the
+		# authority's copy then finds a corvette still sitting in the source and splits
+		# *again*, and the player's one ship ends up as two fleets flying the same route.
+		#
+		# The empty manifest is the exception, because it asks for the whole fleet and
+		# `apply_travel` refuses a fleet already under way -- so the authority's copy is a
+		# no-op and the two applications land in the same place. That is the case the map
+		# draws a route for immediately.
+		#
+		# A partial manifest is therefore left to the turn. The staged order already draws
+		# its line and the panel already reads "in transit", so the player loses nothing
+		# visually and the split happens once, authoritatively.
+		if ships.is_empty():
+			TurnResolver.apply_travel(galaxy, order)
 		state_changed.emit()
 		return true
 	action_rejected.emit("the order was refused")

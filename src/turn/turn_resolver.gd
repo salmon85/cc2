@@ -211,20 +211,35 @@ static func _apply_order(
 static func _apply_travel(
 	galaxy: GalaxyState, faction: FactionState, order: Order
 ) -> void:
+	apply_travel(galaxy, order)
+
+
+## Put the ships named by a `TRAVEL` order under way, splitting the fleet if the manifest is
+## partial. Returns whether anything moved.
+##
+## Public, and shared with `SessionController.queue_travel`, because that function mirrors
+## every order onto the client's own copy before the authority resolves it. Mirroring a travel
+## by hand -- what it used to do, marking the whole source fleet with `issue_move` -- is wrong
+## twice over: it ignores the manifest, and it leaves `destination` set on the source fleet so
+## that when the authority's copy of this same order arrives, the guard at the top refuses and
+## the order is silently discarded. Two callers, one implementation, so the mirror cannot drift
+## from what the authority will actually do.
+static func apply_travel(galaxy: GalaxyState, order: Order) -> bool:
+	if galaxy == null or order == null:
+		return false
 	var fleet: FleetState = galaxy.fleet(order.fleet) as FleetState
 	if fleet == null or fleet.owner != order.faction or not fleet.active:
-		return
+		return false
 	if fleet.destination >= 0:
-		return
+		return false
 	var dest: PlanetState = galaxy.planet(order.target_planet)
 	if dest == null or dest.index == fleet.system:
-		return
+		return false
 
 	var manifest: Dictionary = order.payload.get("ships", {}) as Dictionary
 	if manifest.is_empty():
 		# An empty manifest means the whole fleet, which is what a plain move order means.
-		MovementStage.issue_move(galaxy, order.fleet, order.faction, order.target_planet)
-		return
+		return MovementStage.issue_move(galaxy, order.fleet, order.faction, order.target_planet)
 
 	# A partial manifest splits the fleet: the ships named travel, the rest stay. The
 	# remainder becomes a new fleet rather than being silently left behind in the old one,
@@ -232,6 +247,19 @@ static func _apply_travel(
 	var travelling := FleetState.new()
 	travelling.bind_hulls(fleet.hulls())
 	travelling.owner = fleet.owner
+	# The split inherits where the source *is*, not merely what it owns.
+	#
+	# `FleetState.system` defaults to -1, which is the "in transit, position unknown" value,
+	# and `issue_move` refuses a fleet whose `system` is negative. Omitting this line meant
+	# the new fleet was registered with nowhere to be, the dispatch was refused, and the
+	# emptied source fleet was then deleted below -- leaving every ship the player had
+	# selected in a fleet that was in no orbit, under way to nothing, and drawn nowhere.
+	# That is the whole of the reported symptom: the order resolves, the log says the fleet
+	# travelled, the map shows neither a fleet nor a line, and the ships never arrive.
+	travelling.system = fleet.system
+	# Morale carries too, or splitting a fleet would be a free rally: a group that broke
+	# would send half of itself out at full confidence.
+	travelling.morale = fleet.morale
 	travelling.name = fleet.name
 	for key: Variant in manifest:
 		var hull_id := StringName(str(key))
@@ -243,11 +271,21 @@ static func _apply_travel(
 		fleet.remove_ships(hull_id, taken)
 		travelling.ships[hull_id] = taken
 	if travelling.ship_count() <= 0:
-		return
+		return false
 	galaxy.add_fleet(travelling)
-	MovementStage.issue_move(galaxy, travelling.id, order.faction, order.target_planet)
+	if not MovementStage.issue_move(
+			galaxy, travelling.id, order.faction, order.target_planet):
+		# Refused, which means the split fleet is unreachable. Put the ships back rather
+		# than deleting the source: an order that cannot be honoured should leave the fleet
+		# as it was, not scatter it.
+		for key: Variant in travelling.ships.keys():
+			var hull_id := StringName(str(key))
+			fleet.add_ships(hull_id, int(travelling.ships[key]))
+		galaxy.remove_fleet(travelling.id)
+		return false
 	if fleet.ship_count() <= 0:
 		galaxy.remove_fleet(fleet.id)
+	return true
 
 
 ## Convert one civilian into one troop. The Barracks is the only place this can happen, and
