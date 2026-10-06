@@ -1699,24 +1699,90 @@ func _step_planet_and_research_readouts() -> void:
 	# --- the research header's delta ---------------------------------------------
 	# `Science: 130 (+5)` is the requested form: a balance alone is a number the player can
 	# only watch move after the fact, so the per-turn grant travels with it.
+	#
+	# The grant is the empire's *unassigned* civilians at one point each, summed over every
+	# colony it holds. Every colony is put into a known state below, because a rate that is
+	# empire-wide cannot be pinned by arranging one world: the expected figure is read from
+	# `ResearchStage.projected_research` rather than written as a literal, and what is
+	# asserted about the rule is how it *moves*.
 	me.tech_points = PackedFloat64Array([40.0, 30.0, 35.0, 25.0])
-	me.last_research_granted = 5.0
+	for other in c.player_colonies():
+		other.structures = {&"granary": 1}
+		other.population = 3.0
+		other.worker_assignment = {}
+		_colonyRecount(other, c)
+	var colonies_held := c.player_colonies().size()
+	sup.ok(colonies_held > 0, "the empire holds at least one colony")
+	sup.eq(ResearchStage.idle_scientists(c.galaxy, c.player_id), 3 * colonies_held,
+		"three idle colonists on each of %d colonies" % colonies_held)
+
+	# One unassigned colonist is one point, before any empire-wide bonus.
+	#
+	# Measured on a faction with nothing researched rather than on the player's own, because
+	# this fixture's empire may already have completed `robotic_factories` by the time it
+	# runs, and its `research_bonus` scales the rate. Asserting against a bonus-free faction
+	# is what pins the 1:1 base; asserting the player's own header against the shared helper
+	# is what pins that the two never drift apart.
+	var unbonused := FactionState.new()
+	unbonused.id = c.player_id
+	var per_idle := float(_db.get("RESEARCH_POINTS_PER_POP"))
+	sup.eq(per_idle, 1.0, "the roster pays one point per unassigned colonist")
+	sup.eq(ResearchStage.projected_research(unbonused, c.galaxy, c.db),
+		3.0 * colonies_held,
+		"so an unbonused empire's rate is exactly its idle population")
 	_client.top_bar.refresh()
 	var readout := _client.top_bar.research_label().text
 	sup.ok(readout.contains("130"), "the header shows the science total", "reads '%s'" % readout)
-	sup.ok(readout.contains("+5"), "and the per-turn delta", "reads '%s'" % readout)
+	sup.eq(_signed_in(readout),
+		float(int(round(ResearchStage.projected_research(me, c.galaxy, c.db)))),
+		"and the header quotes the same projection the turn will split")
 
-	# A zero grant is still reported as a delta, because "no science this turn" is
-	# information: it is how a player notices their population stopped growing.
-	me.last_research_granted = 0.0
+	# The rate is a dial, not a receipt: posting somebody to a farm takes exactly one point
+	# away, and the header must move on the same press. This is the whole point of the change
+	# -- the flat rate never responded to anything the player did.
+	colony.structures = {&"granary": 1, &"farm": 1}
+	colony.population = 3.0
+	colony.worker_assignment = {}
+	_colonyRecount(colony, c)
+	c.select_planet(colony.index)
+	_client.select_colony(colony.index)
+	_client.macros.refresh()
+	var farm_plus := _client.macros.staffing_more_button(&"farm")
+	sup.ok(farm_plus != null, "the colony can post somebody to a farm")
+	if farm_plus != null:
+		var step := per_idle * (1.0 + me.tech_effect(&"research_bonus"))
+		var before_idle := ResearchStage.idle_scientists(c.galaxy, c.player_id)
+		farm_plus.emit_signal("pressed")
+		sup.eq(ColonySim.idle_workers(colony), 2, "one colonist is now working a field")
+		sup.eq(ResearchStage.idle_scientists(c.galaxy, c.player_id), before_idle - 1,
+			"so the empire has one fewer unassigned colonist")
+		_client.top_bar.refresh()
+		readout = _client.top_bar.research_label().text
+		sup.eq(_signed_in(readout), float(int(round((before_idle - 1) * step))),
+			"and the header drops exactly that much on the same press")
+		var farm_minus := _client.macros.staffing_less_button(&"farm")
+		if farm_minus != null:
+			farm_minus.emit_signal("pressed")
+			_client.top_bar.refresh()
+			readout = _client.top_bar.research_label().text
+			sup.eq(_signed_in(readout), float(int(round(before_idle * step))),
+				"and pressing - gives exactly that much back")
+
+	# An empire with nothing unassigned researches nothing, and the header says so rather
+	# than quoting a stale rate. "No science this turn" is information: it is how a player
+	# notices they have staffed every colonist they have.
+	for other in c.player_colonies():
+		other.population = 0.0
+		other.worker_assignment = {}
+		_colonyRecount(other, c)
+	sup.eq(ResearchStage.idle_scientists(c.galaxy, c.player_id), 0,
+		"every colonist posted leaves nothing to research with")
 	_client.top_bar.refresh()
 	readout = _client.top_bar.research_label().text
-	sup.ok(readout.contains("+0"),
-		"a turn that granted nothing still shows a delta", "reads '%s'" % readout)
+	sup.eq(_signed_in(readout), 0.0,
+		"and the header reads zero rather than a stale figure")
 
-	# And the balance really is the sum across the four fields, since there are no sliders.
-	me.last_research_granted = 7.0
-	_client.top_bar.refresh()
+	# The balance really is the sum across the four fields, since there are no sliders.
 	sup.ok(_client.top_bar.research_label().text.contains("130"),
 		"the total is the sum of the four fields, which the sliders used to divide")
 

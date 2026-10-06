@@ -10,7 +10,7 @@ extends SceneTree
 ##   - colony simulation: food, population, economy, construction
 ##   - research: accumulation gated on surplus, completion gated on prerequisites
 ##   - fog of war: visibility grows, redaction hides what a faction cannot see
-##   - the resolver end-to-end over a 20-turn soak
+##   - the resolver end-to-end over a 45-turn soak
 ##   - economy conservation across the soak
 ##   - determinism: identical seed + identical orders => identical state hash
 
@@ -30,6 +30,7 @@ func _initialize() -> void:
 
 	_test_order_roundtrip()
 	_test_order_queue()
+	_test_research_follows_idle_workers()
 	_test_no_rival_research_news()
 	_test_movement()
 	_test_map_size_travel()
@@ -228,6 +229,118 @@ func _test_order_roundtrip() -> void:
 ## node every turn. In a four-empire game that buried the player's own news under lines about
 ## strangers' science -- and told them nothing actionable, because the node was never named and
 ## the player cannot spend a rival's discovery.
+## Research is paid on the empire's unassigned civilians, not on its population.
+##
+## It used to be a flat rate over every pop whether or not they were working a field, which
+## made the number something the player could not influence: posting a fourth farmhand *cost*
+## the empire a point, and the readout never moved in response to anything the player did. The
+## rate is a dial now, and this is the dial.
+func _test_research_follows_idle_workers() -> void:
+	sup.begin("research follows the empire's unassigned workers")
+	var g := _galaxy(6001)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the research probe")
+		return
+	var faction: FactionState = g.faction(0)
+	var per_idle := float(_db.get("RESEARCH_POINTS_PER_POP"))
+	sup.eq(per_idle, 1.0, "one point per unassigned colonist")
+
+	# Empty every *other* world the empire holds.
+	#
+	# The rate is empire-wide, so leaving the generator's founding homeworld in place puts
+	# three idle colonists on the board that this fixture never arranged -- and every
+	# assertion below would be off by exactly three for reasons that have nothing to do with
+	# the rule. The second-colony case further down puts the world back deliberately.
+	for other in g.colonies_of(faction.id):
+		if other == colony:
+			continue
+		other.population = 0.0
+		# `reconcile_workers`, not a clear: it is the turn pipeline's own clamp, so the
+		# posting is brought in line with the population the way a real turn would.
+		ColonySim.reconcile_workers(other)
+
+	# Six colonists, two worked farms and two worked mines: two idle.
+	_set_structures(colony, {&"farm": 2, &"mine": 2})
+	colony.population = 6.0
+	colony.food_stock = 500.0
+	colony.population = 6.0
+	_staff_all(colony)
+	sup.eq(ColonySim.idle_workers(colony), 2, "two colonists are idle")
+	sup.eq(ResearchStage.idle_scientists(g, faction.id), 2,
+		"and the empire counts two unassigned")
+	sup.near(ResearchStage.projected_research(faction, g, _db), 2.0, 0.001,
+		"so it researches two a turn, not six")
+
+	# Posting one more takes a point away. This is the half that was impossible before.
+	# The third mine is stood first: `assign_worker` refuses past the structures that exist,
+	# so trying before the structure is there would be testing the guard rather than the rule.
+	colony.structures[&"mine"] = 3
+	ColonySim.reconcile_workers(colony)
+	sup.eq(ColonySim.workers_on(colony, &"mine"), 2, "two miners are worked")
+	sup.ok(ColonySim.assign_worker(colony, &"mine"), "a third miner can be posted")
+	sup.eq(ResearchStage.idle_scientists(g, faction.id), 1,
+		"so the empire now has one unassigned colonist")
+	sup.near(ResearchStage.projected_research(faction, g, _db), 1.0, 0.001,
+		"and the rate follows it down")
+
+	# Fully staffed: nothing left to think with, and the turn grants nothing.
+	colony.structures = {&"farm": 3, &"mine": 3}
+	colony.worker_assignment = {}
+	_staff_all(colony)
+	sup.eq(ResearchStage.idle_scientists(g, faction.id), 0,
+		"a fully staffed colony has nobody to research")
+	sup.near(ResearchStage.projected_research(faction, g, _db), 0.0, 0.001,
+		"and projects nothing")
+	sup.near(ResearchStage.accumulate(faction, g, _defs, _db), 0.0, 0.001,
+		"and the turn grants nothing at all")
+
+	# And back again, which is the whole claim: the number follows the labour force.
+	sup.ok(ColonySim.unassign_worker(colony, &"farm"), "a farmhand can be pulled off")
+	sup.eq(ResearchStage.idle_scientists(g, faction.id), 1,
+		"so the empire has one unassigned colonist again")
+	sup.near(ResearchStage.projected_research(faction, g, _db), 1.0, 0.001,
+		"and the rate rises with it")
+
+	# A second colony contributes its idle hands too: the basis is the empire, not a world.
+	ColonySim.unassign_worker(colony, &"mine")
+	colony.structures = {&"farm": 3, &"mine": 3}
+	colony.worker_assignment = {}
+	_staff_all(colony)
+	var second := _habitable_colony(g)
+	if second != null:
+		second.structures = {}
+		second.population = 4.0
+		second.worker_assignment = {}
+		_staff_all(second)
+		sup.eq(ColonySim.idle_workers(second), 4, "a second world with no jobs has four idle")
+		sup.eq(ResearchStage.idle_scientists(g, faction.id), 4,
+			"and the empire rate counts both worlds")
+		sup.near(ResearchStage.projected_research(faction, g, _db), 4.0, 0.001,
+			"so it is four, not two")
+
+	# The bonus still applies on top, so a researched empire out-earns an unresearched one.
+	var rich_tech: Dictionary = _defs.get("tech_nodes") as Dictionary
+	var robotic := rich_tech.get(&"robotic_factories", null) as Resource
+	if robotic != null:
+		var plain := FactionState.new()
+		plain.id = faction.id
+		faction.researched[&"robotic_factories"] = true
+		faction.cache_tech_node(&"robotic_factories", robotic)
+		var bonus := 1.0 + faction.tech_effect(&"research_bonus")
+		sup.ok(bonus > 1.0, "robotic factories is worth researching")
+		sup.near(ResearchStage.projected_research(faction, g, _db),
+			4.0 * bonus, 0.001, "and scales the base rate rather than replacing it")
+		sup.near(ResearchStage.projected_research(plain, g, _db), 4.0, 0.001,
+			"while an unresearched empire still gets the bare rate")
+
+	# And the turn actually pays the projection: `accumulate` splits it, so the grant is the
+	# same figure the header quotes.
+	var granted := ResearchStage.accumulate(faction, g, _defs, _db)
+	sup.near(granted, ResearchStage.projected_research(faction, g, _db), 0.001,
+		"the turn grants exactly what the rate projects")
+
+
 func _test_no_rival_research_news() -> void:
 	sup.begin("no rival research spam")
 
@@ -4279,15 +4392,26 @@ func _test_fog_of_war() -> void:
 
 # --- end-to-end soak ----------------------------------------------------
 
+## How long the soak runs.
+##
+## Forty-five rather than twenty because research is now paid on *unassigned* civilians at one
+## point each, where it used to be two points for every pop whether working or not. The
+## founding colony has three colonists and no staffable jobs, so it earns three a turn, and the
+## cheapest tech node now lands on turn 39 -- past the old twenty-turn window. The soak has to
+## outlast the first completion for its "the soak produced news" assertion to mean anything,
+## since a completed node is the only thing that generates news in this fixture.
+const SOAK_TURNS := 45
+
+
 func _test_turn_soak() -> void:
-	sup.begin("20-turn soak")
+	sup.begin("45-turn soak")
 
 	var g := _galaxy(12000, 45, 4)
 	var start_turn := g.turn
 	var researched := false
 	var reports: Array = []
 
-	for t in 20:
+	for t in SOAK_TURNS:
 		var orders: Array = []
 		# Send the human's idle fleets to a rotating planet, exercising the order path
 		# every single turn.
@@ -4306,8 +4430,8 @@ func _test_turn_soak() -> void:
 		if tp[0] > 0.0 or tp[1] > 0.0 or tp[2] > 0.0 or tp[3] > 0.0:
 			researched = true
 
-	sup.eq(g.turn, start_turn + 20, "exactly twenty turns elapsed")
-	sup.eq(reports.size(), 20, "twenty reports were collected")
+	sup.eq(g.turn, start_turn + SOAK_TURNS, "every soak turn elapsed")
+	sup.eq(reports.size(), SOAK_TURNS, "and each one was collected")
 
 	var f0: FactionState = g.faction(0)
 	sup.ok(f0.treasury != float(_db.get("START_TREASURY")),

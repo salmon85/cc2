@@ -1,36 +1,46 @@
 extends RefCounted
 class_name ResearchStage
-## Stage 5 of turn resolution: turn a faction's civilian population into tech points, then
+## Stage 5 of turn resolution: turn a faction's unassigned civilians into tech points, then
 ## complete any milestone the empire has earned.
 ##
-## Research is *passive* in Phase 8. There are no allocation sliders and no tax slider, and
-## the design document is explicit about why: "research is passive, driven by total empire
+## Research is *passive* in Phase 8. There are no allocation sliders and no tax slider, and the
+## design document is explicit about why: "research is passive, driven by total empire
 ## civilian pop across all planets. Milestone populations level up technology and unlock
 ## buildings/ships."
 ##
 ## That replaces a budget the player divided. It also removes the last reason for the income
 ## figure to exist, so this stage reads population rather than `last_income`, and the four
 ## fields are fed in proportion to the cost of what remains rather than by a stored vector.
-
-## Convert a faction's population into tech points. Returns the total granted.
 ##
-## Only civilians count. Troops are explicitly excluded by the design document — "troops do
-## not consume food and do not produce research" — which is why this reads `population`
-## directly rather than any combined figure. A faction with no surviving colonies researches
-## nothing at all, exactly as before.
+## The population it reads is the **unassigned** part, not the whole. The design document's
+## sentence is about where scientists come from -- across all planets -- and it says nothing
+## about whether a colonist standing in a field can also think for a living. Paying for every
+## pop regardless of what they are doing makes the rate a constant; paying for the idle ones
+## makes it the colony's other output, and the same `+`/`-` that decides whether the empire
+## eats also decides how fast it advances.
+
+## Convert a faction's unassigned workers into tech points. Returns the total granted.
+##
+## **The unassigned are the researchers.** One idle colonist is one point a turn, across every
+## colony the empire holds. This replaced a flat rate paid on total population, which made
+## research a number the player could neither raise nor lower: every colonist counted whether
+## they were already standing in a field, so posting a fourth farmhand *cost* the empire a
+## point and the readout never moved in response to anything the player did.
+##
+## Now the rate is a dial rather than a receipt. Hiring a colonist raises it, and pressing `-`
+## on a farm takes one away -- the same `+`/`-` that decides whether the colony eats. That is
+## the trade the player is actually making, and it was invisible before.
+##
+## Only civilians count, and only the unassigned ones. Troops are explicitly excluded by the
+## design document -- "troops do not consume food and do not produce research" -- so this reads
+## `population` through `ColonySim.idle_workers` rather than any combined figure. A faction
+## with no surviving colonies researches nothing at all, exactly as before.
 static func accumulate(faction: FactionState, galaxy: GalaxyState, defs: Node, db: Node) -> float:
 	if galaxy.colonies_of(faction.id).is_empty():
 		return 0.0
-
-	var civilians := 0.0
-	for colony in galaxy.colonies_of(faction.id):
-		civilians += colony.population
-	if civilians <= 0.0:
+	var total := projected_research(faction, galaxy, db)
+	if total <= 0.0:
 		return 0.0
-
-	var per_pop := float(db.get("RESEARCH_POINTS_PER_POP"))
-	var bonus := 1.0 + faction.tech_effect(&"research_bonus")
-	var total := civilians * per_pop * bonus
 
 	# Split across the four fields by the relative cost of what is still ahead in each.
 	# This is what replaces the sliders: the player cannot starve a field they have not
@@ -49,6 +59,49 @@ static func accumulate(faction: FactionState, galaxy: GalaxyState, defs: Node, d
 		faction.tech_points[i] += share
 		granted += share
 	return granted
+
+
+## The empire's unassigned civilians, summed over every world it holds.
+##
+## The population basis for research, read from the same `ColonySim.idle_workers` the worker
+## panel's `-` button moves, so the rate on screen and the rate the turn pays are the same
+## figure rather than two that happen to agree.
+static func idle_scientists(galaxy: GalaxyState, faction_id: int) -> int:
+	if galaxy == null:
+		return 0
+	var total := 0
+	for colony in galaxy.colonies_of(faction_id):
+		total += ColonySim.idle_workers(colony)
+	return total
+
+
+## Research this faction will be granted next turn. **The** projected rate.
+##
+## One point per unassigned colonist, scaled by `RESEARCH_POINTS_PER_POP` and by
+## `research_bonus`. `accumulate` splits exactly this figure across the four fields and the
+## top bar quotes exactly this figure, so the number the player watches is the number the turn
+## pays out.
+##
+## `db` is optional so a caller with no registry still gets the rate; it only costs the
+## per-person constant, which the caller supplies anyway.
+static func projected_research(
+	faction: FactionState, galaxy: GalaxyState, db: Node = null
+) -> float:
+	if faction == null or galaxy == null:
+		return 0.0
+	var idle := idle_scientists(galaxy, faction.id)
+	if idle <= 0:
+		return 0.0
+	var per_idle := RESEARCH_POINTS_PER_UNASSIGNED if db == null \
+		else float(db.get("RESEARCH_POINTS_PER_POP"))
+	return float(idle) * per_idle * (1.0 + faction.tech_effect(&"research_bonus"))
+
+
+## Points per unassigned colonist, when no `GameDB` is to hand.
+##
+## The value `GameDB.RESEARCH_POINTS_PER_POP` holds. Named rather than written inline so the
+## fallback is visibly the same number and not a third one.
+const RESEARCH_POINTS_PER_UNASSIGNED := 1.0
 
 
 ## Relative weight of each research field: the cheapest node still unreached in that field.

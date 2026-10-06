@@ -70,16 +70,26 @@ const MIN_POP_FOR_GROWTH := 2.0
 
 ## Research.
 ##
-## Research is passive in Phase 8: there are no allocation sliders, and the budget comes
-## from the empire's total civilian population across every world it holds. A pop is a
-## scientist whether or not it is assigned to a field, and the four fields are fed in
-## proportion to what is still ahead in each rather than by a player-chosen split.
+## Research is passive in Phase 8: there are no allocation sliders. The budget comes from the
+## empire's **unassigned** civilians across every world it holds, one point each, and the four
+## fields are fed in proportion to what is still ahead in each rather than by a player-chosen
+## split.
+##
+## It used to be every pop whether or not it was working a field, which paid a colonist twice
+## over -- once for the farm they were standing in and again for thinking -- and made the
+## rate a constant the player could not influence. Paying only the idle ones makes research
+## the second thing a colonist can be put to, and the same `+`/`-` on the worker rows decides
+## whether they farm or they research.
 ##
 ## The tax slider went with it: there is no longer an income figure for a player to set a
 ## percentage of, so `MIN_TAX_RATE` / `MAX_TAX_RATE` / `DEFAULT_TAX_RATE` and the whole
 ## morale block they fed are gone rather than left as tuning nobody reads. `FactionState`
 ## keeps `tax_rate` so an old save still round-trips; nothing consults it.
-const RESEARCH_POINTS_PER_POP := 2.0
+##
+## Retuned from 2.0 to 1.0 for the change of basis rather than for balance alone. At the old
+## rate, four idle hands produced eight science a turn and an empire's research outran its own
+## economy; one for one is the rate the design calls for and is the number the top bar quotes.
+const RESEARCH_POINTS_PER_POP := 1.0
 
 ## The population thresholds that level technology up and unlock buildings and hulls.
 ##

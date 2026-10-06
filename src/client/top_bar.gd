@@ -216,12 +216,21 @@ func refresh() -> void:
 		return
 
 	_turn_label.text = "TURN %d" % (_controller.galaxy.turn + 1)
-	# The delta is the last turn's grant. `last_research_granted` is recorded by the
-	# controller when a turn resolves, so this is what the *previous* turn produced rather
-	# than a projection -- a projection here would be wrong by exactly the thing the player
-	# is trying to check.
+	# The delta is a projection, not last turn's receipt.
+	#
+	# It used to be `last_research_granted`, on the reasoning that a projection would be
+	# wrong by whatever the player was checking. That reasoning was sound for a flat rate --
+	# there was nothing to check -- and wrong the moment research became a dial. The rate is
+	# now the empire's unassigned civilians, so pressing `+` or `-` on a farm worker changes
+	# it immediately, and showing the previous turn's figure meant the number the player was
+	# adjusting sat still while they adjusted it.
+	#
+	# `projected_research` is the same function the resolver splits across the four fields,
+	# so this is the turn's grant rather than an estimate of it.
 	_research_label.text = "%d (%s)" % [
-		int(round(me.total_tech_points())), Format.signed(me.last_research_granted, 0)]
+		int(round(me.total_tech_points())),
+		Format.signed(
+			ResearchStage.projected_research(me, _controller.galaxy, _controller.db), 0)]
 
 
 ## Programmatic click path for the ready button, used by the automated GUI test.
