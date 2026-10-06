@@ -4,3 +4,7 @@
 *.import
 .claude/
 *.uid
+
+AGENTS.md
+opencode.json
+.opencode/
