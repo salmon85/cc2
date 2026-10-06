@@ -212,6 +212,27 @@ func clamp_camera() -> void:
 	var b := camera_bounds()
 	_camera.position.x = clampf(_camera.position.x, b.position.x, b.end.x)
 	_camera.position.y = clampf(_camera.position.y, b.position.y, b.end.y)
+	# The view draws in world space with the SubViewport applying the camera transform, so
+	# it cannot work out what is on screen for itself. The decorative star field needs to
+	# know: it lays a star in every cell of whatever it can see, so it has to be told what
+	# "whatever it can see" is, or it is either a wall of stars or an empty sky.
+	_view.set_visible_world(visible_world(), _camera.zoom.x)
+	_view.queue_redraw()
+
+
+## The rectangle of the world the camera is currently showing.
+func visible_world() -> Rect2:
+	if _camera == null:
+		return Rect2()
+	var view := _sub_viewport.size if _sub_viewport != null else Vector2i(640, 480)
+	var z := maxf(0.0001, _camera.zoom.x)
+	var half := Vector2(float(view.x), float(view.y)) * 0.5 / z
+	# A margin over the exact rectangle, for the same reason `_apply_custom_rect` keeps one:
+	# the float rounding in the transform leaves a sliver of world outside it, and a star that
+	# pops in at the very edge of the screen is worse than one drawn a hair early.
+	var slack := Vector2(half.x * 0.05 + 8.0, half.y * 0.05 + 8.0)
+	var extent := half + slack
+	return Rect2(_camera.position - extent, extent * 2.0)
 
 
 ## The rectangle the camera's centre is allowed to occupy.
@@ -337,6 +358,11 @@ func bind(controller: SessionController) -> void:
 	if _controller == null:
 		return
 	_view.bind(controller)
+	# Seed the view's notion of what is on screen now, rather than waiting for the first
+	# clamp. Without it the decorative sky's first frame walks the *whole field* as its
+	# fallback -- correct, and on a large map an enormous number of cells before the camera
+	# has been framed even once.
+	_view.set_visible_world(visible_world(), _camera.zoom.x if _camera != null else 1.0)
 	# The span is only known once a galaxy is bound, so the limits have to be reapplied.
 	_apply_camera_limits()
 	# The map is unusable until it is framed: an unfitted camera leaves the player staring

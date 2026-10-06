@@ -103,8 +103,63 @@ const PLANET_RADIUS := 5.5
 const STAR_SPRITE_RADIUS := 14.0
 const PLANET_SPRITE_RADIUS := 8.0
 
+## The decorative star field: how the sky is diced, how bright it is, and how it is seeded.
+##
+## Purely a drawing concern. None of this touches `galaxy`, which is what makes the stars
+## unpickable rather than merely unlikely to be picked: `pick()` walks `galaxy.systems` and
+## its `planet_indices`, so a star that was never registered has nothing to be hit. Hover works
+## the same way. There is deliberately no "decorative" list for the hit test to forget to
+## skip.
+##
+## The sky is diced into cells of `BACKDROP_CELL` and each cell carries one star, at a spot
+## derived by hashing the cell. That is the whole design, and it is because the alternative
+## does not survive contact with this map: the field spans fifty times as much ground on an
+## `extreme` map as on a `tiny` one, and the player zooms. Any *fixed count* scattered over
+## the whole field is invisible when zoomed in -- at the default framing of a large map the
+## measured star radius was 0.05 pixels, and at a working zoom a `tiny` map showed eight dots
+## on the entire screen. Per-cell, the number of stars on screen follows the screen rather than
+## the field, so the sky is equally dense everywhere the player can actually look.
+##
+## One cell per star, measured in **screen** pixels.
+##
+## The cell is in pixels and not in galaxy units because density has to survive the zoom, and
+## the two choices fail in opposite directions. Fixed in world units, the sky keeps a constant
+## density *per unit area* -- so zooming in spreads the stars apart and the board empties out
+## exactly where the player is looking. Fixed in pixels, the sky is as dense on the glass as
+## it was when they arrived, and a zoomed-in view of a corner of a huge map is as furnished as
+## the whole thing.
+##
+## Sized for a few hundred stars on an ordinary window: dense enough to read as space, few
+## enough that the per-frame walk is not the most expensive thing the map does.
+const BACKDROP_CELL := 20.0
 
-## The backdrop: a flat black field with a crosshair at the star.
+## Half-extent of one backdrop star, in **screen** pixels.
+##
+## Capped in world units by `BACKDROP_MAX_WORLD_RADIUS` before it is used, so the dust can
+## never grow to outweigh a world on a map zoomed out far enough that worlds are themselves
+## sub-pixel. A starfield brighter than the planets is worse than no starfield.
+const BACKDROP_RADIUS := Vector2(0.9, 2.4)
+
+## Ceiling on a backdrop star's world radius, so it stays a fraction of a world at any zoom.
+const BACKDROP_MAX_WORLD_RADIUS := 2.0
+
+## Alpha range for a backdrop star. Deliberately dim: this is dust catching light, and a
+## field of bright points reads as a second set of clickable markers.
+const BACKDROP_ALPHA := Vector2(0.18, 0.62)
+
+## Seed salt, so the sky is not the same sequence as anything else derived from the galaxy
+## seed and a change to one does not reshuffle the other.
+const BACKDROP_SEED_SALT := 0x5EED
+
+## Refuse to walk more cells than this in one frame.
+##
+## A cap on the *work*, not on the look. The cell walk covers the visible rect, which the
+## camera already bounds, so this only bites if a viewport is sized absurdly -- and a frame
+## that quietly takes unbounded time is worse than a sky with a slightly different density.
+const BACKDROP_MAX_CELLS := 20000
+
+
+## The backdrop: a flat black field, a scatter of distant stars, and a crosshair at the star.
 ##
 ## The grid and the concentric orbit rings that used to be here were both removed. The
 ## rings were the explicit ask, and they were doing the grid's job too -- at sixty-four
@@ -112,12 +167,129 @@ const PLANET_SPRITE_RADIUS := 8.0
 ## behind every object rather than as the orbits they were meant to depict. Nothing was
 ## lost by dropping both: the planets already sit at their orbital radii, so the layout is
 ## still legible, and without a mesh behind them the markers are the only thing on screen.
+##
+## Which is what the scattered stars are for. A pure black field with a handful of bodies on
+## it reads as an unfinished board rather than as space.
 func _draw_field(galaxy: GalaxyState) -> void:
 	var w := world_size(galaxy)
 	draw_rect(Rect2(-w, -w, w * 2.0, w * 2.0), FIELD_COLOUR)
+	_draw_backdrop(galaxy, w)
 	# Crosshair at the star, sized to the system rather than to the old 120-unit disk.
 	draw_line(Vector2(-18.0, 0.0), Vector2(18.0, 0.0), CC2Theme.CYAN_DIM, 1.0)
 	draw_line(Vector2(0.0, -18.0), Vector2(0.0, 18.0), CC2Theme.CYAN_DIM, 1.0)
+
+
+## The rectangle of the world currently on screen, in galaxy coordinates, and the zoom.
+##
+## Fed by `GalaxyMap`, which owns the camera. The view draws in world space with the camera
+## transform applied by the `SubViewport`, so on its own it cannot tell a zoomed-in view from a
+## zoomed-out one -- and the star field needs both halves of that: the rectangle to know where
+## to look, and the zoom because its spacing is measured in pixels.
+var _visible_world := Rect2()
+var _camera_zoom := 1.0
+
+
+## Tell the view what the camera is currently showing.
+func set_visible_world(rect: Rect2, zoom: float) -> void:
+	if _visible_world.is_equal_approx(rect) and is_equal_approx(_camera_zoom, zoom):
+		return
+	_visible_world = rect
+	_camera_zoom = maxf(0.0001, zoom)
+
+
+## The rectangle the view was last told is on screen.
+func visible_world() -> Rect2:
+	return _visible_world
+
+
+## The zoom the view was last told about.
+func camera_zoom() -> float:
+	return _camera_zoom
+
+
+## Scatter distant stars across `area`, one per cell.
+##
+## Seeded by the galaxy's seed and by the cell's own coordinates, so the sky is stable: the
+## same galaxy at the same zoom puts every star in the same place, on every repaint, in every
+## session, and identically for two peers looking at the same board. Rolling it per frame
+## would be simpler by three lines and wrong in a way a player would notice immediately --
+## `_draw` runs on every repaint, so the sky would boil.
+func _draw_backdrop(galaxy: GalaxyState, field_half_extent: float) -> void:
+	if galaxy == null or field_half_extent <= 0.0:
+		return
+	var area := _visible_world
+	if area.size.x <= 0.0 or area.size.y <= 0.0:
+		# Nothing told us what is on screen. The whole field is the safe answer: a sky drawn
+		# everywhere rather than a sky that is empty because a caller forgot.
+		area = Rect2(-field_half_extent, -field_half_extent,
+			field_half_extent * 2.0, field_half_extent * 2.0)
+	# Spacing in pixels, converted to galaxy units by the zoom: `BACKDROP_CELL` screen pixels
+	# is `BACKDROP_CELL / zoom` world units, and a zoomed-in view therefore subdivides
+	# rather than spreading the same stars over more ground.
+	var cell := BACKDROP_CELL / _camera_zoom
+	var lo := Vector2(floori(area.position.x / cell), floori(area.position.y / cell))
+	var hi := Vector2(floori(area.end.x / cell), floori(area.end.y / cell))
+	var span := hi - lo + Vector2.ONE
+	var cells := int(span.x) * int(span.y)
+	if cells <= 0:
+		return
+	if cells > BACKDROP_MAX_CELLS:
+		# Coarsen rather than truncate: truncating would leave one corner of the sky bare
+		# and the rest correct, which reads as a bug. Stretching the cell keeps every part of
+		# the view populated and changes only the density.
+		var coarsen := ceilf(sqrt(float(cells) / float(BACKDROP_MAX_CELLS)))
+		lo = Vector2(floori(lo.x / coarsen), floori(lo.y / coarsen))
+		hi = Vector2(floori(hi.x / coarsen), floori(hi.y / coarsen))
+		span = hi - lo + Vector2.ONE
+		cells = int(span.x) * int(span.y)
+	var step := cell * maxf(1.0, ceilf(sqrt(float(cells) / float(BACKDROP_MAX_CELLS))))
+	var largest := minf(BACKDROP_RADIUS.y / _camera_zoom, BACKDROP_MAX_WORLD_RADIUS)
+	var span_ratio := largest / maxf(BACKDROP_RADIUS.y / _camera_zoom, 0.0001)
+	var colour := Color(0.78, 0.84, 0.95)
+	var salt := galaxy.seed_value + BACKDROP_SEED_SALT
+	for cy in range(int(lo.y), int(hi.y) + 1):
+		for cx in range(int(lo.x), int(hi.x) + 1):
+			var h := _cell_hash(salt, cx, cy)
+			var at := (Vector2(float(cx), float(cy))
+				+ Vector2(_unit(h), _unit(h >> 8))) * step
+			var size := lerpf(BACKDROP_RADIUS.x, BACKDROP_RADIUS.y,
+				_unit(h >> 16)) / _camera_zoom * span_ratio
+			draw_circle(at, size,
+				Color(colour.r, colour.g, colour.b, lerpf(BACKDROP_ALPHA.x, BACKDROP_ALPHA.y,
+					_unit(h >> 24))))
+
+
+## An integer hash of a cell, salted by the galaxy. Deterministic and allocation-free.
+##
+## The obvious alternatives are both wrong here: `RandomNumberGenerator` seeded per cell would
+## cost a seed and a stream per cell per frame, and `hash()` on a vector is not guaranteed to
+## be stable between runs, which would give two peers looking at the same galaxy different
+## skies. This is a plain integer mix, so it is.
+static func _cell_hash(salt: int, cx: int, cy: int) -> int:
+	var h := salt ^ (cx * 0x27d4eb2d) ^ (cy * 0x165667b1)
+	h ^= h >> 15
+	h = h * 0x2c1b3c6d
+	h ^= h >> 12
+	h = h * 0x297a2d39
+	h ^= h >> 15
+	return absi(h)
+
+
+## One byte of a hash as a 0..1 float.
+static func _unit(h: int) -> float:
+	return float(h & 0xFF) / 255.0
+
+
+## How many cells the sky covers in `area` at `zoom`, for a test to reason about density.
+##
+## The count is in screen pixels, so it depends only on how big the window is -- not on the
+## map's scale and not on how far in the player has zoomed. That is the property being
+## asserted: a sky that changes density with the zoom is a sky that empties out when used.
+static func backdrop_cell_count(area: Rect2, zoom: float) -> int:
+	if area.size.x <= 0.0 or area.size.y <= 0.0:
+		return 0
+	var cell := BACKDROP_CELL / maxf(0.0001, zoom)
+	return int(ceilf(area.size.x / cell)) * int(ceilf(area.size.y / cell))
 
 
 ## The bounds indicator: a rectangular frame around the whole playable area.

@@ -4011,6 +4011,93 @@ func _step_map_visuals() -> void:
 	sup.ok(GalaxyMapView.STAR_SPRITE_RADIUS > GalaxyMapView.PLANET_SPRITE_RADIUS,
 		"the star still outdraws every world")
 
+	# --- the decorative backdrop -------------------------------------------------
+	# Purely cosmetic, and the two properties that matter are that it is *stable* and that it
+	# is *inert*. A field that boiled on every repaint, or that the click test had to be
+	# taught to ignore, would both be worse than no field at all.
+	var view := _client.map.view()
+
+	# The map owns the camera and has to tell the view what is on screen: the view draws in
+	# world space with the SubViewport applying the transform, so it cannot work it out for
+	# itself, and the sky is laid out per visible cell.
+	_client.map.clamp_camera()
+	var shown := _client.map.visible_world()
+	sup.ok(shown.size.x > 0.0 and shown.size.y > 0.0,
+		"the map reports the rectangle it is showing")
+	sup.ok(view.visible_world().is_equal_approx(shown),
+		"and the view was told the same one")
+
+	# Density follows the *screen*, not the field. This is the property the first attempt
+	# missed: a fixed number of stars scattered over the whole field is a dust field when
+	# zoomed out and eight lonely dots on the screen when zoomed in, because the field spans
+	# fifty times as much ground on an `extreme` map as on a `tiny` one.
+	# Density is in screen pixels, so the cell count depends only on how big the window is --
+	# not on the map's scale, and not on how far in the player has zoomed. That is the
+	# property the first attempt got backwards: cells fixed in world units keep a constant
+	# density per *unit area*, so zooming in spreads the stars apart and empties the sky out
+	# exactly where the player is looking.
+	var zoom := view.camera_zoom()
+	var on_screen := GalaxyMapView.backdrop_cell_count(shown, zoom)
+	sup.ok(on_screen > 0, "the visible window is covered in cells", "%d" % on_screen)
+	sup.ok(on_screen <= GalaxyMapView.BACKDROP_MAX_CELLS,
+		"and within the per-frame budget",
+		"%d against a cap of %d" % [on_screen, GalaxyMapView.BACKDROP_MAX_CELLS])
+	# Zooming is invariant: a tenth of the field under ten times the zoom shows the same
+	# number of stars, because each visible side shrinks by ten and the spacing shrinks by ten
+	# with it. That is the whole claim -- the sky does not thin out as the player closes in,
+	# which is exactly what a spacing fixed in galaxy units does.
+	var corner := Rect2(shown.position, shown.size / 10.0)
+	var zoomed := GalaxyMapView.backdrop_cell_count(corner, zoom * 10.0)
+	sup.ok(zoomed > 0, "a zoomed-in corner is still furnished", "%d cells" % zoomed)
+	sup.near(float(zoomed), float(on_screen), maxf(2.0, float(on_screen) * 0.1),
+		"at the same density as the whole field at rest")
+	# Halving the spacing quarters the area per star, so four times as many land.
+	var close := GalaxyMapView.backdrop_cell_count(corner, zoom * 2.0)
+	var wide := GalaxyMapView.backdrop_cell_count(corner, zoom)
+	sup.ok(close > wide * 2.0,
+		"and closing in subdivides rather than reusing the same stars",
+		"%d cells at twice the zoom against %d" % [close, wide])
+
+	# Stable: the same galaxy and cell always give the same star. `_draw` runs on every
+	# repaint, so a field that could change would visibly boil.
+	var salt := _galaxy.seed_value + GalaxyMapView.BACKDROP_SEED_SALT
+	sup.eq(GalaxyMapView._cell_hash(salt, 7, -3), GalaxyMapView._cell_hash(salt, 7, -3),
+		"a cell hashes to the same value every time")
+	sup.ok(GalaxyMapView._cell_hash(salt, 7, -3) != GalaxyMapView._cell_hash(salt, 7, -4),
+		"and neighbouring cells differ")
+	sup.ok(GalaxyMapView._cell_hash(salt + 1, 7, -3)
+		!= GalaxyMapView._cell_hash(salt, 7, -3),
+		"while a different galaxy gives a different sky")
+
+	# Every drawn star stays inside its own cell, which is what stops the field from looking
+	# like a grid -- and it is only true because the offsets are taken modulo one.
+	for cell: Vector2i in [Vector2i(0, 0), Vector2i(5, -9), Vector2i(1000, 1000)]:
+		var h := GalaxyMapView._cell_hash(salt, cell.x, cell.y)
+		sup.ok(GalaxyMapView._unit(h) >= 0.0 and GalaxyMapView._unit(h) <= 1.0,
+			"a cell's offsets are a fraction, not a raw byte (cell %s)" % str(cell))
+
+	# Never confusable with a body: a backdrop star is far smaller than the smallest thing
+	# the player can click, at every tier, because it is fixed in galaxy units like
+	# everything else on the map.
+	sup.ok(GalaxyMapView.BACKDROP_MAX_WORLD_RADIUS < GalaxyMapView.PLANET_RADIUS * 0.5,
+		"and a backdrop star can never reach a fraction of a world's radius",
+		"cap %.2f, planet %.1f" % [
+			GalaxyMapView.BACKDROP_MAX_WORLD_RADIUS, GalaxyMapView.PLANET_RADIUS])
+	sup.ok(GalaxyMapView.BACKDROP_ALPHA.y < 0.9,
+		"and dim enough not to read as a marker")
+
+	# Inert. `pick` walks the galaxy's systems, and no backdrop star was ever registered in
+	# one, so there is nothing for a click to land on. Probing near a real body is the case
+	# that matters: a player aiming at a world must not be refused because a star is nearer.
+	var body: PlanetState = _galaxy.planets[0]
+	sup.eq(view.pick(body.position), body.index,
+		"a click on a world still selects that world, backdrop or not")
+	var field := view.world_size(_galaxy)
+	sup.eq(view.pick(Vector2(field * 0.97, field * 0.97)), -1,
+		"and empty space still selects nothing rather than a stray star")
+	sup.ok(_galaxy.systems.size() <= 1,
+		"while the sky is in no system at all")
+
 
 ## The left panel's economy rows: one line each, and the nets the brief asks for.
 func _step_panel_economy_rows() -> void:
