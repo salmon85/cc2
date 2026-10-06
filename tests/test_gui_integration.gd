@@ -3951,12 +3951,65 @@ func _step_map_visuals() -> void:
 	sup.ok(variants.size() > 1,
 		"generated worlds carry a randomised surface variant")
 
-	# The map draws the planet through the procedural path, not the old two-disc form.
+	# The map draws the planet through the procedural path, not the old two-disc form, and
+	# that path is the fallback rather than the primary: the authored sprite is what it draws
+	# when one loaded.
 	var view_source := FileAccess.get_file_as_string("res://src/client/galaxy_map_view.gd")
 	sup.ok(view_source.contains("_draw_planet_body"),
 		"the map has a procedural planet draw routine")
 	sup.ok(view_source.contains("PlanetVisuals.landmasses"),
 		"and it draws the world's landmasses")
+
+	# --- the authored sprites ---------------------------------------------------
+	# Every named sprite actually loaded. A missing or un-imported `.png` is exactly the case
+	# the fallback exists for, so this would not *fail* -- it would quietly leave the board
+	# looking exactly as it did before, and nobody would know why the new art never appeared.
+	sup.ok(PlanetSprites.star() != null, "the central star sprite loaded")
+	sup.eq(PlanetSprites.star().get_size(), Vector2(48, 48), "and is a 48-pixel image")
+	sup.ok(PlanetSprites.complete(), "every planet sprite loaded too")
+	for i in PlanetSprites.PLANET_SPRITES.size():
+		sup.ok(PlanetSprites.planet(i) != null,
+			"sprite %d (%s) loaded" % [i, PlanetSprites.PLANET_SPRITES[i]])
+
+	# The star's file is the one asked for by name, so assert the name rather than trusting
+	# the list order to be right.
+	sup.eq(PlanetSprites.STAR_SPRITE, "Black_hole",
+		"the centre of the map is the black hole")
+
+	# The assignment is *stable*: a world must show the same face on every redraw, in every
+	# session, and before and after a save/load. Rolling a fresh number per draw would
+	# repaint the entire galaxy sixty times a second and would make the board impossible to
+	# read, so this is asserted on the variant rather than eyeballed.
+	sup.eq(PlanetSprites.planet(3), PlanetSprites.planet(3), "a variant maps to one sprite")
+	sup.eq(PlanetSprites.planet(3), PlanetSprites.planet(7),
+		"and wraps rather than falling off the end")
+	sup.eq(PlanetSprites.planet(0), PlanetSprites.planet(-4),
+		"negative variants wrap the other way")
+	sup.ok(PlanetSprites.planet(0) != null and PlanetSprites.planet(1) != null
+		and PlanetSprites.planet(0) != PlanetSprites.planet(1),
+		"and the list is not one image repeated")
+
+	# More than one sprite is actually in play on this board, or "randomly assigned" is
+	# satisfied by every world drawing the same face.
+	var in_play := {}
+	for p in _galaxy.planets:
+		in_play[PlanetSprites.PLANET_SPRITES[posmod(p.visual_variant,
+			PlanetSprites.PLANET_SPRITES.size())]] = true
+	sup.ok(in_play.size() >= 3,
+		"the worlds between them use several sprites (got %d)" % in_play.size())
+
+	# A body must be as clickable as it is painted. These are fixed numbers on a map that
+	# spans two orders of magnitude between tiers, so the guard is what stops a sprite from
+	# growing wider than its own hit area and making a visible world unclickable.
+	sup.ok(GalaxyMapView.PLANET_SPRITE_RADIUS < GalaxyMapView.PICK_RADIUS,
+		"a planet sprite is drawn inside the click radius",
+		"sprite %.1f, pick %.1f" % [GalaxyMapView.PLANET_SPRITE_RADIUS, GalaxyMapView.PICK_RADIUS])
+	sup.ok(GalaxyMapView.STAR_SPRITE_RADIUS < GalaxyMapView.PICK_RADIUS,
+		"and so is the star's")
+	# The star must stay the largest thing on the board, or the centre stops reading as the
+	# centre -- the reason `STAR_RADIUS` exceeded `PLANET_RADIUS` in the first place.
+	sup.ok(GalaxyMapView.STAR_SPRITE_RADIUS > GalaxyMapView.PLANET_SPRITE_RADIUS,
+		"the star still outdraws every world")
 
 
 ## The left panel's economy rows: one line each, and the nets the brief asks for.

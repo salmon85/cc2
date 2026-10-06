@@ -91,6 +91,18 @@ const PICK_RADIUS := 18.0
 const STAR_RADIUS := 13.0
 const PLANET_RADIUS := 5.5
 
+## Half-extent the authored sprites are drawn at, in galaxy units.
+##
+## Sized against `PICK_RADIUS` rather than chosen for how large the art looks, because the
+## map spans two orders of magnitude between the `tiny` and `extreme` tiers while these are
+## fixed numbers: a sprite comfortably inside the pick radius at one tier is a body wider
+## than its own hit area at another, and a player who can see the edge of a world and click
+## the middle of it is being lied to. Both sit well under `PICK_RADIUS` at every tier, and
+## both are only modestly above the procedural radii they replace, so the board keeps its
+## existing density and no two worlds start touching.
+const STAR_SPRITE_RADIUS := 14.0
+const PLANET_SPRITE_RADIUS := 8.0
+
 
 ## The backdrop: a flat black field with a crosshair at the star.
 ##
@@ -154,17 +166,36 @@ func _draw_systems(galaxy: GalaxyState) -> void:
 
 func _draw_star(sys: SystemState) -> void:
 	var colour := CC2Theme.star_color(sys.star_class)
-	# Corona, glow, photosphere, core. A star is not a disc -- it is a light source, and the
-	# thing that says so at this zoom is the falloff around it rather than anything drawn on
-	# top of it. Two discs (a faint halo and a solid core) read as a glowing dot; four graded
-	# layers read as something radiating.
-	for layer: Array in star_layers(colour):
-		draw_circle(sys.position, float(layer[0]), layer[1] as Color)
+	# The authored sprite where one loaded, the procedural corona where it did not.
+	#
+	# `Black_hole.png` replaces the graded discs at the centre of the field. The corona is
+	# kept as the fallback rather than deleted: a missing or un-imported `.png` would
+	# otherwise leave the middle of the map blank, and a hole in the board is a far worse
+	# failure than an older-looking sun.
+	var sprite := PlanetSprites.star()
+	if sprite != null:
+		_draw_sprite(sprite, sys.position, STAR_SPRITE_RADIUS)
+	else:
+		# Corona, glow, photosphere, core. A star is not a disc -- it is a light source, and
+		# the thing that says so at this zoom is the falloff around it rather than anything
+		# drawn on top of it. Two discs (a faint halo and a solid core) read as a glowing dot;
+		# four graded layers read as something radiating.
+		for layer: Array in star_layers(colour):
+			draw_circle(sys.position, float(layer[0]), layer[1] as Color)
 	if _ownership_known(_controller.galaxy, sys):
 		var owner_colour := CC2Theme.faction_color(sys.owner)
-		draw_arc(sys.position, STAR_RADIUS + 3.0, 0.0, TAU, 24, owner_colour, 1.5)
+		draw_arc(sys.position, STAR_SPRITE_RADIUS + 3.0, 0.0, TAU, 24, owner_colour, 1.5)
 	if sys.index == _controller.selected_system:
-		draw_arc(sys.position, STAR_RADIUS + 6.0, 0.0, TAU, 24, CC2Theme.PHOSPHOR, 1.5)
+		draw_arc(sys.position, STAR_SPRITE_RADIUS + 6.0, 0.0, TAU, 24, CC2Theme.PHOSPHOR, 1.5)
+
+
+## Paint a square sprite centred on `pos`, with `radius` to its edge.
+##
+## Rect rather than a bare `draw_texture` call because the images are 48px and the map draws
+## in galaxy units: the rect is the only place the two meet.
+func _draw_sprite(texture: Texture2D, pos: Vector2, radius: float) -> void:
+	draw_texture_rect(texture, Rect2(pos - Vector2(radius, radius),
+		Vector2(radius, radius) * 2.0), false)
 
 
 ## The graded discs that make the central star look like a light source.
@@ -250,7 +281,27 @@ func _draw_planet(galaxy: GalaxyState, p: PlanetState) -> void:
 ## anti-lit side gives the disc a terminator, so the body reads as a lit sphere rather than as
 ## a circle with a pattern on it. Every colour comes from the one palette function, which is
 ## also what the GUI suite reads.
+##
+## ## The sprite, and what it costs
+##
+## An authored sprite is used when one loaded, chosen by the planet's own variant so the same
+## world shows the same face on every redraw and in every session. The procedural body is kept
+## as the fallback for a missing or un-imported file, for the reason the star's is.
+##
+## **The assignment is random, not by terrain class.** `PLANET_SPRITES` holds one barren, one
+## ice, one lava and one terrestrial world, and a planet gets whichever its variant lands on
+## rather than the one matching its type -- so a volcanic world may render as a temperate one.
+## That was asked for, and it is worth being plain about the trade: the previous art encoded
+## habitat, and a player choosing where to land a Colony Ship could read it off the board at a
+## glance. They cannot any more. `PlanetVisuals.look_for` still maps type to class and still
+## carries the palette; swapping the sprite choice to
+## `PLANET_SPRITES[PlanetVisuals.look_for(p.type_id)]` restores type fidelity in one line, at
+## the cost of the variety a random assignment gives.
 func _draw_planet_body(pos: Vector2, p: PlanetState) -> void:
+	var sprite := PlanetSprites.planet(p.visual_variant)
+	if sprite != null:
+		_draw_sprite(sprite, pos, PLANET_SPRITE_RADIUS)
+		return
 	var look := PlanetVisuals.look_for(p.type_id)
 	var palette := PlanetVisuals.palette(p.type_id, p.visual_variant)
 	var deep: Color = palette[0]
