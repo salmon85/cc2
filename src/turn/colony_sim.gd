@@ -600,12 +600,20 @@ static func _food_output(planet: PlanetState, buildings: Dictionary) -> float:
 		+ _unattended_output(planet, buildings, "yield_amount")
 
 
-## Output from structures nobody is posted to, because they run themselves.
+## Only the landed Colony Ship qualifies.
 ##
-## A landed Colony Ship feeds its five colonists from its own stores; there is no job to fill
-## and no `+` button to press. Only structures whose *kind* carries no staffing -- checked by
-## `pop_required`, which is the field that distinguishes "needs a worker" from "does not" -- so
-## a future staffed structure cannot silently start producing for free.
+## A Colony Ship feeds its colonists from its own stores; there is no job to fill and no `+`
+## button to press.
+##
+## This used to accept anything with `pop_required == 0`, which is a serious bug rather than a
+## sloppy one: `yield_amount` is the *power* field for a reactor. A Nuclear plant reads 40, a
+## Coal plant 8, a Solar array 1, and all three are `pop_required = 0`. So a colony with a
+## reactor was producing forty extra food a turn from a structure that makes electricity and
+## nothing else -- the food line was, in effect, reporting power generation.
+##
+## Gated on the structure's **kind** rather than on its staffing, because "needs a worker" and
+## "produces food" are different questions and only the roster answers the second.
+const UNATTENDED_OUTPUT_KINDS: Array[int] = [BuildingData.Kind.COLONY_PAD]
 static func _unattended_output(
 	planet: PlanetState, buildings: Dictionary, yield_field: StringName
 ) -> float:
@@ -619,7 +627,7 @@ static func _unattended_output(
 		if count <= 0:
 			continue
 		var def: Resource = buildings.get(building_id, null) as Resource
-		if def == null or int(def.get("pop_required")) > 0:
+		if def == null or not UNATTENDED_OUTPUT_KINDS.has(int(def.get("kind"))):
 			continue
 		total += float(def.get(yield_field)) * count
 	return total
