@@ -36,8 +36,20 @@ var _cargo_button: Button = null
 ## the button is a statement rather than a question.
 var _land_button: Button = null
 
+## Draw every transit fleet's route at once, rather than only the selected one's.
+##
+## The map already draws the selected fleet's line and its waypoint pips; this is the
+## everything-at-once view, for an empire with several wings in the air at once and no way to
+## see where any of them are going. Off by default: it is an overlay over a board that is
+## perfectly legible without it, and a screen of lines is not an improvement to look at.
+var _paths_button: Button = null
+
 ## The destination the player has proposed, or -1. The modal owns the actual workflow now.
 var _proposal: int = -1
+
+
+## Emitted when the player wants every transit route drawn, or wants them hidden again.
+signal flight_paths_toggled(on: bool)
 
 
 func _ready() -> void:
@@ -67,6 +79,16 @@ func _build() -> void:
 	_travel_button.focus_mode = Control.FOCUS_NONE
 	_travel_button.pressed.connect(_on_travel_pressed)
 	col.add_child(_travel_button)
+
+	# The all-fleets route overlay, directly beneath Travel because it is the other half of
+	# the same question -- Travel sends one fleet somewhere, this shows where everything is
+	# already going.
+	_paths_button = Button.new()
+	_paths_button.text = "Show Flight Paths"
+	_paths_button.tooltip_text = "Draw every fleet in transit and where it is headed"
+	_paths_button.focus_mode = Control.FOCUS_NONE
+	_paths_button.pressed.connect(_on_paths_pressed)
+	col.add_child(_paths_button)
 
 	# Load / unload. Keyed on the *selected planet* rather than on the selected fleet: the
 	# dialog is about a world and its orbit, and a transport sitting over the colony is what
@@ -125,7 +147,24 @@ func refresh() -> void:
 		fleet_selected.emit(current)
 	_refresh_land_button()
 	_refresh_cargo_button()
+	_refresh_paths_button()
 	_refresh_detail()
+
+
+## Draw the button's label from the state it controls, so the two cannot disagree.
+##
+## A toggle whose text is written once at build time says "Show Flight Paths" over an overlay
+## that is already up, which is the one thing a toggle must never do. The map owns the actual
+## flag, so the button reads it rather than keeping a second copy -- there is no local
+## `_flight_paths` to drift.
+func _refresh_paths_button() -> void:
+	if _paths_button == null or _controller == null or _controller.galaxy == null:
+		return
+	var on := _controller.flight_paths_shown()
+	_paths_button.text = "Hide Flight Paths" if on else "Show Flight Paths"
+	_paths_button.tooltip_text = (
+		"Hide every fleet's route" if on else "Draw every fleet in transit and where it is headed"
+	)
 
 
 ## Enable the landing button only when a landing would actually be accepted.
@@ -210,6 +249,14 @@ func _on_travel_pressed() -> void:
 	travel_requested.emit()
 
 
+## The player flipped the route overlay. The panel does not hold the flag, so it asks the
+## controller for the opposite of what the map currently shows rather than tracking its own.
+func _on_paths_pressed() -> void:
+	var want := not (_controller != null and _controller.flight_paths_shown())
+	flight_paths_toggled.emit(want)
+	_refresh_paths_button()
+
+
 ## Consume the fleet's Colony Ship and settle the world it is over.
 ##
 ## Routed through the client root rather than mutating state here, so the log and the panels
@@ -292,6 +339,11 @@ func travel_button() -> Button:
 	return _travel_button
 
 
+## The Show/Hide Flight Paths toggle, beneath Travel.
+func flight_paths_button() -> Button:
+	return _paths_button
+
+
 ## The Land Colony Ship button, shown only when a landing is legal.
 func land_button() -> Button:
 	return _land_button
@@ -339,6 +391,8 @@ func visible_text() -> String:
 		parts.append(_hint.text)
 	if _travel_button != null:
 		parts.append(_travel_button.text)
+	if _paths_button != null:
+		parts.append(_paths_button.text)
 	if _cargo_button != null and _cargo_button.visible:
 		parts.append(_cargo_button.text)
 	if _land_button != null and _land_button.visible:

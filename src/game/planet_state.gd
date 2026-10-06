@@ -100,6 +100,17 @@ var housing: float = 0.0
 ## Untyped because it round-trips through JSON, which does not preserve element types.
 var warnings: Array = []
 
+## Set by the colony sim when this turn's food could not all be stored, and consumed by the
+## *next* one to raise `food_overflow`.
+##
+## A real field rather than node metadata, because it is state the turn resolution reads and
+## writes and state the turn resolution therefore has to reproduce. `duplicate_state()` and the
+## save/load path both go through `to_dict`, and metadata survives neither: a flag left on the
+## live object and absent from the copy made the same turn report a food overflow on one side
+## and not the other, which is a determinism failure wearing a UI label. `warnings` itself is
+## serialised for the same reason and for the same guarantee.
+var pending_food_overflow: bool = false
+
 ## `Enums.BuildMode`. `SINGLE` builds exactly one structure per turn; `PER_TURN` allows one
 ## or more ships per turn, gated on the colony producing at least the hull's full metal cost
 ## every turn.
@@ -307,6 +318,7 @@ func to_dict() -> Dictionary:
 		"build_metal": build_metal,
 		"build_total_turns": build_total_turns,
 		"warnings": warnings.duplicate(true),
+		"pending_food_overflow": pending_food_overflow,
 		"surveyed": surveyed,
 		"visual_variant": visual_variant,
 	}
@@ -354,6 +366,7 @@ func from_dict(data: Dictionary) -> bool:
 	build_metal = float(data.get("build_metal", 0.0))
 	build_total_turns = int(data.get("build_total_turns", 0))
 	warnings = _coerce_warnings(data.get("warnings", []))
+	pending_food_overflow = bool(data.get("pending_food_overflow", false))
 	surveyed = bool(data.get("surveyed", false))
 	# Absent from every save written before the map gained procedural worlds, so a loaded
 	# body gets variant 0 rather than failing. Variant 0 is a real variant, not a sentinel:

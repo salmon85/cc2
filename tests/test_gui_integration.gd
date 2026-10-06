@@ -62,7 +62,9 @@ func _initialize() -> void:
 		"build_button", "landing_button", "travel_modal",
 		"immediate_bars", "metal_dialog", "travel_flow", "cargo_modal",
 		"map_visuals", "economy_rows", "background_music",
-		"worker_scrap_ui", "live_capacity", "food_net_sync", "undiscovered_labels",
+		"worker_scrap_ui", "live_capacity", "food_net_sync", "metal_rate_sync",
+		"undiscovered_labels",
+		"transit_resolution", "flight_path_toggle", "space_port_gating",
 		"travel_prompt_paths", "camera_snap_uncolonized",
 		"orbit_labels", "cargo_slider",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
@@ -123,7 +125,11 @@ func _process(_delta: float) -> bool:
 		"worker_scrap_ui": _step_worker_and_scrap_ui()
 		"live_capacity": _step_live_capacity_display()
 		"food_net_sync": _step_food_net_matches_the_turn()
+		"metal_rate_sync": _step_mine_worker_moves_the_metal_rate()
 		"undiscovered_labels": _step_undiscovered_world_labels()
+		"transit_resolution": _step_transit_resolves_and_docks()
+		"flight_path_toggle": _step_flight_path_toggle()
+		"space_port_gating": _step_space_port_gates_the_ship_list()
 		"travel_prompt_paths": _step_travel_prompt_and_paths()
 		"camera_snap_uncolonized": _step_camera_snap_and_uncolonized()
 		"orbit_labels": _step_orbit_labels()
@@ -1581,18 +1587,42 @@ func _step_planet_and_research_readouts() -> void:
 	_client.select_colony(colony.index)
 
 	# --- metal: stock and per-turn production -----------------------------------
+	#
+	# Three *worked* mines make fifteen a turn, so the row reads `599 (+15)`. The workers are
+	# posted explicitly because a mine produces while somebody is on it: three mines standing
+	# with nobody posted is a colony earning nothing, and the panel used to quote fifteen for it
+	# because it counted structures rather than assignments.
 	colony.structures = {&"mine": 3, &"granary": 1}
 	colony.population = 6.0
 	colony.reserve_metals = 599.0
+	_post_workers(colony, 0, 3)
 	_client.inspector.refresh()
 	var detail := _client.inspector.planet_label().text
 	sup.ok(detail.contains("METAL"),
 		"the detail panel shows metal", "shown=%s" % detail.replace("\n", " | "))
 	sup.ok(detail.contains("599"), "and the stockpile", "shown=%s" % detail.replace("\n", " | "))
-	# Three mines make fifteen a turn, so the row reads `599 (+15)`.
 	sup.ok(detail.contains("+15"),
 		"and the per-turn production beside it",
 		"shown=%s" % detail.replace("\n", " | "))
+
+	# Pulling a worker off is the other half, and the one the report was actually about: the
+	# turn credited the difference, so the displayed rate has to fall on the same press.
+	# Driven through the `+` / `-` buttons rather than the controller, because the report was
+	# about what the player sees when they press one.
+	_client.macros.refresh()
+	var less := _client.macros.staffing_less_button(&"mine")
+	sup.ok(less != null, "the mine has a worker row to pull from")
+	if less != null:
+		less.emit_signal("pressed")
+		sup.ok(_client.inspector.planet_label().text.contains("+10"),
+			"pulling one mineworker drops the displayed rate immediately",
+			"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+		var more := _client.macros.staffing_more_button(&"mine")
+		if more != null:
+			more.emit_signal("pressed")
+		sup.ok(_client.inspector.planet_label().text.contains("+15"),
+			"and posting it back restores the rate without waiting for a turn",
+			"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
 
 	# An unstaffed mine produces nothing, so the delta has to fall with the workforce --
 	# otherwise the panel is quoting a figure the turn will not credit.
@@ -2371,8 +2401,12 @@ func _step_fog_colony_markers() -> void:
 	sup.ok(label.contains("UNCOLONISED"),
 		"a rival world reads exactly like an uncolonised one")
 
-	# Flying a ship there is how a player earns the right to see it. The gate has to open
-	# on the same trigger as the map's, or the map would show a world the inspector refuses.
+	# Flying a ship there earns the *name*, not the contents.
+	#
+	# This gate used to open on a fleet in orbit, which handed the player a rival's population,
+	# stockpile and full structure roster on the strength of one scout pass. A sweep tells you
+	# what kind of rock it is; it does not tell you what is standing on it, and nothing in the
+	# design says it should. Presence earns a label on the map; ownership earns the economy.
 	var moved := false
 	for f_key: int in gal.fleets:
 		var f: FleetState = gal.fleets[f_key]
@@ -2386,8 +2420,22 @@ func _step_fog_colony_markers() -> void:
 	sup.ok(moved, "a player fleet can be parked on the rival world")
 	inspector.refresh()
 	var revealed := inspector.planet_label().text
-	sup.ok(revealed.contains("POPULATION"),
-		"parking a ship there reveals the world's detail")
+	sup.ok(revealed.contains("NO INTEL"),
+		"parking a ship there says the world exists and reports nothing about it",
+		"shown=%s" % revealed.replace("\n", " | "))
+	sup.ok(not revealed.contains("POPULATION"),
+		"and still does not reveal a rival's population")
+	sup.ok(not revealed.contains("METAL"),
+		"nor its stockpile")
+	sup.ok(not revealed.contains("FARM"),
+		"nor its structures")
+	# Taking the world is what earns the economy. This is the half of the old assertion that
+	# was always true, and it is the only thing that should ever turn this gate.
+	p.owner = me
+	inspector.refresh()
+	sup.ok(inspector.planet_label().text.contains("POPULATION"),
+		"settling the world is what reveals its detail")
+	p.owner = rival
 
 	# Put the galaxy back, so later steps run against the state they expect. The fixture was
 	# synthesised rather than borrowed, so this is not a courtesy -- the ownership, the
@@ -4038,14 +4086,18 @@ func _step_camera_snap_and_uncolonized() -> void:
 			"and no phantom population or metal either")
 
 		# Put a ship in orbit: that is how a player earns the right to see a world at all.
+		# Put a ship in orbit: that is how a player learns the world is there at all. It is
+		# not how they learn what is on it -- an unclaimed world belongs to nobody, so there
+		# is nothing of theirs to reveal and the panel says so rather than inventing an
+		# economy for a rock.
 		var target: PlanetState = c.galaxy.planet(empty)
 		target.surveyed = true
 		_ensure_transport(empty, &"corvette")
 		c.select_planet(empty)
 		_client.inspector.refresh()
 		var shown := _client.inspector.planet_label().text
-		sup.ok(shown.contains("NO COLONY"),
-			"and a visited one says it has no colony", "shown=%s" % shown.replace("\n", " | "))
+		sup.ok(shown.contains("NO INTEL"),
+			"and a visited one reports no intel", "shown=%s" % shown.replace("\n", " | "))
 		sup.ok(not shown.contains("POPULATION"),
 			"reporting no phantom population", "shown=%s" % shown.replace("\n", " | "))
 		sup.ok(not shown.contains("METAL"),
@@ -4436,6 +4488,296 @@ func _step_undiscovered_world_labels() -> void:
 	# The session log never printed the real name in the first place.
 	sup.ok(not _client.log_text().contains(body.name) or body.name.is_empty(),
 		"and the session log never printed it either")
+
+
+## A dispatched fleet loses a dot a turn and docks where it was sent.
+##
+## The reported symptom was a fleet that never arrived: pressed Travel, watched the percentage
+## climb, and it sat at "in transit" for ever. `MovementStage.advance` credits one dot per turn
+## and calls arrival when the travelled figure reaches the leg, so this drives a real crossing
+## through the real resolver and checks both ends of it: the counter moves every turn, and on
+## the turn the arithmetic says it should, `destination` goes to -1 and the fleet is sitting in
+## the destination's orbit where a second crossing can find it.
+func _step_transit_resolves_and_docks() -> void:
+	sup.begin("a dispatched fleet resolves and docks")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var home := _first_colony()
+	if home == null:
+		sup.ok(false, "the player starts with a colony to fly from")
+		return
+
+	# A world a few dots away, not the far side of the map: this is about the counter and the
+	# docking, and a crossing long enough to outlive the suite proves neither quickly.
+	var target := -1
+	var nearest := INF
+	for p in c.galaxy.planets:
+		if p.index == home.index:
+			continue
+		var gap := MovementStage.orbit_distance(home, p)
+		if gap > 0.0 and gap < nearest:
+			nearest = gap
+			target = p.index
+	sup.ok(target >= 0, "a second world exists to fly to")
+	if target < 0:
+		return
+	var dest: PlanetState = c.galaxy.planet(target)
+
+	var fleet := _ensure_transport(home.index, &"corvette")
+	if fleet == null:
+		sup.ok(false, "a fleet is available to dispatch")
+		return
+	fleet.destination = -1
+	fleet.travelled = 0.0
+	# `queue_move` acts on the *selected* fleet, so dispatching without selecting first
+	# silently orders whatever was selected earlier -- or refuses outright when nothing is.
+	c.select_fleet(fleet.id)
+	sup.eq(c.fleet(), fleet, "the fleet to be sent is the selected one")
+	var leg := MovementStage.orbit_dots(c.galaxy, home, dest)
+	var quoted := MovementStage.transit_turns(c.galaxy, home.index, target)
+	sup.ok(leg > 0.0, "the crossing is a real distance")
+	sup.ok(quoted >= 1, "and the panel quotes at least a turn for it")
+
+	sup.ok(c.queue_move(target), "the fleet is dispatched")
+	sup.eq(fleet.destination, target, "and is immediately under way to the chosen world")
+	sup.near(fleet.travelled, 0.0, 0.001, "with nothing of the leg covered yet")
+
+	# One turn at a time, watching the counter fall by exactly a dot. A fleet that decremented
+	# every turn but by the wrong amount, or that reset partway, would pass an arrival-only
+	# assertion and fail here.
+	var previous := fleet.travelled
+	var moved_each_turn := true
+	var docked := false
+	for _turn in quoted + 2:
+		c.end_turn()
+		if fleet.destination < 0:
+			docked = true
+			break
+		if absf(fleet.travelled - previous - MovementStage.DOTS_PER_TURN) > 0.001:
+			moved_each_turn = false
+		previous = fleet.travelled
+	sup.ok(moved_each_turn, "each turn covers exactly one dot of the leg")
+	sup.ok(docked, "and the fleet arrives rather than crossing for ever")
+	sup.eq(fleet.system, target, "it is docked at the destination")
+	sup.eq(fleet.destination, -1, "no longer under way")
+	sup.near(fleet.travelled, 0.0, 0.001, "and its progress counter is cleared for the next order")
+	# The orbit is the garrison: a second query for the destination has to find it there, or
+	# "arrived" would be true of the fleet's own fields while the rest of the game still
+	# believed the world empty.
+	sup.ok(not c.fleets_in_orbit_at(target).is_empty(),
+		"the destination's orbit now holds the fleet")
+	sup.ok(c.fleets_in_orbit_at(target).has(fleet),
+		"and it is that same fleet")
+	# And it can be re-ordered from there, which is the consequence that actually matters.
+	sup.ok(c.queue_move(home.index),
+		"and it can be ordered onward from the world it reached")
+
+
+## Posting a miner moves the metal rate on the same frame the `+` is pressed.
+##
+## The defect this guards: the panel derived the rate by walking the *structure* table, so it
+## paid for every mine the colony owned rather than the ones somebody was standing at. Posting a
+## worker moved the posting, the stockpile and the next turn's income, and left the displayed
+## rate sitting exactly where it was -- the player pressed `+`, the number under METAL did not
+## move, and the only way to see the change was to end the turn and let the resolver credit it.
+##
+## No turn is advanced anywhere in this step. That is the claim being tested, and a check that
+## let a turn resolve first would pass against the old code just as happily as the new.
+func _step_mine_worker_moves_the_metal_rate() -> void:
+	sup.begin("mine staffing moves the displayed metal rate")
+	if _client == null or _client.controller == null or _client.macros == null:
+		return
+	if _client.inspector == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	var mine := _defs.call("building", &"mine") as Resource
+	sup.ok(mine != null, "the roster has a mine to staff")
+	if mine == null:
+		return
+	var per_mine := float(mine.get("metal_per_turn"))
+
+	# Two mines, one Colony Ship pad, and six colonists with nobody posted anywhere. The pad is
+	# the control: it pays metal without a worker, so it holds still across the presses and the
+	# movement left in the rate is exactly the mine being staffed.
+	colony.population = 6.0
+	colony.building_queue.clear()
+	colony.build_metal = 0.0
+	colony.ship_queue.clear()
+	colony.structures = {&"mine": 2, &"colony_ship_building": 1}
+	colony.worker_assignment = {}
+	_colonyRecount(colony, c)
+	c.select_planet(colony.index)
+	_client.select_colony(colony.index)
+	_client.macros.refresh()
+	_client.inspector.refresh()
+
+	sup.eq(ColonySim.workers_on(colony, &"mine"), 0, "nobody is posted to the mines yet")
+	var posted := _client.macros.staffing_more_button(&"mine")
+	sup.ok(posted != null, "the mine row carries a + button")
+	if posted == null:
+		return
+	sup.ok(not posted.disabled, "and it is pressable with colonists free")
+
+	var start := _signed_in(_row_for(_client.inspector.planet_label().text, "METAL"))
+	sup.near(start, ColonySim.metal_output(colony, _defs.get("buildings") as Dictionary),
+		0.001, "the panel opens on the figure the sim would credit")
+
+	# Press `+`. One mine starts producing and the displayed rate must move by one mine's
+	# yield -- immediately, on this frame.
+	var turn_before := c.galaxy.turn
+	posted.emit_signal("pressed")
+	sup.eq(c.galaxy.turn, turn_before, "and no turn was advanced to make it true")
+	sup.eq(ColonySim.workers_on(colony, &"mine"), 1, "the press posts one colonist")
+	var after_one := _signed_in(_row_for(_client.inspector.planet_label().text, "METAL"))
+	sup.near(after_one - start, per_mine, 0.001,
+		"posting one miner raises the displayed rate by exactly one mine")
+
+	# And a second, which is the case a count-based derivation could not distinguish from the
+	# first: the rate has to track the posting, not merely react to there being one.
+	posted.emit_signal("pressed")
+	sup.eq(ColonySim.workers_on(colony, &"mine"), 2, "the second press posts another")
+	var after_two := _signed_in(_row_for(_client.inspector.planet_label().text, "METAL"))
+	sup.near(after_two - after_one, per_mine, 0.001,
+		"posting a second miner raises it again, not just the first time")
+
+	# Pulling one off has to move it back down by the same amount, or the rate is a one-way
+	# latch rather than a readout.
+	var pulled := _client.macros.staffing_less_button(&"mine")
+	sup.ok(pulled != null, "the mine row carries a - button as well")
+	if pulled == null:
+		return
+	pulled.emit_signal("pressed")
+	sup.eq(ColonySim.workers_on(colony, &"mine"), 1, "the press pulls one colonist off")
+	var after_pull := _signed_in(_row_for(_client.inspector.planet_label().text, "METAL"))
+	sup.near(after_two - after_pull, per_mine, 0.001,
+		"and the displayed rate falls back by the same amount")
+	sup.near(after_pull, after_one, 0.001, "landing exactly on the one-miner figure again")
+
+	# The whole point of routing both the panel and the build gate through one function: the
+	# number on screen is the number the resolver uses, not a lookalike.
+	sup.near(_signed_in(_row_for(_client.inspector.planet_label().text, "METAL")),
+		ColonySim.metal_output(colony, _defs.get("buildings") as Dictionary), 0.001,
+		"and the panel still agrees with the figure the turn will credit")
+
+
+## The Show/Hide Flight Paths toggle, beneath Travel, drives the map's overlay.
+##
+## The overlay itself was drawn but nothing on screen reached it: the flag existed on the map
+## view and on the client root and no control ever set it, so "draw every fleet's route" was
+## unreachable in a game rather than off by default. This presses the button the player presses
+## and checks the map, the controller and the button's own label all follow -- a toggle whose
+## text is written once at build time would leave "Show Flight Paths" over a board that is
+## already showing them.
+func _step_flight_path_toggle() -> void:
+	sup.begin("flight path toggle")
+	if _client == null or _client.controller == null or _client.map == null:
+		return
+	if _client.fleets == null:
+		return
+	var c := _client.controller
+	var view := _client.map.view()
+
+	var button := _client.fleets.flight_paths_button()
+	sup.ok(button != null, "there is a flight-path control on the fleet panel")
+	if button == null:
+		return
+	# Under Travel, which is the other half of the same question: Travel sends one fleet
+	# somewhere, this shows where everything already is.
+	sup.eq(button.get_parent().get_child(
+		button.get_parent().get_children().find(button) - 1).name,
+		_client.fleets.travel_button().name,
+		"and it sits directly beneath Travel")
+
+	sup.ok(not view.flight_paths_enabled(), "the overlay starts hidden")
+	sup.eq(button.text, "Show Flight Paths", "and the button offers to show it")
+
+	# Counted rather than asserted as zero: earlier steps stage orders on purpose, and what is
+	# under test is whether *these two presses* added any. An absolute zero would be a
+	# statement about the previous step's bookkeeping rather than about the toggle.
+	var staged_before := c.pending_orders().size()
+
+	button.emit_signal("pressed")
+	sup.ok(view.flight_paths_enabled(), "pressing it turns the overlay on")
+	sup.ok(c.flight_paths_shown(), "and the controller agrees")
+	sup.eq(button.text, "Hide Flight Paths", "so the label now offers to hide it")
+
+	button.emit_signal("pressed")
+	sup.ok(not view.flight_paths_enabled(), "pressing it again turns the overlay off")
+	sup.ok(not c.flight_paths_shown(), "and the controller agrees")
+	sup.eq(button.text, "Show Flight Paths", "so the label offers to show it again")
+
+	# Nothing about the fleets changed: it is a view option, not an order, and a toggle that
+	# moved a ship would be a very surprising button to find in a panel.
+	sup.ok(c.galaxy != null, "and no order was queued for the overlay")
+	sup.eq(c.pending_orders().size(), staged_before, "neither press staged an order")
+
+
+## No hull is offered on a colony with no Space Port, whatever the empire has unlocked.
+##
+## `hull_available` answers "may this hull ever be laid *somewhere*", and a population
+## milestone unlocks a hull empire-wide -- so the dropdown listed capital ships on a world with
+## no shipyard standing on it. `can_build_ship` refused the press, which left a row in the menu
+## that silently did nothing when chosen: exactly the build button that looks affordable and
+## is not.
+func _step_space_port_gates_the_ship_list() -> void:
+	sup.begin("space port gates the ship list")
+	if _client == null or _client.controller == null or _client.macros == null:
+		return
+	var c := _client.controller
+	var me := c.player()
+	var colony := _first_colony()
+	if colony == null or me == null:
+		sup.ok(false, "the player has a colony and a faction")
+		return
+	c.select_planet(colony.index)
+	_client.select_colony(colony.index)
+
+	# Strip the yard rather than assuming the fixture's colony has none: a milestone in an
+	# earlier step may have laid a Space Port.
+	var had_port := colony.count(&"space_port")
+	colony.structures.erase(&"space_port")
+	colony.building_queue.clear()
+	# A hull the empire definitely owns, so the assertion cannot pass by the unlock being
+	# absent. The milestone ladder grants these at zero population.
+	me.unlocked_ships[&"cruiser"] = true
+	sup.ok(me.unlocked_ships.has(&"cruiser"), "the empire has unlocked a hull it cannot build")
+
+	sup.ok(TurnResolver.hulls_available_at(colony, me).is_empty(),
+		"no hull is offered on a world with no Space Port")
+	_client.macros.refresh()
+	var rows := _hull_ids_in_menu()
+	sup.eq(rows.size(), 0, "and the dropdown lists no ships at all")
+	sup.ok(not rows.has(&"cruiser"),
+		"specifically not the one the empire has unlocked")
+	# Planetary buildings are still offered: the gate is about the shipyard, not the menu.
+	sup.ok(_client.macros.build_selector().item_count > 0,
+		"planetary buildings are still listed")
+	# And the press is refused, so the menu and the resolver agree rather than the menu being
+	# the only thing that changed.
+	sup.ok(not TurnResolver.can_build_ship(colony, _defs.call("ship_hull", &"cruiser") as Resource,
+		me, _db),
+		"and the resolver would refuse the press")
+
+	# A Space Port opens the gate, and the hulls come back.
+	colony.structures[&"space_port"] = 1
+	sup.ok(TurnResolver.hulls_available_at(colony, me).has(&"cruiser"),
+		"a Space Port makes the unlocked hull buildable")
+	_client.macros.refresh()
+	rows = _hull_ids_in_menu()
+	sup.ok(rows.has(&"cruiser"), "and the dropdown lists it")
+	sup.ok(rows.has(&"corvette"), "along with the baseline berths the port hands over")
+
+	# Put the fixture back, so later steps run against the state they expect.
+	if had_port > 0:
+		colony.structures[&"space_port"] = had_port
+	else:
+		colony.structures.erase(&"space_port")
+	_client.macros.refresh()
 
 
 ## The signed figure inside a readout row's brackets, or 0.

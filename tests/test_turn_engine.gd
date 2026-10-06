@@ -2746,13 +2746,21 @@ func _test_colony_sim() -> void:
 	sup.ok(plenty != null, "a second world exists for the per-turn production test")
 	if plenty == null:
 		return
-	# Sixty mines is 300 metal a turn: it sustains a Corvette (75) and a Cruiser (300) and
-	# nothing above them.
+	# Sixty *worked* mines is 300 metal a turn: it sustains a Corvette (75) and a Cruiser (300)
+	# and nothing above them.
+	#
+	# Sixty mines standing is not, and that is the point rather than an inconvenience. A mine
+	# produces while somebody is posted to it, so sixty mines needs sixty colonists -- and this
+	# used to read 300 off the structure count alone, which was a figure the resolver never
+	# credited and `PER_TURN` mode was therefore gating against. The colony below is staffed
+	# through the real `assign_worker`, so the number quoted here is one the turn pays.
 	_set_structures(plenty, {&"space_port": 1, &"mine": 60})
-	plenty.population = 4.0
+	plenty.population = 60.0
 	plenty.food_stock = 1000.0
+	_staff_all(plenty)
+	sup.eq(ColonySim.workers_on(plenty, &"mine"), 60, "all sixty mines are worked")
 	var metal_per_turn := TurnResolver.metal_output_per_turn(plenty)
-	sup.near(metal_per_turn, 300.0, 0.001, "sixty mines produce 300 metal a turn")
+	sup.near(metal_per_turn, 300.0, 0.001, "sixty worked mines produce 300 metal a turn")
 	sup.ok(metal_per_turn >= float(corvette.get("cost_metals")),
 		"which sustains a hull as cheap as a Corvette")
 	sup.ok(metal_per_turn < float(leviathan.get("cost_metals")),
@@ -2771,9 +2779,12 @@ func _test_colony_sim() -> void:
 	_set_structures(stingy, {&"space_port": 1, &"mine": 4})
 	stingy.population = 4.0
 	stingy.food_stock = 1000.0
+	_staff_all(stingy)
 	stingy.build_mode = int(Enums.BuildMode.PER_TURN)
+	sup.near(TurnResolver.metal_output_per_turn(stingy), 20.0, 0.001,
+		"four worked mines produce 20 a turn")
 	sup.ok(TurnResolver.metal_output_per_turn(stingy) < float(corvette.get("cost_metals")),
-		"a colony with four mines produces 20 a turn")
+		"which is less than a Corvette costs")
 	sup.ok(not TurnResolver.can_build_ship(stingy, corvette, gship.faction(0), _db),
 		"so per-turn mode refuses even a Corvette")
 

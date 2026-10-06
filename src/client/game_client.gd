@@ -140,10 +140,23 @@ func prompt_text() -> String:
 
 
 ## Turn the all-fleets flight-path overlay on or off.
+##
+## The controller holds the flag and the map draws from it, so the toggle button, this and the
+## map's own copy cannot end up describing different states. A local mirror here as well was a
+## second answer to the same question and one more thing to forget to update.
 func set_flight_paths(on: bool) -> void:
 	flight_paths = on
+	if controller != null:
+		controller.set_flight_paths(on)
 	if map != null:
 		map.set_flight_paths(on)
+
+
+## The fleet panel's overlay toggle. Routed through here so the map redraws on the same press
+## that changed the label.
+func _on_flight_paths_toggled(on: bool) -> void:
+	set_flight_paths(on)
+	_log_line("flight paths %s" % ("shown" if on else "hidden"))
 
 
 ## Mount the background music.
@@ -357,6 +370,7 @@ func _wire() -> void:
 	map.order_cancelled.connect(_on_order_cancelled)
 	fleets.fleet_selected.connect(_on_fleet_selected)
 	fleets.travel_requested.connect(_on_travel_requested)
+	fleets.flight_paths_toggled.connect(_on_flight_paths_toggled)
 	fleets.land_requested.connect(_on_land_requested)
 	fleets.cargo_requested.connect(_on_cargo_requested)
 	travel.travel_confirmed.connect(_on_travel_confirmed)

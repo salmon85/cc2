@@ -1165,6 +1165,30 @@ func is_networked() -> bool:
 	return turn_submitter != null
 
 
+## Whether every transit fleet's route is currently drawn on the map.
+##
+## The map owns this flag rather than the fleet panel, and the panel asks here rather than
+## keeping a second copy: two booleans that are supposed to agree are one boolean and a bug.
+var flight_paths := false
+
+
+## The current state of the route overlay, for the button that controls it.
+func flight_paths_shown() -> bool:
+	return flight_paths
+
+
+## Show or hide every transit route.
+##
+## Purely presentational, and deliberately not an order: nothing about what the fleets are
+## doing changes, so this belongs to the client and never travels. `GameClient` owns the call
+## through to the map's drawing code, which is the only thing that acts on it.
+func set_flight_paths(on: bool) -> void:
+	if flight_paths == on:
+		return
+	flight_paths = on
+	state_changed.emit()
+
+
 ## How many players the server says have readied, and how many it is waiting for.
 ##
 ## From the server rather than counted locally: only the server knows whether a flag

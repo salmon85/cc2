@@ -527,15 +527,22 @@ static func capacity_for(planet: PlanetState, buildings: Dictionary, db: Node) -
 ## asks for and is also the only version that means anything to a player: the turn in which
 ## the food was produced has already been reported, so a warning about it is a note in the
 ## next turn's news. `pending_food_overflow` is the flag that carries it across the turn
-## boundary; it is deliberately not serialised, so a save taken mid-turn loses it rather
-## than manufacturing a warning for a colony that has since been given a granary.
+## boundary.
+##
+## A serialised field on the planet rather than node metadata, and deliberately so. The flag is
+## read by the next turn's resolution, so leaving it out of the save form made a round-trip
+## resolve a different turn than the state it came from: the live colony reported the overflow
+## it had earned, its copy did not, and the two state hashes diverged. The old note here argued
+## that a mid-turn save should not manufacture a warning for a colony that has since been given
+## a granary -- but the granary changes `food_capacity`, and the overflow being reported is the
+## one that already happened, before the granary existed.
 static func _bank_food(
 	planet: PlanetState, net: float, db: Node, report: Report
 ) -> void:
 	# Raise last turn's warning, if one was earned.
-	if planet.get_meta("pending_food_overflow", false):
+	if planet.pending_food_overflow:
 		_add_warning(planet, &"food_overflow")
-		planet.set_meta("pending_food_overflow", false)
+		planet.pending_food_overflow = false
 
 	planet.food_stock += net
 	if planet.food_stock < 0.0:
@@ -543,7 +550,7 @@ static func _bank_food(
 
 	if planet.food_stock > planet.food_capacity:
 		report.food_overflowed = true
-		planet.set_meta("pending_food_overflow", true)
+		planet.pending_food_overflow = true
 		planet.food_stock = planet.food_capacity
 
 
@@ -636,6 +643,19 @@ static func _unattended_output(
 static func _metal_output(planet: PlanetState, buildings: Dictionary) -> float:
 	return _output_for(planet, buildings, &"mine", "metal_per_turn") \
 		+ _unattended_output(planet, buildings, "metal_per_turn")
+
+
+## This colony's metal income for the coming turn, before the faction's mining bonus.
+##
+## The public face of `_metal_output`, and what the planet detail panel and the `PER_TURN` ship
+## gate both read. It exists because they used to re-derive the figure from the structure
+## table instead, which paid for every mine the colony *had* rather than the ones somebody was
+## posted to -- so posting a worker moved the stockpile and the turn's income and left the
+## displayed rate exactly where it was. One function, two readers, no second derivation.
+static func metal_output(planet: PlanetState, buildings: Dictionary) -> float:
+	if planet == null:
+		return 0.0
+	return _metal_output(planet, buildings)
 
 
 ## Output from the worked copies of one structure kind.

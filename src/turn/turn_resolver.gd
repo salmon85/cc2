@@ -402,39 +402,38 @@ static func can_build_ship(
 ## The colony's metal output this turn, which is what `PER_TURN` mode is measured against
 ## and what the planet detail panel shows as the per-turn delta.
 ##
-## Read from the structure table rather than from `reserve_metals`. The stockpile is a balance
-## that a colony can top up once and then coast on, which would let a player switch on
-## per-turn mode for one turn, queue a fleet, and switch it off again -- the mode would be a
-## way of skipping the production requirement rather than a statement about the colony.
+## Delegated to `ColonySim` rather than re-derived, because this function used to walk the
+## structure table and pay for *every* mine the colony had. That made it a different quantity
+## from the figure the turn actually credits -- `ColonySim._metal_output` pays only the mines
+## somebody is posted to -- and the two disagreed by exactly the thing the player is deciding.
+## Posting a worker to a mine changed the stockpile and the turn, and left this number and the
+## panel quoting it untouched until the turn resolved; pulling one off did the reverse.
 ##
-## With a `buildings` table, staffing is honoured: a mine nobody is working produces nothing.
-## The panel passes the table so the number it shows is the number the turn will credit; the
-## build gate passes nothing so it cannot be tripped by a definition that failed to load.
+## Reading from the stockpile instead would be worse: that is a balance a colony can top up
+## once and then coast on, which would let a player switch on per-turn mode for one turn, queue
+## a fleet, and switch it off again -- the mode would be a way of skipping the production
+## requirement rather than a statement about the colony.
+##
+## With no `buildings` table the per-copy yield falls back to the authored figure rather than
+## to zero, so a build gate cannot be tripped by a definition that failed to load.
 static func metal_output_per_turn(
 	planet: PlanetState, buildings: Dictionary = {}
 ) -> float:
 	if planet == null:
 		return 0.0
-	var total := 0.0
-	var hands := int(floor(planet.population))
-	for building_id: StringName in planet.structures:
-		if building_id != &"mine":
-			continue
-		var count := int(planet.structures[building_id])
-		if count <= 0:
-			continue
-		var per_mine := MINES_PER_STRUCTURE
-		if not buildings.is_empty():
-			var def: Resource = buildings.get(building_id, null) as Resource
-			if def == null:
-				continue
-			if int(def.get("pop_required")) > 0 and hands <= 0:
-				continue
-			per_mine = float(def.get("metal_per_turn"))
-			if int(def.get("pop_required")) > 0:
-				hands -= mini(count, hands)
-		total += float(count) * per_mine
-	return total
+	if buildings.is_empty():
+		return _unrostered_metal_output(planet)
+	return ColonySim.metal_output(planet, buildings)
+
+
+## Mine output for a colony whose definition table could not be loaded.
+##
+## Only the worked copies count, so the staffing rule survives the missing table: a colony
+## with mines and nobody posted to them produces nothing here too, which is the reading the
+## table would have given. What is lost is the authored per-mine yield, and the fixed figure
+## below stands in for it.
+static func _unrostered_metal_output(planet: PlanetState) -> float:
+	return float(ColonySim.workers_on(planet, &"mine")) * MINES_PER_STRUCTURE
 
 
 ## A Mine makes the design document's fixed 5 metal a turn.
@@ -531,8 +530,19 @@ static func hull_available(
 
 ## Every hull id layable at `planet`, in `GameDB.HULL_LADDER` order then the remaining
 ## starters, so a caller rendering a menu lists the same set in the same order.
+##
+## Empty on a world with no Space Port, whatever the empire has unlocked.
+##
+## That gate is not `hull_available`, which answers "may this hull ever be laid *somewhere*"
+## and is deliberately about the empire rather than the world -- a milestone-unlocked hull is
+## known to the player with no shipyard standing anywhere. This is the narrower question a
+## *menu* asks: what can go in this colony's yard right now. `can_build_ship` already refused
+## a portless colony, so without this the dropdown offered a row that the resolver would drop
+## on the floor the moment it was pressed -- a build button that looks affordable and is not.
 static func hulls_available_at(planet: PlanetState, faction: FactionState) -> Array[StringName]:
 	var out: Array[StringName] = []
+	if planet == null or planet.count(&"space_port") <= 0:
+		return out
 	var ladder: Array = GameDB.HULL_LADDER as Array
 	for hull_id: Variant in ladder:
 		var id := StringName(hull_id)

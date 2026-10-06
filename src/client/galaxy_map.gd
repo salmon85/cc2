@@ -781,6 +781,9 @@ func flight_paths_enabled() -> bool:
 ## world.
 func set_flight_paths(on: bool) -> void:
 	_view.set_flight_paths(on)
+	# The overlay is drawn in `_draw`, so a board that is already on screen shows nothing until
+	# it is asked to redraw. `set_flight_paths` on the view only sets the flag.
+	_view.queue_redraw()
 
 
 ## Re-frame whenever the map gains area, unless the player has framed it themselves.

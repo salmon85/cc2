@@ -101,9 +101,20 @@ func _refresh_planet() -> void:
 	#
 	# Naming is the part that does cross the fog: a name is something somebody surveyed and
 	# recorded, and it is the identifier a player reuses across turns.
-	if not _planet_detail_known(p):
+	#
+	# Two different things a player cannot have, said differently.
+	#
+	# A world nobody has been near at all is UNSURVEYED: the player does not know it is there
+	# in any meaningful sense, and saying nothing is the honest report. A world they have been
+	# near is NO INTEL -- they know it exists and roughly what it looks like, and the contents
+	# are somebody else's business. One grey placeholder for two unrelated facts either gave
+	# away a rival's economy or told a player visiting an empty rock that nothing at all was
+	# known about it.
+	if not _economy_known(p):
 		lines.append("")
-		lines.append("[color=#%s]UNSURVEYED[/color]" % CC2Theme.WHITE_DIM.to_html(false))
+		lines.append("[color=#%s]%s[/color]" % [
+			CC2Theme.WHITE_DIM.to_html(false),
+			"UNSURVEYED" if not _world_visited(p) else "NO INTEL"])
 		_planet_label.text = "\n".join(lines)
 		return
 
@@ -118,12 +129,9 @@ func _refresh_planet() -> void:
 	# to ask the colony rather than to trust that somebody remembered to tell the panel.
 	p.refresh_capacities(_controller.db)
 
-	# A world the player has merely visited reports no economy at all.
-	#
-	# It used to print `POPULATION 0 (0/0)` and `METAL 0 (+0)` -- zeros that were true, but
-	# indistinguishable from a colony that had collapsed, and they filled the panel of every
-	# rock on the board with rows about nothing. Stating that there is no colony is one line
-	# and says more than four rows of zeroes.
+	# The player's *own* bare world: there is no economy to report, and saying so is one line
+	# where four rows of zeroes used to be. This is the only uncolonised world that reaches
+	# this point -- every other one is refused above.
 	if not p.colonized:
 		lines.append("[color=#%s]NO COLONY[/color]" % CC2Theme.WHITE_DIM.to_html(false))
 		_planet_label.text = "\n".join(lines)
@@ -224,17 +232,32 @@ func _known_name(p: PlanetState) -> String:
 
 ## Whether the player may see this body's economy.
 ##
-## A world the player owns is always known. A world owned by somebody else is known only
-## when the player has a fleet parked *on that world specifically*. Consulting the owning
-## *system* instead -- which is what this used to do -- is a real over-reveal now that
-## there is one system: every world in the game orbits the same star, so "I know who owns
-## the system" trivially became "I know the economy of every planet on the map" the moment
-## a single ship was anywhere at all.
-func _planet_detail_known(p: PlanetState) -> bool:
+## **Only their own.** Not "known", not "visited" -- owned.
+##
+## This used to admit a surveyed world and any world with one of the player's fleets parked on
+## it, on the reasoning that a scout sweep had earned it. Both of those are how a rival's
+## colony gets read off the panel: population, stockpile, food balance and the whole structure
+## roster of an empire that has done nothing but be a few hundred parsecs away. Sweeping a world
+## tells you what kind of rock it is; it does not tell you what is standing on it, and nothing
+## in the design says a scout should.
+##
+## The two looser cases are not thrown away, they are reported differently. `_world_visited`
+## decides between UNSURVEYED and NO INTEL, so the player still learns that the world is there
+## and that they have been near it -- which is the part they earned -- without being handed the
+## contents they did not.
+func _economy_known(p: PlanetState) -> bool:
 	if _controller == null or p == null:
 		return false
-	if p.owner == _controller.player_id:
-		return true
+	return p.owner == _controller.player_id
+
+
+## Whether the player has been near this world at all: swept it, or put a ship in orbit.
+##
+## The bar between "I do not know this exists" and "I know this exists and it is not mine".
+## Both are facts about the player's own knowledge, and neither is a fact about the world.
+func _world_visited(p: PlanetState) -> bool:
+	if _controller == null or p == null:
+		return false
 	if p.surveyed:
 		return true
 	for f in _controller.galaxy.fleets_of(_controller.player_id):

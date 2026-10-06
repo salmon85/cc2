@@ -201,13 +201,14 @@ static func star_layers(colour: Color) -> Array:
 ## making planets the clickable thing did not loosen it.
 func _draw_planet(galaxy: GalaxyState, p: PlanetState) -> void:
 	var pos := p.position
-	# Fog silhouette, and nothing else. No text of any kind is drawn for a body the player has
-	# not found: an "Unknown Planet" label on a dark disc is a label, and a hundred of them is
-	# a hundred strings covering the board the player is supposed to be discovering.
-	if not p.surveyed and not label_worth_drawing(p):
-		draw_arc(pos, UNKNOWN_MARKER_RADIUS, 0.0, TAU, 16, UNKNOWN_MARKER_COLOUR, 1.5)
-		return
-
+	# The body is drawn for every world, found or not.
+	#
+	# This used to substitute a hollow grey ring for any planet the player had not found. The
+	# silhouette carried no information -- it was the same marker for an ice world, a jungle
+	# and a rock -- and it cost the board its texture: a field of identical grey circles reads
+	# as an empty map, and the player cannot see that there is anywhere to go. What the fog
+	# actually withholds is the *name* and the *contents*, both of which are gated below and in
+	# the inspector. A world is a rock in space whether or not anybody has looked at it.
 	_draw_planet_body(pos, p)
 
 	# An owned world gets a filled owner ring and a colony tick, because "is that mine" is
