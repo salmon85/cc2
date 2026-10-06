@@ -4,7 +4,7 @@
 
 [resource]
 script = ExtResource("1_bd")
-id = &"colony_pad"
+id = &"colony_ship_building"
 display_name = "Colony Ship"
 kind = 13
 cost_metals = 0.0
@@ -24,4 +24,4 @@ power_required = 0.0
 food_store = 0.0
 energy_store = 0.0
 metal_per_turn = 5.0
-description = "A landed colony ship. Generates +5 food, +5 metal and +5 power per turn. Houses 5 pop. One per world."
+description = "A landed colony ship. Not built: a Colony Ship flies here and is consumed on landing. Generates +5 food, +5 metal and +5 power per turn. Houses 5 pop. One per world."

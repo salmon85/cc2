@@ -449,8 +449,11 @@ func queue_build_ship(hull_id: StringName) -> bool:
 	var me := player()
 	if me == null:
 		return false
-	if not me.unlocked_ships.has(hull_id):
-		action_rejected.emit("that hull is not in your fleet roster yet")
+	# A Space Port on this world hands over the six baseline hulls with no research and no
+	# milestone, so the unlock check asks the resolver rather than reading the faction's
+	# unlock set -- otherwise the port would be a button that refuses.
+	if not TurnResolver.hull_available(planet, hull_id, me):
+		action_rejected.emit("that hull is not available at this colony")
 		return false
 	if defs == null:
 		action_rejected.emit("definitions are not loaded")
@@ -472,6 +475,51 @@ func queue_build_ship(hull_id: StringName) -> bool:
 		return true
 	action_rejected.emit("the order was refused")
 	return false
+
+
+## Land the selected fleet's Colony Ship on the world it is parked over.
+##
+## The Colony Ship is the one structure that cannot be built: it flies here and is consumed on
+## arrival, leaving the housing, food, metal and power a landed colony ship provides. Returns
+## false and explains when the fleet has no kit, is under way, or the world already has one.
+func land_colony_ship() -> bool:
+	var f := fleet()
+	if f == null:
+		action_rejected.emit("select a fleet first")
+		return false
+	if f.destination >= 0:
+		action_rejected.emit("that fleet is under way")
+		return false
+	var planet: PlanetState = null
+	if galaxy != null:
+		planet = galaxy.planet(f.system) as PlanetState
+	if planet == null:
+		action_rejected.emit("that fleet is not parked over a world")
+		return false
+	var faction := player()
+	if faction == null:
+		return false
+	if not InvasionStage.land_colony_ship(galaxy, f, planet, faction):
+		if not f.has_colony_ship():
+			action_rejected.emit("that fleet carries no Colony Ship")
+		elif planet.colonized:
+			action_rejected.emit("that world is already settled")
+		else:
+			action_rejected.emit("that world already has a landed Colony Ship")
+		return false
+	state_changed.emit()
+	return true
+
+
+## Whether the selected fleet could land its Colony Ship right now.
+##
+## A question rather than an action, so the fleet panel's button can be disabled with a reason
+## instead of offering something that is guaranteed to be refused.
+func can_land_colony_ship() -> bool:
+	var f := fleet()
+	if f == null or galaxy == null or f.destination >= 0 or f.system < 0:
+		return false
+	return InvasionStage.can_land_colony_ship(f, galaxy.planet(f.system))
 
 
 ## Convert one civilian on the selected colony into one troop.
@@ -497,10 +545,11 @@ func queue_recruit_troop() -> bool:
 	return false
 
 
-## Spend `metals` of the selected colony's stored metal against its construction.
+## Transfer `metals` from the selected colony's storage against its construction.
 ##
-## The clickable progress bar's whole mechanic. Bounded by what the colony actually holds, so
-## pressing the bar with a small store still does the useful thing rather than being refused.
+## The boost modal's whole mechanic. Clamped to what the colony holds *and* to what the project
+## still owes, so the caller cannot overpay by accident; the metal leaves storage exactly once
+## and is never returned when the structure lands.
 func boost_construction(metals: float) -> float:
 	var planet := _selected_owned_planet()
 	if planet == null:
@@ -508,12 +557,22 @@ func boost_construction(metals: float) -> float:
 	if planet.building_queue.is_empty():
 		action_rejected.emit("nothing is under construction")
 		return 0.0
-	var spent := ColonySim.boost_construction(planet, metals)
+	var spent := ColonySim.boost_construction(planet, metals, _building_table())
 	if spent <= 0.0:
-		action_rejected.emit("no stored metal to spend")
+		action_rejected.emit("nothing more to spend on this project")
 		return 0.0
 	state_changed.emit()
 	return spent
+
+
+## The building registry, or an empty dictionary when the autoload is missing.
+##
+## Passed as an empty table rather than null so `ColonySim` degrades to the unbounded clamp in
+## a bare headless run, instead of refusing every boost.
+func _building_table() -> Dictionary:
+	if defs == null:
+		return {} as Dictionary
+	return defs.get("buildings") as Dictionary
 
 
 ## Choose single-project or per-turn ship production on the selected colony.

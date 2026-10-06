@@ -25,6 +25,10 @@ var _detail: RichTextLabel = null
 var _travel_button: Button = null
 var _hint: Label = null
 
+## Land the fleet's Colony Ship on the world it is over. Only shown when that is legal, so
+## the button is a statement rather than a question.
+var _land_button: Button = null
+
 ## The destination the player has proposed, or -1. The modal owns the actual workflow now.
 var _proposal: int = -1
 
@@ -56,6 +60,17 @@ func _build() -> void:
 	_travel_button.focus_mode = Control.FOCUS_NONE
 	_travel_button.pressed.connect(_on_travel_pressed)
 	col.add_child(_travel_button)
+
+	# The Colony Ship is the one structure a colony cannot build: it flies here and is spent.
+	# The button is enabled only when the fleet actually carries one over an unclaimed world,
+	# because "no kit aboard" and "already settled" are two different reasons a press would
+	# be refused and a player deserves to see which before pressing.
+	_land_button = Button.new()
+	_land_button.text = "Land Colony Ship"
+	_land_button.tooltip_text = "Consume this fleet's Colony Ship to settle the world below"
+	_land_button.focus_mode = Control.FOCUS_NONE
+	_land_button.pressed.connect(_on_land_pressed)
+	col.add_child(_land_button)
 
 	_hint = Label.new()
 	_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -91,7 +106,18 @@ func refresh() -> void:
 	if current != _reported_fleet:
 		_reported_fleet = current
 		fleet_selected.emit(current)
+	_refresh_land_button()
 	_refresh_detail()
+
+
+## Enable the landing button only when a landing would actually be accepted.
+func _refresh_land_button() -> void:
+	if _land_button == null:
+		return
+	var landable := _controller.can_land_colony_ship()
+	_land_button.visible = landable
+	_land_button.disabled = not landable
+	_land_button.tooltip_text = "Consume this fleet's Colony Ship to settle the world below"
 
 
 func _refresh_detail() -> void:
@@ -153,9 +179,21 @@ func _on_travel_pressed() -> void:
 	travel_requested.emit()
 
 
+## Consume the fleet's Colony Ship and settle the world it is over.
+##
+## Routed through the client root rather than mutating state here, so the log and the panels
+## hear about it the same way every other action reaches them.
+func _on_land_pressed() -> void:
+	land_requested.emit()
+
+
 ## Emitted when the player asks for the travel workflow. The client root owns the modal,
 ## because the modal has to overlay the map and the map is a sibling of this panel.
 signal travel_requested
+
+
+## Emitted when the player presses the landing button.
+signal land_requested
 
 
 # --- Proposal compatibility -------------------------------------------------
@@ -213,6 +251,11 @@ func travel_button() -> Button:
 	return _travel_button
 
 
+## The Land Colony Ship button, shown only when a landing is legal.
+func land_button() -> Button:
+	return _land_button
+
+
 func detail() -> RichTextLabel:
 	return _detail
 
@@ -250,6 +293,8 @@ func visible_text() -> String:
 		parts.append(_hint.text)
 	if _travel_button != null:
 		parts.append(_travel_button.text)
+	if _land_button != null and _land_button.visible:
+		parts.append(_land_button.text)
 	return "\n".join(parts)
 
 

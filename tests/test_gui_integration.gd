@@ -58,11 +58,13 @@ func _initialize() -> void:
 		"instantiate", "scene_tree", "panels", "theme", "signals", "selection",
 		"map_draw", "hit_testing", "view_culling", "order_confirmation", "fleet_orders",
 		"illegal_orders",
-		"no_tax_or_research", "macro_progress_bar", "travel_modal",
+		"no_tax_or_research", "macro_progress_bar", "boost_modal",
+		"build_button", "landing_button", "travel_modal",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
 		"fog_fleet_markers", "fog_planet_names", "no_staged_orders", "map_bounds",
+		"planet_readouts",
 		"reproducible",
 		"teardown",
 	])
@@ -102,6 +104,9 @@ func _process(_delta: float) -> bool:
 		"illegal_orders": _step_illegal_orders()
 		"no_tax_or_research": _step_no_tax_or_research()
 		"macro_progress_bar": _step_macro_progress_bar()
+		"boost_modal": _step_boost_modal()
+		"build_button": _step_build_button_and_ship_list()
+		"landing_button": _step_landing_button()
 		"travel_modal": _step_travel_modal()
 		"macro_build": _step_macro_build()
 		"macro_map_stable": _step_macro_does_not_move_the_map()
@@ -116,6 +121,7 @@ func _process(_delta: float) -> bool:
 		"fog_planet_names": _step_fog_planet_names()
 		"no_staged_orders": _step_no_staged_orders()
 		"map_bounds": _step_map_bounds()
+		"planet_readouts": _step_planet_and_research_readouts()
 		"fog_fleet_markers": _step_fog_fleet_markers()
 		"reproducible": _step_reproducible()
 		"teardown": _step_teardown()
@@ -325,24 +331,25 @@ func _step_panels() -> void:
 		"the top bar has no End Turn button")
 	sup.ok(not _client.top_bar.has_method("orders_button"),
 		"the top bar has no Orders button and no pending-order counter")
-	sup.ok(_client.top_bar.stardate_label() != null, "top bar exposes the stardate readout")
-	sup.ok(_client.top_bar.treasury_label() != null, "top bar exposes the treasury readout")
-	sup.ok(_client.top_bar.research_label() != null, "top bar exposes the research readout")
-	# Net income is sign-coloured via BBCode, so this readout must be a RichTextLabel.
-	# A plain Label renders the tags literally, which is what the player saw.
-	var net := _client.top_bar.net_label()
-	sup.ok(net is RichTextLabel, "the net readout parses BBCode")
-	if net is RichTextLabel:
-		sup.ok((net as RichTextLabel).bbcode_enabled,
-			"the net readout has bbcode_enabled")
-		sup.ok(_client.top_bar.net_label().text.begins_with("[color="),
-			"the net readout carries colour markup")
-		# The rendered line must be the number, not the markup.
-		sup.ok(not _client.top_bar.net_label().get_parsed_text().contains("[color="),
-			"the parsed net text has no raw tags",
-			"parsed='%s'" % _client.top_bar.net_label().get_parsed_text())
-	else:
-		sup.ok(true, "net readout BBCode checks skipped (not a RichTextLabel)")
+	# The header is now two readouts. Three were removed: STARDATE (which duplicated TURN),
+	# IMPERIAL TREASURY and NET/TURN (income figures from the tax slider that no longer has
+	# anything to set). Asserted as absences, because an accessor quietly returning the wrong
+	# label would otherwise satisfy "the readout is non-null" for the wrong reason.
+	sup.ok(_client.top_bar.stardate_label() != null, "top bar still exposes a turn readout")
+	sup.eq(_client.top_bar.stardate_label(), _client.top_bar.treasury_label(),
+		"and the treasury accessor resolves to that same counter")
+	sup.ok(_client.top_bar.net_label() == null, "there is no net/turn readout")
+	sup.ok(_client.top_bar.research_label() != null, "top bar exposes the science readout")
+	var header := PackedStringArray()
+	_collect_text(_client.top_bar, header)
+	var header_text := "\n".join(header)
+	sup.ok(not header_text.contains("STARDATE"), "the stardate readout is gone",
+		"header=%s" % header_text.replace("\n", " | "))
+	sup.ok(not header_text.contains("IMPERIAL TREASURY"),
+		"the imperial treasury readout is gone")
+	sup.ok(not header_text.contains("NET / TURN"), "the net/turn readout is gone")
+	sup.ok(header_text.contains("TURN"), "and the turn counter remains")
+	sup.ok(header_text.contains("RESEARCH"), "alongside the research readout")
 	# The tax slider and the four research sliders are gone as of Phase 8, and the panel
 	# reports the absence rather than the suite asking a getter that no longer exists.
 	sup.ok(_client.macros.tax_slider() == null, "the macro panel has no tax slider")
@@ -769,7 +776,7 @@ func _step_order_confirmation() -> void:
 	# worth showing if the resolver actually spends it.
 	f.destination = -1
 	f.travelled = 0.0
-	c.pending_orders().clear()
+	c.queue.clear()
 	sup.ok(MovementStage.issue_move(gal, f.id, f.owner, dest), "a fresh order is accepted")
 	var spent := 0
 	while f.destination >= 0 and spent < 500:
@@ -974,16 +981,61 @@ func _step_macro_progress_bar() -> void:
 
 	var banked := colony.reserve_metals
 	sup.ok(banked > 0.0, "the colony has metal banked to spend", "%.1f" % banked)
-	_client.macros._on_build_bar_input(_left_click())
-	_client.macros.refresh()
-	sup.near(colony.reserve_metals, 0.0, 0.001,
-		"clicking the bar spent the colony's stored metal")
-	sup.ok(bar.value > 0.0, "and the bar advanced", "value=%.3f" % bar.value)
 
-	# The button and the order are wired the same way, so a click is not a special case.
-	var boost_line := _client.log_text()
-	sup.ok(boost_line.contains("CONSTRUCTION BOOSTED"),
-		"the click is reported in the log", "tail=%s" % boost_line.strip_edges().split("\n")[-1])
+	# A click OPENS the dialog. It does not spend: a bare click used to hand the whole
+	# stockpile to the project, which is a very different thing from what pressing a bar means.
+	_client.macros._on_build_bar_input(_left_click())
+	sup.ok(_client.boost != null, "the client owns a boost modal")
+	if _client.boost == null:
+		return
+	_client.boost.refresh()
+	sup.ok(_client.boost.visible, "clicking the bar opens the dialog")
+	sup.near(colony.reserve_metals, banked, 0.001,
+		"and the click itself spends nothing")
+
+	# The dialog names the project and states the percentage already paid.
+	var shown := _client.boost.visible_text()
+	sup.ok(shown.contains("Granary"), "it names the project under construction",
+		"shown=%s" % shown.replace("\n", " | "))
+	sup.ok(shown.contains("0% complete"),
+		"and reports the completion percentage", "shown=%s" % shown.replace("\n", " | "))
+	sup.ok(shown.contains("How much metal do you want to transfer from storage?"),
+		"and asks the question it exists to ask")
+	sup.eq(_client.boost.ok_button().text, "OK", "with an OK button")
+	sup.eq(_client.boost.cancel_button().text, "CANCEL", "and a CANCEL button")
+
+	# --- the ceiling -----------------------------------------------------------
+	# The slider may not be dragged past what the project still owes. The colony holds far
+	# more metal than a Granary costs, so an uncapped slider would offer to hand over the
+	# whole stockpile and lose most of it.
+	var owed := ColonySim.metal_remaining(colony, _defs.get("buildings") as Dictionary)
+	var ceiling := _client.boost.amount_slider().max_value
+	sup.near(ceiling, owed, 0.001,
+		"the slider is capped at the metal the project still owes (cap=%.1f, owed=%.1f, stored=%.1f)" % [
+			ceiling, owed, banked])
+	sup.ok(banked > owed, "even though the colony holds more than that",
+		"stored=%.1f owed=%.1f" % [banked, owed])
+
+	# OK transfers that amount and debits storage by exactly it. Half, deliberately: topping
+	# the project up to full here would leave nothing for the CANCEL case to re-open.
+	var transfer := ceiling * 0.5
+	_client.boost.amount_slider().set_value_no_signal(transfer)
+	_client.boost.ok_button().emit_signal(&"pressed")
+	sup.ok(not _client.boost.visible, "OK closes the dialog")
+	_client.macros.refresh()
+	sup.near(colony.reserve_metals, banked - transfer, 0.001,
+		"OK moved exactly the chosen amount out of storage")
+	sup.ok(bar.value > 0.0, "and the bar advanced", "value=%.3f" % bar.value)
+	sup.ok(_client.log_text().contains("CONSTRUCTION BOOSTED"),
+		"the transfer is reported in the log")
+
+	# --- CANCEL moves nothing --------------------------------------------------
+	_client.boost.refresh()
+	sup.ok(_client.boost.open_for_selected_colony(), "the dialog reopens")
+	var before_cancel := colony.reserve_metals
+	_client.boost.cancel_button().emit_signal(&"pressed")
+	sup.ok(not _client.boost.visible, "CANCEL closes it")
+	sup.near(colony.reserve_metals, before_cancel, 0.001, "and moves no metal at all")
 
 
 func _left_click() -> InputEventMouseButton:
@@ -991,6 +1043,270 @@ func _left_click() -> InputEventMouseButton:
 	event.button_index = MOUSE_BUTTON_LEFT
 	event.pressed = true
 	return event
+
+
+## The construction menu's two halves: structures (Build button) and hulls (ship list).
+##
+## Both are Phase 8 corrections. The dropdown used to spend on selection, which meant
+## browsing the menu committed a purchase; and the ship list used to be driven purely by the
+## empire's research unlocks, so a Space Port was a building that produced nothing a player
+## could use until a milestone they might be turns from arrived.
+func _step_build_button_and_ship_list() -> void:
+	sup.begin("construction: build button and ship list")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var me := c.player()
+	var colony := _first_colony()
+	sup.ok(colony != null, "the player starts with a colony")
+	if colony == null or me == null:
+		return
+	c.select_planet(colony.index)
+	_client.select_colony(colony.index)
+	colony.building_queue.clear()
+	colony.build_turns_remaining = 0
+	colony.build_total_turns = 0
+	colony.build_metal = 0.0
+	colony.reserve_metals = 100000.0
+	for id: Variant in c.defs.get("buildings"):
+		me.unlocked_buildings[StringName(str(id))] = true
+	_client.macros.refresh()
+
+	# --- the Colony Ship is not in the construction menu -----------------------
+	# It is the one structure a colony cannot build: a Colony Ship flies to the world and is
+	# consumed on landing. Offering a Build button for it would be a lie.
+	var ship_names := PackedStringArray()
+	for i in _client.macros.build_selector().item_count:
+		var meta: Variant = _client.macros.build_selector().get_item_metadata(i)
+		if meta != null:
+			ship_names.append(StringName(str(meta)))
+	sup.ok(not ship_names.has(&"colony_ship_building"),
+		"the construction dropdown does not offer a landed Colony Ship",
+		"offers %s" % str(ship_names))
+	# The check is on the dropdown's own items and the panel's section headings, not on
+	# every string the panel renders: a planet the player has settled can legitimately be
+	# *named* something with "Colony" in it.
+	var panel_text := _client.macros.visible_text()
+	sup.ok(not panel_text.contains("CONSTRUCTION") or not panel_text.contains("Colony Ship
+"),
+		"nor does the construction section list it",
+		"shown=%s" % panel_text.replace("\n", " | "))
+
+	# --- the Build button actually starts the project --------------------------
+	c.queue.clear()
+	sup.ok(_client.macros.select_build(&"granary"), "a granary can be selected")
+	sup.eq(c.pending_orders().size(), 0, "selection alone stages nothing")
+	# Move the selection off the colony, so the Build button has somewhere to move it back
+	# from. With one system, "some other body" is just any other planet.
+	c.select_planet(_other_planet_index(colony.index))
+	sup.ok(_client.macros.build_button() != null, "the panel has a Build button")
+	sup.eq(_client.macros.build_button().text, "Build", "labelled 'Build'")
+	sup.eq(c.selected_planet, _other_planet_index(colony.index),
+		"the selection really is elsewhere before Build is pressed")
+	_client.macros.build_button().emit_signal(&"pressed")
+	sup.eq(c.pending_orders().size(), 1, "pressing it stages exactly one order")
+	var staged: Order = c.pending_orders()[0]
+	sup.eq(staged.type, Enums.OrderType.BUILD_STRUCTURE, "which is a BUILD_STRUCTURE")
+	sup.eq(staged.payload.get("building", ""), "granary", "for the selected structure")
+	# The regression this button exists alongside: browsing the dropdown used to be refused
+	# with "select one of your colonies first", because nothing moved the controller's
+	# selection off the body the player had clicked. Build adopts the highlighted colony.
+	sup.eq(staged.target_planet, colony.index,
+		"and Build adopts the colony the dropdown names")
+	c.queue.clear()
+
+	# --- the ship list follows the Space Port ----------------------------------
+	# Strip every unlock so the port is the only thing that can populate the list.
+	var saved := me.unlocked_ships.duplicate()
+	for hull_id: StringName in GameDB.PORT_HULLS as Array:
+		me.unlocked_ships.erase(hull_id)
+	me.unlocked_ships.erase(&"corvette")
+	me.unlocked_ships.erase(&"frigate")
+	colony.structures[&"space_port"] = 0
+	_client.macros.refresh()
+	sup.eq(_client.macros.ship_selector().item_count, 0,
+		"with no port and no unlocks the ship list is empty")
+	sup.ok(_client.macros.build_ship_button() != null, "the panel has a Build Ship button")
+	sup.ok(_client.macros.build_ship_button().disabled,
+		"which is disabled while there is nothing to build")
+
+	colony.structures[&"space_port"] = 1
+	_client.macros.refresh()
+	sup.eq(_client.macros.ship_selector().item_count, 6,
+		"a Space Port populates the list with the six baseline hulls (got %d)" % [
+			_client.macros.ship_selector().item_count])
+	var hull_names := PackedStringArray()
+	for i in _client.macros.ship_selector().item_count:
+		hull_names.append(StringName(str(_client.macros.ship_selector().get_item_metadata(i))))
+	for hull_id: StringName in GameDB.PORT_HULLS as Array:
+		sup.ok(hull_names.has(hull_id),
+			"the list offers %s" % hull_id)
+	sup.ok(not hull_names.has(&"leviathan"),
+		"and nothing above the Frigate, which still needs a milestone")
+	sup.ok(not _client.macros.build_ship_button().disabled,
+		"and the Build Ship button is now live")
+
+	# A port is a local grant: another colony with no port gets nothing.
+	var other: PlanetState = null
+	for p in c.player_colonies():
+		if p.index != colony.index:
+			other = p
+			break
+	if other != null:
+		other.structures.erase(&"space_port")
+		c.select_planet(other.index)
+		_client.macros.refresh()
+		sup.eq(_client.macros.ship_selector().item_count, 0,
+			"a colony without a port sees an empty list, not this one's")
+
+	c.select_planet(colony.index)
+	_client.macros.refresh()
+	me.unlocked_ships = saved
+	colony.building_queue.clear()
+	colony.build_turns_remaining = 0
+	colony.build_total_turns = 0
+	colony.build_metal = 0.0
+
+
+## The landing button appears only for a fleet that can actually settle the world below it.
+func _step_landing_button() -> void:
+	sup.begin("fleet: the Colony Ship landing button")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	sup.ok(_client.fleets.land_button() != null, "the panel exposes a landing button")
+	if _client.fleets.land_button() == null:
+		return
+
+	# A world nobody owns, and a fleet parked over it carrying a kit.
+	var target := -1
+	for p in c.galaxy.planets:
+		if p.owner < 0 and not p.colonized and p.index != c.selected_planet:
+			target = p.index
+			break
+	sup.ok(target >= 0, "there is an unclaimed world to settle")
+	if target < 0:
+		return
+	var carrier := _gen_fleet(0, target, {&"colony_ship": 1})
+	sup.ok(carrier != null, "a fleet with a kit is parked over it")
+	if carrier == null:
+		return
+	c.select_fleet(carrier.id)
+	sup.ok(c.can_land_colony_ship(), "so a landing is legal")
+	sup.ok(_client.fleets.land_button().visible,
+		"and the button is shown")
+	sup.ok(not _client.fleets.land_button().disabled, "and enabled")
+
+	# Pressing it settles the world and spends the ship.
+	var before_ships := carrier.ship_count()
+	_client.fleets.land_button().emit_signal(&"pressed")
+	sup.ok(c.galaxy.planet(target).colonized, "the world is settled")
+	sup.eq(c.galaxy.planet(target).owner, 0, "and owned by the player")
+	sup.eq(c.galaxy.planet(target).count(&"colony_ship_building"), 1,
+		"with the structure a landed Colony Ship leaves")
+	sup.eq(carrier.ship_count(), before_ships - 1, "and the ship itself is consumed")
+	sup.ok(_client.log_text().contains("COLONY SHIP LANDED"),
+		"the landing is reported in the log")
+
+	# The cap holds, so the button goes away again.
+	sup.ok(not c.can_land_colony_ship(),
+		"a second landing on the same world is no longer legal")
+	sup.ok(not _client.fleets.land_button().visible,
+		"and the button is hidden rather than offering a refusal")
+
+	# A fleet with no kit never shows it at all.
+	var escort := _gen_fleet(0, target, {&"corvette": 2})
+	if escort != null:
+		c.select_fleet(escort.id)
+		sup.ok(not c.can_land_colony_ship(), "a fleet with no Colony Ship cannot land")
+		sup.ok(not _client.fleets.land_button().visible,
+			"and shows no landing button")
+
+	c.selected_fleet = -1
+	_client.fleets.refresh()
+
+
+## A one-off fleet for a scenario, built the way generation builds them.
+func _gen_fleet(faction_id: int, planet_index: int, hulls: Dictionary) -> FleetState:
+	var c := _client.controller
+	var f := FleetState.new()
+	f.owner = faction_id
+	f.system = planet_index
+	f.destination = -1
+	f.bind_hulls(_defs.get("ship_hulls"))
+	for hull_id: StringName in hulls:
+		f.add_ships(hull_id, int(hulls[hull_id]))
+	c.galaxy.add_fleet(f)
+	return f
+
+
+## The boost modal's own behaviour: it refuses to open when there is nothing to put metal
+## into, and its ceiling is the lesser of storage and metal still owed.
+##
+## The progress-bar step drives the modal through the panel; this drives it directly so the
+## refusals are covered without having to arrange a colony that provokes each one.
+func _step_boost_modal() -> void:
+	sup.begin("boost modal")
+	if _client == null or _client.boost == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	sup.ok(colony != null, "the player starts with a colony")
+	if colony == null:
+		return
+	c.select_planet(colony.index)
+	_client.select_colony(colony.index)
+	colony.building_queue.clear()
+	colony.build_turns_remaining = 0
+	colony.build_metal = 0.0
+
+	# Nothing under construction: no dialog, because there is nothing to decide.
+	sup.ok(not _client.boost.open_for_selected_colony(),
+		"it refuses to open with nothing under construction")
+	sup.ok(not _client.boost.visible, "and stays hidden")
+
+	# A project, but a colony with no metal in it: still nothing to transfer.
+	colony.building_queue[&"granary"] = 1
+	colony.build_turns_remaining = 2
+	colony.build_total_turns = 2
+	var saved_metal := colony.reserve_metals
+	colony.reserve_metals = 0.0
+	sup.ok(not _client.boost.open_for_selected_colony(),
+		"and it refuses to open on an empty colony")
+	colony.reserve_metals = saved_metal
+
+	# Metal, but already paid for: the project owes nothing, so there is nothing to add.
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var cost := ColonySim.queued_cost(colony, buildings)
+	colony.build_metal = cost
+	sup.near(ColonySim.construction_progress(colony, buildings), 1.0, 0.001,
+		"the project reads as complete")
+	sup.ok(not _client.boost.open_for_selected_colony(),
+		"and it refuses to open on a finished project")
+	colony.build_metal = 0.0
+
+	# Half paid: the ceiling is exactly what is left owing, not the colony's whole store.
+	colony.build_metal = cost * 0.5
+	_client.boost.refresh()
+	sup.ok(_client.boost.open_for_selected_colony(), "with metal left owing it opens")
+	sup.near(_client.boost.amount_slider().max_value, cost * 0.5, 0.001,
+		"and the slider offers precisely what is owed")
+	sup.ok(saved_metal > cost * 0.5,
+		"which is less than the colony holds, so the cap is doing something (stored=%.1f, owed=%.1f)" % [
+			saved_metal, cost * 0.5])
+
+	# And the transfer is capped the same way on the way through, not merely on the slider.
+	# A caller that ignores the modal must not be able to drain the colony.
+	var before := colony.reserve_metals
+	var spent := c.boost_construction(colony.reserve_metals)
+	sup.near(spent, cost * 0.5, 0.001,
+		"the transfer is clamped to what the project owes, not to storage")
+	sup.near(colony.reserve_metals, before - cost * 0.5, 0.001,
+		"so only that much left storage")
+	colony.building_queue.clear()
+	colony.build_turns_remaining = 0
+	colony.build_total_turns = 0
+	colony.build_metal = 0.0
 
 
 ## The travel workflow, end to end: open, choose ships, confirm, and watch the order appear.
@@ -1207,6 +1523,128 @@ func _step_macro_does_not_move_the_map() -> void:
 	sup.eq(cam.zoom, zoom_before, "the camera did not re-zoom")
 
 
+## The planet detail panel's economy rows, and the research header's delta.
+##
+## Two readouts were re-specified: metal now carries its per-turn production, and population
+## carries how many of its people are working. The second is the interesting one -- idle pop is
+## the research budget, so "10 (5/5)" tells a player their colony is running at half its
+## research capacity without them having to work that out from two separate numbers.
+func _step_planet_and_research_readouts() -> void:
+	sup.begin("planet economy and research readouts")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var me := c.player()
+	var colony := _first_colony()
+	sup.ok(colony != null, "the player starts with a colony")
+	if colony == null or me == null:
+		return
+	c.select_planet(colony.index)
+	_client.select_colony(colony.index)
+
+	# --- metal: stock and per-turn production -----------------------------------
+	colony.structures = {&"mine": 3, &"granary": 1}
+	colony.population = 6.0
+	colony.reserve_metals = 599.0
+	_client.inspector.refresh()
+	var detail := _client.inspector.planet_label().text
+	sup.ok(detail.contains("METAL"),
+		"the detail panel shows metal", "shown=%s" % detail.replace("\n", " | "))
+	sup.ok(detail.contains("599"), "and the stockpile", "shown=%s" % detail.replace("\n", " | "))
+	# Three mines make fifteen a turn, so the row reads `599 (+15)`.
+	sup.ok(detail.contains("+15"),
+		"and the per-turn production beside it",
+		"shown=%s" % detail.replace("\n", " | "))
+
+	# An unstaffed mine produces nothing, so the delta has to fall with the workforce --
+	# otherwise the panel is quoting a figure the turn will not credit.
+	colony.population = 0.0
+	_client.inspector.refresh()
+	var idle := _client.inspector.planet_label().text
+	sup.ok(idle.contains("METAL"), "the metal row is still present with no civilians")
+	sup.ok(not idle.contains("+15"),
+		"but a colony with nobody to work its mines shows no production",
+		"shown=%s" % idle.replace("\n", " | "))
+
+	# --- population: total, employed, idle ---------------------------------------
+	colony.population = 10.0
+	# Three mines and a farm: four jobs, six idle.
+	colony.structures = {&"mine": 3, &"farm": 1, &"granary": 1}
+	_client.inspector.refresh()
+	detail = _client.inspector.planet_label().text
+	sup.ok(detail.contains("POPULATION"), "the detail panel shows population")
+	# `10 (4/10)`: ten people, four of them working. The second pair is employed/total, so a
+	# colony at half capacity reads `10 (5/10)` and the idle remainder is the difference.
+	sup.ok(detail.contains("10 (4/10)"),
+		"as total (employed/total): ten people, four of them working",
+		"shown=%s" % detail.replace("\n", " | "))
+	sup.eq(_client.inspector.employed_population(colony), 4,
+		"employed is the number of structures the colony can staff")
+	sup.eq(_client.inspector.idle_population(colony), 6,
+		"and the idle remainder is what is left")
+
+	# Understaffed: more jobs than hands, so employed is capped at the population and the
+	# panel must not promise work that does not exist.
+	colony.population = 2.0
+	colony.structures = {&"mine": 5, &"farm": 1, &"granary": 1}
+	sup.eq(_client.inspector.employed_population(colony), 2,
+		"two people staff two jobs, however many exist")
+	sup.eq(_client.inspector.idle_population(colony), 0, "and nobody is idle")
+	_client.inspector.refresh()
+	sup.ok(_client.inspector.planet_label().text.contains("2 (2/2)"),
+		"the panel agrees that everybody is working",
+		"shown=%s" % _client.inspector.planet_label().text)
+
+	# Troops are not civilians: a garrison does not work farms and is not idle labour.
+	colony.population = 4.0
+	colony.troops = 30
+	sup.eq(_client.inspector.employed_population(colony), 4,
+		"thirty troops do not fill any jobs")
+
+	# --- the research header's delta ---------------------------------------------
+	# `Science: 130 (+5)` is the requested form: a balance alone is a number the player can
+	# only watch move after the fact, so the per-turn grant travels with it.
+	me.tech_points = PackedFloat64Array([40.0, 30.0, 35.0, 25.0])
+	me.last_research_granted = 5.0
+	_client.top_bar.refresh()
+	var readout := _client.top_bar.research_label().text
+	sup.ok(readout.contains("130"), "the header shows the science total", "reads '%s'" % readout)
+	sup.ok(readout.contains("+5"), "and the per-turn delta", "reads '%s'" % readout)
+
+	# A zero grant is still reported as a delta, because "no science this turn" is
+	# information: it is how a player notices their population stopped growing.
+	me.last_research_granted = 0.0
+	_client.top_bar.refresh()
+	readout = _client.top_bar.research_label().text
+	sup.ok(readout.contains("+0"),
+		"a turn that granted nothing still shows a delta", "reads '%s'" % readout)
+
+	# And the balance really is the sum across the four fields, since there are no sliders.
+	me.last_research_granted = 7.0
+	_client.top_bar.refresh()
+	sup.ok(_client.top_bar.research_label().text.contains("130"),
+		"the total is the sum of the four fields, which the sliders used to divide")
+
+	# The planet detail must not drift back to listing a Space Port as "other".
+	colony.structures[&"space_port"] = 1
+	_client.inspector.refresh()
+	detail = _client.inspector.planet_label().text
+	sup.ok(detail.contains("SPACE PORTS"),
+		"a Space Port is listed in the roster", "shown=%s" % detail.replace("\n", " | "))
+	sup.ok(not detail.contains("other space_port"),
+		"and does not also appear under OTHER",
+		"shown=%s" % detail.replace("\n", " | "))
+
+
+## Any planet index that is not `exclude`. The map has one system, so "some other body" is
+## simply any other world -- which is what a selection-changing test needs to move to.
+func _other_planet_index(exclude: int) -> int:
+	for p in _galaxy.planets:
+		if p.index != exclude:
+			return p.index
+	return exclude
+
+
 ## Every piece of user-visible text under `node`, one per line.
 ##
 ## Reading the labels a panel actually built is the only way to assert a section is gone:
@@ -1242,8 +1680,13 @@ func _step_macro_build() -> void:
 	# order" assertion below both need to start from nothing.
 	colony.building_queue.clear()
 	colony.build_turns_remaining = 0
+	colony.build_total_turns = 0
 	colony.build_metal = 0.0
-	c.pending_orders().clear()
+	# Earlier scenarios deliberately stage orders, and `pending_orders()` hands back a
+	# *copy* -- clearing that array does nothing to the queue. `queue.clear()` is the real
+	# empty, and without it this step would be asserting against four orders from earlier
+	# scenarios and reporting a pass for the wrong reason.
+	c.queue.clear()
 
 	var selector := _client.macros.build_selector()
 	sup.ok(selector.item_count > 0, "the build selector is populated",
@@ -1271,15 +1714,23 @@ func _step_macro_build() -> void:
 	# Regression: browsing the construction dropdown used to be refused with "select one
 	# of your colonies first" because nothing ever moved the controller's selection off
 	# the system/body the player had clicked on the map.
-	c.select_system(_first_body_system(c))
+	c.select_planet(_other_planet_index(colony.index))
+	# Choosing a structure only selects it. Phase 8 added a Build button so browsing the
+	# dropdown cannot commit a spend, and this is the assertion that the separation holds.
+	# The queue is emptied first: earlier scenarios stage orders on purpose.
+	c.queue.clear()
 	_client.macros._on_build_selected(0)
-	sup.ok(c.selected_planet == colony.index or not c.player_colonies().is_empty(),
-		"touching the build selector does not leave a stale selection")
-	sup.ok(c.selected_planet == colony.index,
-		"the build selector adopts the highlighted colony",
-		"selected=%d expected=%d" % [c.selected_planet, colony.index])
+	sup.eq(c.pending_orders().size(), 0,
+		"choosing a structure stages nothing")
+	sup.eq(colony.building_queue.size(), 0,
+		"and does not start a project")
+	sup.eq(c.selected_planet, _other_planet_index(colony.index),
+		"choosing a structure leaves the map's selection alone (selected=%d, expected %d)" % [
+			c.selected_planet, _other_planet_index(colony.index)])
 	# Re-selecting through the controller, as the GUI test drives it elsewhere.
 	c.select_planet(colony.index)
+	sup.ok(_client.macros.build_button() != null, "the panel exposes a Build button")
+	sup.ok(_client.macros.build_button().text == "Build", "labelled 'Build'")
 
 	var queued_before := int(colony.building_queue.get(chosen, 0))
 	var staged_before := c.pending_orders().size()
@@ -1326,9 +1777,9 @@ func _step_end_turn() -> void:
 		"%d -> %d" % [before_turn, c.galaxy.turn])
 	sup.eq(committed.size(), 1, "turn_resolved fired exactly once")
 	sup.eq(c.pending_orders().size(), 0, "the staged orders were consumed")
-	sup.ok(_client.top_bar.stardate_label().text == str(c.galaxy.turn + 1),
-		"the HUD stardate matches the state",
-		"hud=%s state=%d" % [_client.top_bar.stardate_label().text, c.galaxy.turn + 1])
+	sup.eq(_client.top_bar.stardate_label().text, "TURN %d" % (c.galaxy.turn + 1),
+		"the HUD turn counter matches the state (hud=%s, state=%d)" % [
+			_client.top_bar.stardate_label().text, c.galaxy.turn + 1])
 	sup.ok(not c.last_report.is_empty(), "a turn report was produced")
 	sup.ok(c.last_report.has("state_hash"), "the report carries a state hash")
 
@@ -1455,8 +1906,8 @@ func _step_end_turn_again() -> void:
 		_client.press_end_turn()
 	sup.ok(c.galaxy.turn == before + 5, "five End Turn clicks advance the stardate by 5",
 		"%d -> %d" % [before, c.galaxy.turn])
-	sup.eq(_client.top_bar.stardate_label().text, str(c.galaxy.turn + 1),
-		"the HUD tracks the stardate across turns")
+	sup.eq(_client.top_bar.stardate_label().text, "TURN %d" % (c.galaxy.turn + 1),
+		"the HUD tracks the turn counter across turns")
 
 
 ## A resolved turn must reach the panels, not just the sync peer.

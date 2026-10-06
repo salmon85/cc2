@@ -108,9 +108,19 @@ func _refresh_planet() -> void:
 		return
 
 	lines.append(Format.field("TYPE", String(p.type_id).capitalize()))
-	# Population is a count of people as of Phase 8, not a figure in millions, so it is
-	# printed as a whole number. `Format.fixed(x, 2)` on a count reads as a quantity it is not.
-	lines.append(Format.field("POPULATION", "%d" % int(round(p.population))))
+
+	# Metal: the stockpile and what the next turn adds to it. The delta is read from the
+	# colony's own mines rather than a generic economy figure, so "Metal: 599 (+15)" is the
+	# number the resolver is about to credit.
+	lines.append(Format.field("METAL", "%d (%s)" % [
+		int(p.reserve_metals), Format.signed(_metal_per_turn(p), 0)]))
+
+	# Population: the headcount, then how many are working. The pair is the interesting part
+	# -- a colony with ten people and five jobs has five idle, and those five are the ones
+	# researching. Idle pop is not waste; it is the research budget.
+	var employed := employed_population(p)
+	lines.append(Format.field("POPULATION", "%d (%d/%d)" % [
+		int(round(p.population)), employed, employed + idle_population(p)]))
 	lines.append(Format.field("TROOPS", str(p.troops)))
 	lines.append(Format.field("HOUSING", "%d" % int(p.housing)))
 	lines.append(Format.field("FOOD", "%d / %d" % [
@@ -118,13 +128,14 @@ func _refresh_planet() -> void:
 	lines.append(Format.field("FOOD BALANCE", Format.signed_colored(_food_balance(p))))
 	lines.append(Format.field("POWER", "%d / %d (+%d, -%d)" % [
 		int(p.power), int(p.power_capacity), int(p.power_generated), int(p.power_drawn)]))
-	lines.append(Format.field("METAL", Format.fixed(p.reserve_metals, 0)))
 
-	# The Phase 8 building roster, in the order a player thinks about it.
+	# The Phase 8 building roster, in the order a player thinks about it. `space_port` is in
+	# `_ROSTER` and so is in `_is_economic`: it used to be printed on its own line here *and*
+	# fall through to the OTHER block, so a colony with a berth showed "SPACEPORTS 1" and
+	# "other space_port x1" two lines apart.
 	lines.append("")
 	for id in _ROSTER:
 		lines.append(Format.field(_label_for(id), str(p.count(id))))
-	lines.append(Format.field("SPACEPORTS", str(p.count(&"space_port"))))
 	lines.append(Format.field("SHIPS", "%d building, %d queued" % [
 		int(p.shipyard_progress), p.ship_queue.size()]))
 
@@ -204,16 +215,16 @@ func _planet_detail_known(p: PlanetState) -> bool:
 ## the number in this panel a different quantity from the one the resolver uses.
 func _food_balance(p: PlanetState) -> float:
 	var produced := float(p.count(&"farm")) * 5.0
-	if p.count(&"colony_pad") > 0:
+	if p.count(&"colony_ship_building") > 0:
 		produced += 5.0
 	return produced - p.population
 
 
 ## The Phase 8 structure roster, in the order the readout lists it.
 const _ROSTER: Array[StringName] = [
-	&"farm", &"mine", &"granary", &"city_complex", &"colony_pad",
+	&"farm", &"mine", &"granary", &"city_complex", &"colony_ship_building",
 	&"energy_storage", &"solar", &"coal", &"nuclear",
-	&"barracks", &"planetary_defense",
+	&"space_port", &"barracks", &"planetary_defense",
 ]
 
 ## Readable label for a roster entry, without needing the definition table.
@@ -222,8 +233,50 @@ func _label_for(id: StringName) -> String:
 		&"energy_storage": return "ENERGY STOR"
 		&"city_complex": return "CITIES"
 		&"planetary_defense": return "DEFENSES"
-		&"colony_pad": return "COLONY SHIP"
+		&"colony_ship_building": return "COLONY SHIP"
+		&"space_port": return "SPACE PORTS"
 	return String(id).replace("_", " ").to_upper()
+
+
+## Civilians working an active structure right now.
+##
+## One person per staffed structure, in `pop_required` order, so the figure is the number of
+## buildings the colony can actually man rather than the sum of what it *could* staff. A
+## colony with four farms and two people has two employed, not four.
+func employed_population(p: PlanetState) -> int:
+	if _controller == null or _controller.defs == null or p == null:
+		return 0
+	var buildings: Dictionary = _controller.defs.get("buildings") as Dictionary
+	var jobs := 0
+	var hands := int(floor(p.population))
+	for building_id: StringName in p.structures:
+		var count := int(p.structures[building_id])
+		if count <= 0 or hands <= 0:
+			continue
+		var def: Resource = buildings.get(building_id, null) as Resource
+		if def == null or int(def.get("pop_required")) <= 0:
+			continue
+		var staffed: int = mini(count, hands)
+		jobs += staffed
+		hands -= staffed
+	return jobs
+
+
+## Civilians with no job, who therefore do nothing but research.
+func idle_population(p: PlanetState) -> int:
+	return maxi(0, int(round(p.population)) - employed_population(p))
+
+
+## Metal this colony's mines will credit next turn.
+##
+## Read from the structure table rather than from the previous turn's report, so the figure is
+## the number the resolver is about to use. A mine needing a colonist counts only if the
+## colony has one to staff it, which is why this is not simply `mines * 5`.
+func _metal_per_turn(p: PlanetState) -> float:
+	if _controller == null or _controller.defs == null or p == null:
+		return 0.0
+	var buildings: Dictionary = _controller.defs.get("buildings") as Dictionary
+	return TurnResolver.metal_output_per_turn(p, buildings)
 
 
 func _is_economic(id: StringName) -> bool:

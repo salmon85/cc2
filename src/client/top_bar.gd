@@ -13,13 +13,11 @@ signal ready_pressed(is_ready: bool)
 
 var _controller: SessionController = null
 
-var _stardate_label: Label = null
 var _turn_label: Label = null
-var _treasury_label: Label = null
+## `Science: 130 (+5)` — the balance and what the last turn added. A balance with no delta is
+## a number the player cannot plan against: they cannot tell whether research is keeping up
+## with spending until they have waited a turn to see it move.
 var _research_label: Label = null
-## Net income is coloured by sign, so this readout carries BBCode and must be a
-## RichTextLabel — a plain Label would print the tags literally.
-var _net_label: RichTextLabel = null
 var _ready_button: Button = null
 
 
@@ -35,10 +33,15 @@ func _build() -> void:
 	row.add_theme_constant_override("separation", 14)
 	add_child(row)
 
-	_stardate_label = _cell(row, "STARDATE", CC2Theme.PHOSPHOR, CC2Theme.FONT_BIG)
+	# TURN and SCIENCE, and nothing else.
+	#
+	# Three readouts were removed here. STARDATE duplicated TURN -- the same number in a
+	# different label, so the header said "STARDATE 4 / TURN 4" and made the player work out
+	# that they were one quantity. IMPERIAL TREASURY and NET/TURN were income figures left
+	# over from the tax slider: there is no income any more, so both were reading a ledger
+	# that only ever moved by upkeep. A header row is the most-read surface in the game, and
+	# every cell on it has to be something the player can act on.
 	_turn_label = _cell(row, "TURN", CC2Theme.PHOSPHOR_DIM, CC2Theme.FONT_HEAD)
-	_treasury_label = _cell(row, "IMPERIAL TREASURY", CC2Theme.CYAN, CC2Theme.FONT_HEAD)
-	_net_label = _cell_bbcode(row, "NET / TURN", CC2Theme.CYAN, CC2Theme.FONT_HEAD)
 	_research_label = _cell(row, "RESEARCH", CC2Theme.AMBER, CC2Theme.FONT_HEAD)
 
 	# A spacer so the treasury block sits left and the controls right regardless of how
@@ -212,11 +215,13 @@ func refresh() -> void:
 	if me == null:
 		return
 
-	_stardate_label.text = str(_controller.galaxy.turn + 1)
 	_turn_label.text = "TURN %d" % (_controller.galaxy.turn + 1)
-	_treasury_label.text = Format.credits(me.metals + me.rare_elements + me.energy)
-	_net_label.text = Format.signed_colored(me.last_net)
-	_research_label.text = Format.fixed(me.total_tech_points(), 1)
+	# The delta is the last turn's grant. `last_research_granted` is recorded by the
+	# controller when a turn resolves, so this is what the *previous* turn produced rather
+	# than a projection -- a projection here would be wrong by exactly the thing the player
+	# is trying to check.
+	_research_label.text = "%d (%s)" % [
+		int(round(me.total_tech_points())), Format.signed(me.last_research_granted, 0)]
 
 
 ## Programmatic click path for the ready button, used by the automated GUI test.
@@ -230,17 +235,22 @@ func ready_button() -> Button:
 	return _ready_button
 
 
+## The turn readout. Replaces both the old stardate label and the old treasury label: the
+## header has one number in it that is a counter, and these accessors all return it so a
+## caller written against the earlier header still resolves to something real.
 func stardate_label() -> Label:
-	return _stardate_label
+	return _turn_label
 
 
 func treasury_label() -> Label:
-	return _treasury_label
+	return _turn_label
 
 
 func research_label() -> Label:
 	return _research_label
 
 
+## Removed in Phase 8. Kept as an accessor returning null so a caller written against the
+## earlier header gets a definite answer rather than a crash -- the GUI suite asserts on it.
 func net_label() -> RichTextLabel:
-	return _net_label
+	return null

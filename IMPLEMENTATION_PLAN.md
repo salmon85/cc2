@@ -1257,3 +1257,108 @@ It is now `cargo_kinds`, a list, with the first entry as the label the modal pri
   through its own buttons.
 - `test_defs`: 243 (was 98) — every roster figure asserted against the specification's own
   numbers rather than against each other.
+
+---
+
+# Phase 8 corrections: port hulls, storage caps, construction, growth curve, header
+
+Six corrections on top of the Phase 8 implementation, each recorded with the defect it fixes
+rather than the code it adds.
+
+## A Space Port is a local grant, not a research unlock
+
+`GameDB.PORT_HULLS` names six hulls a Space Port hands over immediately: Exploration Ship,
+Cargo Transport, Troop Transport, Colony Ship, Corvette, Frigate. The construction list is
+populated from `TurnResolver.hulls_available_at`, so it fills the moment a port completes and
+empties the moment one is lost.
+
+The grant is checked *against the planet* rather than written into `faction.unlocked_ships`.
+Writing it would hand the hulls to every world the empire owns — turning one berth into an
+empire-wide research award — and it would not come back when the port was lost, because
+unlocks are monotone. Destroying the port is meant to cost something.
+
+## A Colony Ship cannot be built, only landed
+
+`colony_pad` is now `colony_ship_building` and is deliberately absent from
+`MacroPanel.BUILD_ORDER`. It is the one structure in the roster a colony cannot produce: a
+Colony Ship flies to the world and is consumed on landing, leaving the housing, food, metal
+and power a landed ship provides. `UNBUILDABLE` names it separately so the dropdown cannot
+grow it back by accident, and `InvasionStage.land_colony_ship` is the only route to one. The
+fleet panel's button is shown only when a landing would actually be accepted, because "no kit
+aboard" and "already settled" are two different reasons for a refusal.
+
+## Storage capacities land in the turn they are paid for
+
+`finish_construction` calls `_recount_capacity` immediately rather than waiting for the next
+colony turn. A Granary's +1000 food, a City Complex's +20 housing and an Energy Storage's
++1000 energy are therefore banked the moment the last turn of construction resolves, instead
+of the colony overflowing for a turn against storage it had already paid for.
+
+`space_port` joined `_ROSTER` in the inspector, which also joins `_is_economic`. It was being
+printed on its own line *and* falling through to the OTHER block, so a colony with a berth
+showed `SPACE PORTS 1` and `other space_port x1` two lines apart.
+
+## Construction progress is metal, and metal is never returned
+
+Two defects, one cause: the per-turn contribution was a flat `+1.0` metal, and the completion
+test read the turn counter.
+
+The contribution is now the project's metal cost spread evenly over its build turns, and the
+denominator is `build_total_turns` — captured at queue time, because `build_turns_remaining`
+counts down and dividing by what remains hands each remaining turn an equal share of the
+whole cost. A three-turn project now reads 33% after one turn whatever it costs; before, a
+100-metal City Complex advanced 1% a turn while a 10-metal Solar Array advanced 10%.
+
+Completion is decided by the metal rather than the clock, so a player who pushes metal in
+finishes early and a colony that simply produces enough finishes on schedule. `finish_construction`
+zeroes `build_metal` and never pays the surplus back: the cap is `min(storage, metal still
+owed)`, so there is nothing to overpay in the first place, and the refund path does not exist.
+The cap is applied on the wire too — `TurnResolver._apply_boost_build` passes the building
+table, because a cap enforced only in the dialog is a UI convention rather than a rule.
+
+A click on the progress bar now *opens a dialog*. It used to spend the entire stockpile on the
+spot, which on a colony with five hundred metal banked against a twenty-metal project quietly
+lost four hundred and eighty of it.
+
+## Growth has a soft cap
+
+`growth_chance = clamp(0.50 - pop * 0.015, 0.05, 0.50)`. A flat 50% every turn was a coin
+toss rather than a growth rate: a colony of four and a colony of forty both added one person
+on half their turns, so the only thing stopping a colony growing without limit was the player
+refusing to build housing. The floor matters as much as the fall — a depopulated colony
+repouplates quickly, so recovery is never gated behind a rebuild.
+
+The curve is a function of population *alone*. Housing, food and the two-pop minimum stay
+gates applied by the caller; folding them into the curve would make a well-fed colony in small
+housing look like a crowded one. `Report.growth_chance` records the number actually rolled
+against, so the UI prints the resolver's figure rather than re-deriving it.
+
+## The header is two numbers, and rival research is silent
+
+The header lost STARDATE (which duplicated TURN), IMPERIAL TREASURY and NET/TURN (income
+figures from a slider that no longer sets anything). What is left is `TURN` and `RESEARCH`,
+and research carries its delta: `130 (+5)`. A balance with no delta is a number the player can
+only watch move after the fact.
+
+The planet panel shows `METAL 599 (+15)` — the delta read from the colony's own mines, so it
+is the figure the turn is about to credit, and it falls to zero when there is nobody to work
+them. Population reads `10 (4/10)`: ten people, four working. Idle pop is the research
+budget, so a colony running at half its capacity says so in one line instead of two.
+
+Rival research is no longer announced. The resolver used to post "Word reaches us that X has
+made a discovery" once per node per empire per turn, which buried the player's own news and
+named no node and so told them nothing they could act on. Rival *milestones* are silent for
+the same reason — a rival's fleet size is learned by meeting the fleet. The player's own
+milestones are still announced; the test asserts that explicitly, because silencing the spam
+must not silence everything.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 2585 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_turn_engine`: 772 (was 647) — the port's six hulls and their locality, Colony Ship
+  landing and the one-per-world cap, storage capacities landing in their own turn, the boost
+  deduction / cap / no-refund / wire-cap, the growth curve measured against its own formula,
+  and the absence of rival research news.
+- `test_gui_integration`: 457 (was 368) — the Build button, the ship list following the port,
+  the landing button's visibility rules, the boost modal's ceiling and refusals, the planet
+  metal/population rows, the research delta, and the shrunken header.

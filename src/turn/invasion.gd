@@ -235,6 +235,53 @@ static func _transfer_colony(
 		attacker.colonies_taken += 1
 
 
+## Consume a Colony Ship parked over `planet`, leaving the structure a landed ship leaves.
+##
+## The Colony Ship is the only building in the roster that cannot be *built*: it flies here
+## and is spent on arrival. That is what makes settling a second world a decision with a ship
+## at the end of it rather than a line item.
+##
+## Returns false and changes nothing when the world cannot take one: it already has one (the
+## cap is 1), it is already a colony, or the fleet carries no Colony Ship. The caller reports
+## which.
+static func land_colony_ship(
+	galaxy: GalaxyState, fleet: FleetState, planet: PlanetState, faction: FactionState
+) -> bool:
+	if planet == null or fleet == null or faction == null:
+		return false
+	if not fleet.has_colony_ship():
+		return false
+	# One per world. The ship stays in orbit and the player is told why.
+	if planet.count(&"colony_ship_building") > 0:
+		return false
+	# An inhabited world is not a landing site: there is nobody to settle.
+	if planet.colonized:
+		return false
+
+	if fleet.remove_ships(&"colony_ship", 1) <= 0:
+		return false
+	planet.structures[&"colony_ship_building"] = 1
+	planet.owner = faction.id
+	planet.colonized = true
+	planet.surveyed = true
+	faction.colonies_founded += 1
+	return true
+
+
+## Whether a Colony Ship parked over `planet` could be landed there right now.
+##
+## A question rather than an action, so a menu can grey out the entry instead of offering a
+## button that silently refuses.
+static func can_land_colony_ship(fleet: FleetState, planet: PlanetState) -> bool:
+	if planet == null or fleet == null:
+		return false
+	if not fleet.has_colony_ship():
+		return false
+	if planet.colonized:
+		return false
+	return planet.count(&"colony_ship_building") <= 0
+
+
 static func _has_colony(galaxy: GalaxyState, system_index: int, faction_id: int) -> bool:
 	var system: SystemState = galaxy.system(system_index)
 	if system == null:

@@ -193,7 +193,7 @@ func _test_buildings(defs: Node) -> void:
 	_t.eq(table.size(), 12, "the Phase 8 roster defines twelve structures")
 
 	var expected := [
-		&"farm", &"mine", &"city_complex", &"granary", &"colony_pad", &"space_port",
+		&"farm", &"mine", &"city_complex", &"granary", &"colony_ship_building", &"space_port",
 		&"energy_storage", &"barracks", &"planetary_defense",
 		&"solar", &"coal", &"nuclear",
 	]
@@ -227,7 +227,7 @@ func _test_buildings(defs: Node) -> void:
 	_t.near(granary.get("cost_metals"), 20.0, 0.001, "a granary costs 20 metal")
 	_t.near(granary.get("food_store"), 1000.0, 0.001, "a granary stores 1000 food")
 
-	var pad := defs.call("building", &"colony_pad") as Resource
+	var pad := defs.call("building", &"colony_ship_building") as Resource
 	_t.near(pad.get("cost_metals"), 0.0, 0.001, "a landed Colony Ship is free")
 	_t.eq(int(pad.get("max_per_colony")), 1, "one Colony Ship per world")
 	_t.near(pad.get("yield_amount"), 5.0, 0.001, "a Colony Ship makes 5 food per turn")

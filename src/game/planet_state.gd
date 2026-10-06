@@ -91,11 +91,24 @@ var build_mode: int = 0
 
 ## Metal banked toward whatever is currently under construction.
 ##
-## The construction progress bar in the construction panel is clickable: pressing it spends
-## stored metal directly against this pool, so a player can finish a project immediately
-## rather than waiting out the turns. Progress also accrues per turn at the structure's own
-## rate, and the two add.
+## The construction progress bar in the construction panel is clickable: pressing it opens the
+## boost modal, and the metal the player transfers is debited from `reserve_metals` and added
+## here. Production adds to this pool too, at the project's metal cost spread evenly over its
+## build turns, so turn N of a T-turn project reads as N/T on the bar whatever the structure
+## costs.
+##
+## This is an *accounting* pool, not a store. Metal arrives here either because production
+## earned it or because the player explicitly moved it, and in both cases it has already been
+## debited from `reserve_metals` at the moment it was credited. It is never returned.
 var build_metal: float = 0.0
+
+## Total build turns the current project was started with.
+##
+## Needed because `build_turns_remaining` counts *down*: dividing the cost by what remains
+## would give each remaining turn an equal share of the whole cost and finish the project in
+## about half the turns. Capturing the original figure at queue time is what makes the
+## per-turn contribution `cost / total_turns` and the bar read N/T.
+var build_total_turns: int = 0
 
 ## Whether the owner has surveyed this body (drives fog of war).
 var surveyed: bool = false
@@ -220,6 +233,7 @@ func to_dict() -> Dictionary:
 		"power": power,
 		"build_mode": build_mode,
 		"build_metal": build_metal,
+		"build_total_turns": build_total_turns,
 		"warnings": warnings.duplicate(true),
 		"surveyed": surveyed,
 	}
@@ -260,6 +274,7 @@ func from_dict(data: Dictionary) -> bool:
 	power = float(data.get("power", 0.0))
 	build_mode = int(data.get("build_mode", 0))
 	build_metal = float(data.get("build_metal", 0.0))
+	build_total_turns = int(data.get("build_total_turns", 0))
 	warnings = _coerce_warnings(data.get("warnings", []))
 	surveyed = bool(data.get("surveyed", false))
 	return true
@@ -297,12 +312,13 @@ func fingerprint() -> String:
 	# layouts that differ only in where a body sits are different games. Leaving it out
 	# would let a regression reorder the whole system without a single determinism test
 	# noticing.
-	return "%d:%s:%s:%d:%.3f,%.3f:%d:%s:%.4f:%s:%.2f:%.2f:%.2f:%.4f:%s:%.4f:%.4f:%d:%d:%.4f:%d:%.2f:%s" % [
+	return "%d:%s:%s:%d:%.3f,%.3f:%d:%s:%.4f:%s:%.2f:%.2f:%.2f:%.4f:%s:%.4f:%.4f:%d:%d:%.4f:%d:%.2f:%d:%s" % [
 		index, String(type_id), name, orbit, position.x, position.y,
 		owner, str(colonized), population,
 		_sorted_keys(structures), reserve_metals, reserve_rare, reserve_energy,
 		terraform_progress, _sorted_keys(building_queue), shipyard_progress,
 		food_stock, build_turns_remaining, troops, power, build_mode, build_metal,
+		build_total_turns,
 		_sorted_keys(warning_set()),
 	]
 

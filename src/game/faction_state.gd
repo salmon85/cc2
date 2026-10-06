@@ -51,6 +51,13 @@ var last_expenses: float = 0.0
 var last_net: float = 0.0
 var last_production: float = 0.0
 
+## Science points granted last turn.
+##
+## Recorded rather than recomputed so the header can show a real delta. `total_tech_points()`
+## alone is a balance the player can only watch after the fact; the delta is what tells them
+## whether their population is keeping pace with their technology.
+var last_research_granted: float = 0.0
+
 ## Lifetime colonial ledger. Used by the AI to weigh aggression and by the news
 ## feed to summarise a war's progress.
 var colonies_taken: int = 0
@@ -180,6 +187,7 @@ func to_dict() -> Dictionary:
 		"last_expenses": last_expenses,
 		"last_net": last_net,
 		"last_production": last_production,
+		"last_research_granted": last_research_granted,
 		"colonies_taken": colonies_taken,
 		"colonies_lost": colonies_lost,
 		"colonies_founded": colonies_founded,
@@ -214,6 +222,7 @@ func from_dict(data: Dictionary) -> bool:
 	last_expenses = float(data.get("last_expenses", 0.0))
 	last_net = float(data.get("last_net", 0.0))
 	last_production = float(data.get("last_production", 0.0))
+	last_research_granted = float(data.get("last_research_granted", 0.0))
 	colonies_taken = int(data.get("colonies_taken", 0))
 	colonies_lost = int(data.get("colonies_lost", 0))
 	colonies_founded = int(data.get("colonies_founded", 0))

@@ -30,8 +30,25 @@ const FOOD_PER_POP := 1.0
 ## The design document's 50%.
 const STARVATION_DEATH_CHANCE := 0.5
 
-## Per-turn chance of one pop being born when there is surplus, housing room and pop >= 2.
-const POP_GROWTH_CHANCE := 0.5
+## Per-turn chance of one pop being born when there is surplus, housing room and pop >= 2,
+## before the soft cap below.
+const POP_GROWTH_CHANCE := 0.50
+
+## The soft cap: birth chance falls by this much per existing pop.
+##
+## A flat 50% every turn is not a growth rate, it is a coin toss -- a colony of four and a
+## colony of forty both add one person on half their turns, so the only thing that stops a
+## colony growing without limit is the player refusing to build housing. Scaling the chance
+## down with the population that is already there makes the curve flatten on its own, while
+## still responding upwards the moment a colony loses people: a world depopulated by famine
+## repopulates quickly, and a crowded one trickles.
+const POP_GROWTH_PENALTY_PER_POP := 0.015
+
+## Floor and ceiling on the scaled birth chance. The floor matters as much as the fall: a
+## colony of two thousand still grows, just slowly, so a large empire is never permanently
+## frozen and a player's recovery from a disaster is never gated behind a rebuild.
+const POP_GROWTH_MIN_CHANCE := 0.05
+const POP_GROWTH_MAX_CHANCE := 0.50
 
 ## A colony below this population does not grow. Two is the smallest number from which one
 ## more can be a meaningful step.
@@ -162,8 +179,23 @@ const HULL_LADDER: Array[StringName] = [
 
 ## Hulls every empire starts with, regardless of population. A player who has never grown
 ## still needs one hull to move and one lift to settle a second world.
+##
+## The Space Port *adds* two more to this list (the Corvette and the Frigate) rather than
+## replacing it: a port is what turns a settlement into an outpost, so the ships that make an
+## outpost worth having are exactly the ones it should hand you.
 const STARTER_HULLS: Array[StringName] = [
 	&"colony_ship", &"exploration_ship", &"troop_transport", &"cargo_transport",
+]
+
+## The roster a Space Port makes immediately constructible, with no research and no milestone.
+##
+## These are the six hulls a colony cannot function without once it has a berth: something to
+## survey with, something to carry food and metal with, something to carry troops with, a kit
+## to settle a second world with, and two warships to keep the first one. Anything above the
+## Frigate is still earned by population.
+const PORT_HULLS: Array[StringName] = [
+	&"exploration_ship", &"cargo_transport", &"troop_transport", &"colony_ship",
+	&"corvette", &"frigate",
 ]
 
 

@@ -33,6 +33,28 @@ class Report extends RefCounted:
 	var power_short: bool = false
 	var houses_added: int = 0
 	var troops_raised: int = 0
+	## The birth chance this turn actually rolled against, 0 when the colony could not grow.
+	## Recorded rather than recomputed so a test can read the curve the resolver used rather
+	## than re-deriving it and agreeing with itself.
+	var growth_chance: float = 0.0
+
+
+## The per-turn chance of one pop being born at `population`.
+##
+## The soft cap: `POP_GROWTH_CHANCE - population * penalty`, clamped. Pure arithmetic and
+## exported so the UI can print the same number the roll used — a growth rate a player cannot
+## see is a growth rate they cannot plan around.
+##
+## It is deliberately a function of population alone. Housing, food and the two-pop minimum
+## are gates applied by the caller, not part of the curve: a colony that has not met them
+## does not roll at all, and folding them in here would make a well-fed colony in small
+## housing look like a crowded one.
+static func growth_chance(population: float, db: Node) -> float:
+	var base := float(db.get("POP_GROWTH_CHANCE"))
+	var penalty := float(db.get("POP_GROWTH_PENALTY_PER_POP"))
+	var floor_chance := float(db.get("POP_GROWTH_MIN_CHANCE"))
+	var ceiling := float(db.get("POP_GROWTH_MAX_CHANCE"))
+	return clampf(base - population * penalty, floor_chance, ceiling)
 
 
 ## Simulate one colony. Mutates `planet` and returns its report.
@@ -89,7 +111,9 @@ static func simulate_colony(
 		and planet.population >= float(db.get("MIN_POP_FOR_GROWTH"))
 	)
 	if can_grow and rng != null:
-		if rng.randf() < float(db.get("POP_GROWTH_CHANCE")):
+		var chance := growth_chance(planet.population, db)
+		report.growth_chance = chance
+		if rng.randf() < chance:
 			# Growth is allowed to overshoot next turn's consumption: the design document
 			# is explicit that a colony may take a pop it cannot yet afford to feed, which
 			# is what makes a food shortage a decision rather than a delayed sentence.
@@ -292,28 +316,35 @@ static func _staffed(planet: PlanetState, def: Resource) -> int:
 
 ## Advance the construction and shipyard queues by one turn.
 ##
-## Two things changed from the Phase 4 model. Progress is banked as *metal* rather than as
-## abstract turns, so the click-to-boost bar in the construction panel and the per-turn
-## advance are the same number and cannot disagree. And the two construction modes are
-## enforced here rather than in the order handler, because only the resolver knows what the
-## colony produced this turn.
+## Progress is banked as *metal*, so the clickable bar in the construction panel and the
+## per-turn advance read the same number and cannot disagree.
+##
+## The per-turn contribution is the project's **total metal cost divided by its build turns**
+## — "equal production", spread evenly. The earlier `+1.0` a turn was flat *absolute*, so a
+## 100-metal City Complex advanced 1% a turn while a 10-metal Solar Array advanced 10%: a
+## three-turn project read as 3% after one turn, and the bar told a player almost nothing. The
+## divisor makes turn N of a T-turn project read as N/T regardless of what the structure
+## costs, which is what a player watching a bar expects it to mean.
+##
+## That contribution is *accounting*, not a transfer: it never moves metal in or out of
+## storage. The full cost was already debited when the order was accepted, and the metal a
+## player pushes in through the boost modal is debited at that moment. Nothing is ever paid
+## back — see `finish_construction`.
 static func _advance_construction(
 	planet: PlanetState, buildings: Dictionary, db: Node
 ) -> void:
 	if not planet.building_queue.is_empty():
-		planet.build_metal += 1.0
+		var cost := queued_cost(planet, buildings)
+		var total_turns := maxi(1, planet.build_total_turns)
+		# Equal production: the cost spread evenly over the project's own build time, so
+		# turn N of a T-turn project reads as N/T whatever the structure costs.
+		planet.build_metal += cost / float(total_turns)
 		planet.build_turns_remaining -= 1
-		if planet.build_turns_remaining <= 0:
-			for building_id: StringName in planet.building_queue:
-				var count := int(planet.building_queue[building_id])
-				planet.structures[building_id] = int(planet.structures.get(building_id, 0)) + count
-			planet.building_queue.clear()
-			planet.build_turns_remaining = 0
-			planet.build_metal = 0.0
-			# Recount immediately: the structures that just landed change capacity,
-			# housing and the power budget, and everything after this point in the turn
-			# should see the new numbers rather than the previous turn's.
-			_recount_capacity(planet, buildings, db)
+		# Completion is decided by the metal, not the clock. A player who pushed metal in
+		# through the boost modal finishes early; one whose colony simply produced enough
+		# finishes on schedule; neither is held to the turn counter.
+		if planet.build_metal >= cost - 0.001:
+			finish_construction(planet, buildings, db)
 		return
 
 	# Otherwise the planet's metal output feeds the shipyard, if the colony has one.
@@ -379,35 +410,12 @@ static func simulate_faction(
 	return faction.last_net
 
 
-## Add `amount` metal against whatever the colony is building. Returns the amount actually
-## spent, which is bounded by what the colony has in store.
+## The total metal cost of everything in `planet.building_queue`.
 ##
-## This is the mechanic behind the clickable construction bar: a player who has banked
-## enough metal can finish a project without waiting out the turns. It is clamped rather than
-## refused so that pressing the bar with less metal than the project costs still puts the
-## metal to work — which is what a player pressing it means.
-static func boost_construction(planet: PlanetState, amount: float) -> float:
-	if planet == null or amount <= 0.0:
-		return 0.0
-	# Nothing queued, nothing to spend metal on. Returning zero rather than banking the metal
-	# silently is what lets the construction bar tell the player why a press did nothing.
-	if planet.building_queue.is_empty():
-		return 0.0
-	var available := minf(amount, planet.reserve_metals)
-	if available <= 0.0:
-		return 0.0
-	planet.reserve_metals -= available
-	planet.build_metal += available
-	return available
-
-
-## Completion progress for the colony's current project, 0..1.
-##
-## Read from the *definition* rather than from `build_turns_remaining`, because a boosted
-## project has turns left on the clock and metal banked against it at the same time. The
-## fraction of the metal cost that has been paid is the honest measure of progress, and it
-## is what the bar draws.
-static func construction_progress(planet: PlanetState, buildings: Dictionary) -> float:
+## The single definition of "how much is this project worth", read by the progress bar, the
+## per-turn contribution and the boost modal's ceiling. One function because three readers
+## deriving it separately is three chances for the bar to disagree with the resolver.
+static func queued_cost(planet: PlanetState, buildings: Dictionary) -> float:
 	if planet == null or planet.building_queue.is_empty():
 		return 0.0
 	var cost := 0.0
@@ -416,6 +424,91 @@ static func construction_progress(planet: PlanetState, buildings: Dictionary) ->
 		if def == null:
 			continue
 		cost += float(def.get("cost_metals")) * int(planet.building_queue[building_id])
+	return cost
+
+
+## Metal still owed on the current project, floored at zero.
+static func metal_remaining(planet: PlanetState, buildings: Dictionary) -> float:
+	return maxf(0.0, queued_cost(planet, buildings) - planet.build_metal)
+
+
+## Add `amount` metal against whatever the colony is building. Returns the amount actually
+## transferred.
+##
+## The mechanic behind the boost modal. Clamped three ways: to what was asked for, to what the
+## colony has in store, and to what the project still owes. The third clamp is the one that
+## matters — a player who opens the modal on a project that needs 20 metal more must not be
+## able to pour a colony's entire 500-metal stockpile into it and watch 480 vanish into a
+## structure worth 20.
+static func boost_construction(planet: PlanetState, amount: float, buildings: Dictionary = {}) -> float:
+	if planet == null or amount <= 0.0:
+		return 0.0
+	# Nothing queued, nothing to spend metal on. Returning zero rather than banking the metal
+	# silently is what lets the construction bar tell the player why a press did nothing.
+	if planet.building_queue.is_empty():
+		return 0.0
+	var ceiling := planet.reserve_metals
+	if not buildings.is_empty():
+		ceiling = minf(ceiling, metal_remaining(planet, buildings))
+	var available := minf(amount, maxf(0.0, ceiling))
+	if available <= 0.0:
+		return 0.0
+	# Debited here, credited here. The metal leaves storage exactly once and is never
+	# returned -- `finish_construction` zeroes `build_metal` rather than paying the surplus
+	# back, so a boosted project cannot refund the colony.
+	planet.reserve_metals -= available
+	planet.build_metal += available
+	return available
+
+
+## Land the queued project: move it from the queue into the colony's structures.
+##
+## `build_metal` is zeroed, not paid back. This is the refund rule in one place: the metal a
+## colony spent — whether earned turn by turn or pushed in by hand — is consumed by the
+## structure it built. Overflow from a late boost is simply lost, because the alternative is a
+## button that pays the player for overpaying.
+static func finish_construction(
+	planet: PlanetState, buildings: Dictionary, db: Node
+) -> void:
+	for building_id: StringName in planet.building_queue:
+		var count := int(planet.building_queue[building_id])
+		planet.structures[building_id] = int(planet.structures.get(building_id, 0)) + count
+	planet.building_queue.clear()
+	planet.build_turns_remaining = 0
+	planet.build_total_turns = 0
+	planet.build_metal = 0.0
+	# Recount immediately: the structures that just landed change capacity, housing and the
+	# power budget, and everything after this point in the turn should see the new numbers
+	# rather than the previous turn's. This is what makes a Granary's +1000 food, a City
+	# Complex's +20 housing and an Energy Storage's +1000 energy appear the moment the
+	# project completes rather than at the start of the following turn.
+	_recount_capacity(planet, buildings, db)
+
+
+## Completion progress for the colony's current project, 0..1.
+##
+## `progress = metal paid / total metal cost`, from `queued_cost`. A three-turn project at
+## equal production reads 33% after one turn, whatever it costs — which is what the bar is
+## claiming when it fills, and what the boost modal reports as the percentage already paid.
+##
+## Read from the definition rather than from the turn counter because a boosted project has
+## turns left on the clock and metal banked against it at the same time. The metal is the
+## honest measure: it is what was actually spent, by production or by hand.
+static func construction_progress(planet: PlanetState, buildings: Dictionary) -> float:
+	if planet == null or planet.building_queue.is_empty():
+		return 0.0
+	var cost := queued_cost(planet, buildings)
 	if cost <= 0.0:
 		return 0.0
 	return clampf(planet.build_metal / cost, 0.0, 1.0)
+
+
+## The most metal a boost could usefully transfer right now: what the colony holds, capped by
+## what the project still owes.
+##
+## This is the ceiling the boost modal's slider is clamped to, so a player cannot be offered
+## a transfer larger than the project can absorb.
+static func max_boost(planet: PlanetState, buildings: Dictionary) -> float:
+	if planet == null or planet.building_queue.is_empty():
+		return 0.0
+	return maxf(0.0, minf(planet.reserve_metals, metal_remaining(planet, buildings)))

@@ -10,11 +10,12 @@ class_name MacroPanel
 ## definite answer rather than a crash, and the GUI suite asserts on those nulls -- the
 ## absence is the thing under test, so it is asserted as an absence.
 
-## Emitted when the player stages a structure, with the building id.
-signal build_requested(building_id: StringName)
+## Emitted when the player clicks the construction progress bar. The root opens the boost
+## modal; the panel does not spend anything itself.
+signal construction_boosted
 
-## Emitted when the player clicks the construction progress bar.
-signal construction_boosted(metals: float)
+## Emitted when the player presses the Build button, with the structure to construct.
+signal build_requested(building_id: StringName)
 
 var _controller: SessionController = null
 
@@ -22,21 +23,38 @@ var _build_selector: OptionButton = null
 var _build_info: Label = null
 var _colony_selector: OptionButton = null
 
-## The interactive construction progress bar. Clicking it spends stored metal against the
-## project in progress, which is the mechanic the design document asks for.
+## The interactive construction progress bar. Clicking it raises `construction_boosted`,
+## which opens the boost modal.
 var _build_bar: ProgressBar = null
 var _build_mode_selector: OptionButton = null
+
+## The Build button. Choosing a structure is a *selection*; this is what starts it.
+var _build_button: Button = null
+
+## Hull selector for the Space Port, populated the moment a port exists.
+var _ship_selector: OptionButton = null
+var _build_ship_button: Button = null
 
 ## Standing warnings for the selected colony, rendered as an amber block.
 var _warnings: Label = null
 
 ## Building ids in build-queue order, grouped the way a player thinks about them: extraction
 ## first, then housing and storage, then power, then industry, then defence and lift.
+##
+## `colony_ship_building` is deliberately *absent*. It is the one structure a colony cannot
+## build: a Colony Ship flies to the world and is consumed on landing, so the only way to get
+## one is to send a ship. Listing it here would offer a button that cannot do what it says.
 const BUILD_ORDER: Array[StringName] = [
-	&"farm", &"mine", &"granary", &"city_complex", &"colony_pad",
+	&"farm", &"mine", &"granary", &"city_complex",
 	&"energy_storage", &"solar", &"coal", &"nuclear",
 	&"space_port", &"barracks", &"planetary_defense",
 ]
+
+## Structures the construction menu must never offer, whatever else is unlocked.
+##
+## Declared separately from `BUILD_ORDER` so the GUI suite can assert the exclusion directly
+## rather than inferring it from an array that a later roster change would silently extend.
+const UNBUILDABLE: Array[StringName] = [&"colony_ship_building"]
 
 ## Set while rebuilding the selector so its `item_selected` does not stage a phantom order.
 var _rebuilding := false
@@ -62,6 +80,14 @@ func _heading(text: String) -> Label:
 	l.text = text
 	l.add_theme_color_override("font_color", CC2Theme.CYAN)
 	l.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
+	return l
+
+
+func _subheading(text: String) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_color_override("font_color", CC2Theme.CYAN_DIM)
+	l.add_theme_font_size_override("font_size", CC2Theme.FONT_TINY)
 	return l
 
 
@@ -101,11 +127,22 @@ func _build_construction(col: Control) -> void:
 	_build_info.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
 	col.add_child(_build_info)
 
-	# The interactive progress bar. A `ProgressBar` is not clickable on its own, so the
-	# click handler is attached through `gui_input` rather than a `pressed` signal that does
-	# not exist for this class.
+	# The Build button. Choosing a structure from the dropdown above only *selects* it; this
+	# is what formally starts the project. Separating the two is what stops a player browsing
+	# the menu from committing a spend on every dropdown they pass through.
+	_build_button = Button.new()
+	_build_button.text = "Build"
+	_build_button.tooltip_text = "Start the selected structure on this colony"
+	_build_button.focus_mode = Control.FOCUS_NONE
+	_build_button.pressed.connect(_on_build_button_pressed)
+	col.add_child(_build_button)
+
+	# The interactive progress bar. A `ProgressBar` is not clickable on its own, so the click
+	# handler is attached through `gui_input` rather than a `pressed` signal that does not
+	# exist for this class. A click *opens the boost modal*; it does not spend on the spot,
+	# because a bare click spends the whole stockpile and that is never what it meant.
 	_build_bar = ProgressBar.new()
-	_build_bar.tooltip_text = "Click to spend stored metal and finish this now"
+	_build_bar.tooltip_text = "Click to transfer metal into this project"
 	_build_bar.custom_minimum_size = Vector2(0, 16)
 	_build_bar.show_percentage = false
 	_build_bar.max_value = 1.0
@@ -113,6 +150,19 @@ func _build_construction(col: Control) -> void:
 	_build_bar.focus_mode = Control.FOCUS_NONE
 	_build_bar.gui_input.connect(_on_build_bar_input)
 	col.add_child(_build_bar)
+
+	col.add_child(_subheading("SHIPS"))
+	_ship_selector = OptionButton.new()
+	_ship_selector.tooltip_text = "Hull to build at this colony's Space Port"
+	_ship_selector.focus_mode = Control.FOCUS_NONE
+	col.add_child(_ship_selector)
+
+	_build_ship_button = Button.new()
+	_build_ship_button.text = "Build Ship"
+	_build_ship_button.tooltip_text = "Lay the selected hull down at this Space Port"
+	_build_ship_button.focus_mode = Control.FOCUS_NONE
+	_build_ship_button.pressed.connect(_on_build_ship_button_pressed)
+	col.add_child(_build_ship_button)
 
 	_warnings = Label.new()
 	_warnings.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -150,6 +200,7 @@ func refresh() -> void:
 	_refresh_colonies()
 	_refresh_buildings()
 	_refresh_build_info()
+	_refresh_ships()
 	_refresh_progress()
 	_refresh_warnings()
 
@@ -188,7 +239,9 @@ func _refresh_buildings() -> void:
 	var previous := _selected_build_id()
 	_build_selector.clear()
 	for id in BUILD_ORDER:
-		if not me.unlocked_buildings.has(id):
+		# The unbuildable list is checked here as well as being absent from `BUILD_ORDER`, so
+		# adding a structure to the wrong array cannot quietly offer it.
+		if UNBUILDABLE.has(id) or not me.unlocked_buildings.has(id):
 			continue
 		var def: Resource = _controller.defs.building(id) as Resource
 		if def == null:
@@ -233,6 +286,40 @@ func _refresh_build_info() -> void:
 	)
 
 
+## Populate the hull selector from the colony's Space Port.
+##
+## The list is whatever `TurnResolver.hulls_available_at` says, so a port appears in the
+## roster the moment one is constructed rather than at the start of the following turn, and a
+## lost port empties it again. Nothing is written to the faction's unlock set: a port is a
+## local grant, and granting it empire-wide would let one berth hand out hulls everywhere.
+func _refresh_ships() -> void:
+	if _ship_selector == null:
+		return
+	var me := _controller.player()
+	var planet := _selected_colony()
+	_rebuilding = true
+	var previous := _selected_hull_id()
+	_ship_selector.clear()
+	if me != null and planet != null and _controller.defs != null:
+		for hull_id in TurnResolver.hulls_available_at(planet, me):
+			var hull: Resource = _controller.defs.ship_hull(hull_id) as Resource
+			if hull == null:
+				continue
+			_ship_selector.add_item(String(hull.display_name))
+			_ship_selector.set_item_metadata(_ship_selector.item_count - 1, hull_id)
+	var idx := _index_of_hull(previous)
+	if idx < 0:
+		idx = 0
+	if _ship_selector.item_count > 0:
+		_ship_selector.select(idx)
+	_ship_selector.disabled = _ship_selector.item_count == 0
+	_rebuilding = false
+	if _build_ship_button != null:
+		_build_ship_button.disabled = _ship_selector.item_count == 0
+	if _build_button != null:
+		_build_button.disabled = _build_selector == null or _build_selector.item_count == 0
+
+
 ## Draw the construction bar: completion fraction, and whether there is anything to boost.
 func _refresh_progress() -> void:
 	if _build_bar == null:
@@ -245,7 +332,7 @@ func _refresh_progress() -> void:
 	_build_bar.value = fraction
 	_build_bar.visible = planet != null and not planet.building_queue.is_empty()
 	if _build_bar.visible:
-		_build_bar.tooltip_text = "%d%% complete - click to spend stored metal (M%d banked)" % [
+		_build_bar.tooltip_text = "%d%% complete - click to transfer metal (M%d banked)" % [
 			int(round(fraction * 100.0)), int(planet.reserve_metals)]
 	else:
 		_build_bar.tooltip_text = ""
@@ -299,12 +386,11 @@ func _on_build_bar_input(event: InputEvent) -> void:
 	var planet := _selected_colony()
 	if planet == null or planet.building_queue.is_empty():
 		return
-	# Spend everything the colony has banked. One press finishes a project the colony can
-	# afford outright, which is the interaction the design document describes: "click to
-	# spend stored metal directly to boost/complete progress".
-	var spent := _controller.boost_construction(planet.reserve_metals)
-	if spent > 0.0:
-		construction_boosted.emit(spent)
+	# A click *opens the modal*. It does not spend: a bare click used to hand the whole
+	# stockpile to the project, and a colony with five hundred metal banked against a
+	# twenty-metal Solar Array quietly lost four hundred and eighty of it. The amount is now
+	# a decision the player makes, and the modal's slider is capped at what the project owes.
+	construction_boosted.emit()
 
 
 ## Select the colony the dropdown names.
@@ -330,22 +416,41 @@ func _colony_at(index: int) -> int:
 	return int(meta) if meta != null else -1
 
 
+## Choosing a structure only *selects* it.
+##
+## It does not spend anything. The Build button below is what starts the project, so a
+## player scrolling through the dropdown cannot commit a purchase on every row they pass.
 func _on_build_selected(_index: int) -> void:
-	if _rebuilding or _controller == null:
+	if _rebuilding:
 		return
+	_refresh_build_info()
+
+
+## The Build button: formally start the selected structure on the selected colony.
+func _on_build_button_pressed() -> void:
+	if _controller == null:
+		return
+	# The colony named by the selector is the intended target, so adopt it before submitting.
+	# Without this, pressing Build after clicking a colony row submits against whatever the
+	# map last selected.
+	_adopt_selected_colony()
 	_refresh_build_info()
 	var id := _selected_build_id()
 	if id == &"":
 		return
-	# Touching the structure dropdown must not be rejected just because the controller's
-	# selection is something else. The colony named by the selector above is the intended
-	# target, so make it so before the order is submitted.
+	if _controller.queue_build_structure(id):
+		build_requested.emit(id)
+
+
+## Build the selected hull at this colony's Space Port.
+func _on_build_ship_button_pressed() -> void:
+	if _controller == null:
+		return
 	_adopt_selected_colony()
-	# Selecting a structure is a *request*, not an order: the player still has to press
-	# the build button, so browsing the menu cannot spend the treasury. A refusal here is
-	# not an error -- the controller has already reported why on `action_rejected`.
-	_controller.queue_build_structure(id)
-	build_requested.emit(id)
+	var hull_id := _selected_hull_id()
+	if hull_id == &"":
+		return
+	_controller.queue_build_ship(hull_id)
 
 
 func _on_build_mode_selected(index: int) -> void:
@@ -416,6 +521,39 @@ func build_mode_selector() -> OptionButton:
 	return _build_mode_selector
 
 
+## The Build button, which formally starts the selected structure.
+func build_button() -> Button:
+	return _build_button
+
+
+## The hull selector, populated from the colony's Space Port.
+func ship_selector() -> OptionButton:
+	return _ship_selector
+
+
+## The Build Ship button.
+func build_ship_button() -> Button:
+	return _build_ship_button
+
+
+func _selected_hull_id() -> StringName:
+	if _ship_selector == null or _ship_selector.selected < 0:
+		return &""
+	var meta: Variant = _ship_selector.get_item_metadata(_ship_selector.selected)
+	return meta as StringName if meta != null else &""
+
+
+## Position of a hull in the ship selector, or -1.
+func _index_of_hull(hull_id: StringName) -> int:
+	if hull_id == &"" or _ship_selector == null:
+		return -1
+	for i in _ship_selector.item_count:
+		var meta: Variant = _ship_selector.get_item_metadata(i)
+		if meta != null and StringName(str(meta)) == hull_id:
+			return i
+	return -1
+
+
 ## The colony warning readout.
 func warnings_label() -> Label:
 	return _warnings
@@ -448,7 +586,7 @@ func select_build(building_id: StringName) -> bool:
 ## searching the source for a string would pass while the label was still on screen.
 func visible_text() -> String:
 	var parts := PackedStringArray()
-	for node in [colony_selector(), build_selector(), build_mode_selector()]:
+	for node in [colony_selector(), build_selector(), build_mode_selector(), ship_selector()]:
 		var button: OptionButton = node as OptionButton
 		if button == null:
 			continue

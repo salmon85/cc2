@@ -27,6 +27,9 @@ var fleets: FleetPanel = null
 ## sit above the map: the player is choosing between worlds and needs to see them to choose.
 var travel: TravelModal = null
 
+## The metal-transfer dialog behind the construction progress bar.
+var boost: BoostModal = null
+
 var _log: RichTextLabel = null
 ## Every line the session log has shown, kept as plain strings.
 ##
@@ -49,6 +52,7 @@ func _ready() -> void:
 	add_child(bg)
 	_build_layout()
 	_build_travel_overlay()
+	_build_boost_overlay()
 	# `start()` may have been called before this node entered the tree, in which case the
 	# panels it needs did not exist yet.
 	if _pending_galaxy != null:
@@ -145,6 +149,19 @@ func _build_travel_overlay() -> void:
 	add_child(travel)
 
 
+## Mount the boost modal next to the travel modal, also centred and hidden until asked for.
+##
+## It is a sibling rather than a child of the macro panel so it can overlay the map: the
+## player is deciding how much metal to move out of a colony they are looking at.
+func _build_boost_overlay() -> void:
+	boost = BoostModal.new()
+	boost.set_anchors_preset(Control.PRESET_CENTER)
+	boost.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	boost.grow_vertical = Control.GROW_DIRECTION_BOTH
+	boost.visible = false
+	add_child(boost)
+
+
 ## Point the whole client at a galaxy. Panels are bound here and nowhere else, so the
 ## wiring order is a single readable block.
 func start(galaxy: GalaxyState, player_faction: int = 0, seed_override: int = 0) -> bool:
@@ -186,6 +203,7 @@ func _attach_session() -> void:
 	fleets.bind(controller)
 	map.bind(controller)
 	travel.bind(controller)
+	boost.bind(controller)
 
 	_wire()
 	_log_line("SESSION %d OPENED - %d SYSTEMS - %d FACTIONS" % [
@@ -215,10 +233,13 @@ func _wire() -> void:
 	map.order_cancelled.connect(_on_order_cancelled)
 	fleets.fleet_selected.connect(_on_fleet_selected)
 	fleets.travel_requested.connect(_on_travel_requested)
+	fleets.land_requested.connect(_on_land_requested)
 	travel.travel_confirmed.connect(_on_travel_confirmed)
 	travel.travel_cancelled.connect(_on_travel_cancelled)
 	macros.build_requested.connect(_on_build_requested)
 	macros.construction_boosted.connect(_on_construction_boosted)
+	boost.boost_confirmed.connect(_on_boost_confirmed)
+	boost.boost_cancelled.connect(_on_boost_cancelled)
 	controller.turn_resolved.connect(_on_turn_resolved)
 	controller.state_changed.connect(_refresh)
 	controller.action_rejected.connect(_on_action_rejected)
@@ -369,12 +390,42 @@ func _on_travel_confirmed(destination: int, ships: Dictionary) -> void:
 		_log_line("[color=#%s]TRAVEL REFUSED[/color]" % CC2Theme.ALERT.to_html(false))
 
 
+## The landing button was pressed. Consume the kit and settle the world.
+func _on_land_requested() -> void:
+	var f := controller.fleet()
+	var where := "" if f == null else controller.display_name(f.system)
+	if controller.land_colony_ship():
+		_log_line("COLONY SHIP LANDED at %s" % where)
+		return
+	_log_line("[color=#%s]LANDING REFUSED[/color]" % CC2Theme.ALERT.to_html(false))
+
+
 func _on_travel_cancelled() -> void:
 	_log_line("TRAVEL DISCARDED")
 
 
-func _on_construction_boosted(metals: float) -> void:
-	_log_line("CONSTRUCTION BOOSTED by %d metal" % int(metals))
+## The progress bar was clicked. Open the dialog; nothing is spent yet.
+func _on_construction_boosted() -> void:
+	if boost.open_for_selected_colony():
+		return
+	status_message.emit("nothing under construction to put metal into")
+
+
+## The dialog's OK. This is the only place a player transfers metal by hand.
+##
+## The modal has already clamped the amount to `min(storage, metal still owed)`, and
+## `SessionController.boost_construction` clamps again -- the UI guard is so the player
+## cannot pick an absurd number, and the sim guard is so a packet cannot.
+func _on_boost_confirmed(metals: float) -> void:
+	var spent := controller.boost_construction(metals)
+	if spent > 0.0:
+		_log_line("CONSTRUCTION BOOSTED by %d metal" % int(spent))
+		return
+	_log_line("[color=#%s]BOOST REFUSED[/color]" % CC2Theme.ALERT.to_html(false))
+
+
+func _on_boost_cancelled() -> void:
+	_log_line("METAL TRANSFER CANCELLED")
 
 
 func _on_planet_picked(index: int) -> void:

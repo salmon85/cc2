@@ -30,6 +30,7 @@ func _initialize() -> void:
 
 	_test_order_roundtrip()
 	_test_order_queue()
+	_test_no_rival_research_news()
 	_test_movement()
 	_test_map_size_travel()
 	_test_combat()
@@ -37,6 +38,11 @@ func _initialize() -> void:
 	_test_defense_suppression()
 	_test_invasion()
 	_test_colony_sim()
+	_test_space_port_hulls()
+	_test_colony_ship_landing()
+	_test_storage_capacity()
+	_test_metal_boost()
+	_test_growth_curve()
 	_test_troops_and_cargo()
 	_test_survey()
 	_test_research()
@@ -109,7 +115,7 @@ func _colonize(g: GalaxyState, faction_id: int, planet_index: int) -> PlanetStat
 	# granary for storage, a farm and a mine, and a landed Colony Ship for the 5 pop and 5
 	# food it contributes. Without housing the colony cannot grow at all, and without a
 	# granary it overflows on its first surplus -- both of which are the rules under test.
-	p.structures = {&"city_complex": 1, &"granary": 1, &"colony_pad": 1, &"farm": 2, &"mine": 1}
+	p.structures = {&"city_complex": 1, &"granary": 1, &"colony_ship_building": 1, &"farm": 2, &"mine": 1}
 	p.food_stock = 20.0
 	p.surveyed = true
 	var f: FactionState = g.faction(faction_id)
@@ -194,6 +200,77 @@ func _test_order_roundtrip() -> void:
 		var rt := Order.from_dict(candidate.to_dict())
 		sup.ok(rt != null and rt.fingerprint() == candidate.fingerprint(),
 			"constructor order round-trips: %d" % candidate.type)
+
+
+## Rival research must not be announced.
+##
+## The resolver used to post "Word reaches us that X has made a discovery" for every rival
+## node every turn. In a four-empire game that buried the player's own news under lines about
+## strangers' science -- and told them nothing actionable, because the node was never named and
+## the player cannot spend a rival's discovery.
+func _test_no_rival_research_news() -> void:
+	sup.begin("no rival research spam")
+
+	var g := _galaxy(11500, 40, 4)
+	var rival := g.faction(1)
+	sup.ok(rival != null, "the fixture really does have a rival empire")
+	if rival == null:
+		return
+
+	# Give the rivals plenty to complete, so the old path would have fired many times.
+	for f in g.factions:
+		f.tech_points = PackedFloat64Array([5000.0, 5000.0, 5000.0, 5000.0])
+		# Enough civilians to cross several population milestones, for the player as well as
+		# the rivals: the point is that the player's own news survives the suppression.
+		for colony in g.colonies_of(f.id):
+			colony.population = 30.0
+	_colonize(g, 1, _unowned_planet(g, 1))
+	for colony in g.colonies_of(1):
+		colony.population = 30.0
+
+	var news := PackedStringArray()
+	for _turn in 12:
+		var report := TurnResolver.resolve_turn(g, [] as Array, _defs, _db, _rng(11500), 0)
+		for line: Variant in report["news"]:
+			news.append(String(line))
+
+	sup.ok(not news.is_empty(), "the turns produced some news at all")
+	var discoveries := 0
+	var spoken := PackedStringArray()
+	for line in news:
+		if line.contains("discovery") or line.contains("Word reaches us"):
+			discoveries += 1
+			spoken.append(line)
+	sup.eq(discoveries, 0,
+		"no turn announced a rival empire's research (offending lines: %s)" % " | ".join(spoken))
+
+	# The news log the session reads is the same text, so the leak cannot be hiding there.
+	var logged := 0
+	for entry: Variant in g.news_log:
+		if String(entry).contains("discovery"):
+			logged += 1
+	sup.eq(logged, 0, "and none reached the persisted news log")
+
+	# Rival milestones are silent too, for the same reason. Checked by attribution rather
+	# than by counting: the player's own milestone lines carry their empire's name, so every
+	# milestone line must name the player and nothing else.
+	var me: FactionState = g.faction(0)
+	var own := 0
+	var foreign_milestones := PackedStringArray()
+	for line in news:
+		if not line.contains("population milestone"):
+			continue
+		if line.contains(me.name):
+			own += 1
+		else:
+			foreign_milestones.append(line)
+	sup.eq(foreign_milestones.size(), 0,
+		"every milestone line names the player and no rival (offenders: %s)" % " | ".join(
+			foreign_milestones))
+
+	# The player's own research *is* announced: suppressing the spam must not silence
+	# everything, or the news feed goes empty and the player loses their own progress.
+	sup.ok(own > 0, "the player's own milestones are still announced", "%d lines" % own)
 
 
 func _test_order_queue() -> void:
@@ -695,6 +772,537 @@ func _test_invasion() -> void:
 	# relevant in a war rather than decorative.
 	sup.ok(InvasionStage.planet_garrison(taken, _db) > 0.0,
 		"a colony with no troops still garrisons from its population")
+
+
+# --- growth curve ---------------------------------------------------------
+
+## Birth chance falls as the colony fills, and rises again when it empties.
+##
+## The flat 50% the first version used was not a growth rate but a coin toss: a colony of four
+## and a colony of forty both added one person on half their turns, so the only thing standing
+## between a colony and unlimited growth was the player refusing to build housing. The soft
+## cap makes the curve flatten on its own -- and, because it is a function of population
+## *alone*, makes a colony that has been depopulated repopulate quickly again.
+func _test_growth_curve() -> void:
+	sup.begin("population growth curve")
+
+	var base := float(_db.get("POP_GROWTH_CHANCE"))
+	var penalty := float(_db.get("POP_GROWTH_PENALTY_PER_POP"))
+	var floor_chance := float(_db.get("POP_GROWTH_MIN_CHANCE"))
+	var ceiling := float(_db.get("POP_GROWTH_MAX_CHANCE"))
+	sup.near(base, 0.50, 0.0001, "the curve starts at a flat 50%")
+	sup.near(penalty, 0.015, 0.0001, "and falls by 1.5% per pop")
+	sup.near(floor_chance, 0.05, 0.0001, "down to a 5% floor")
+	sup.near(ceiling, 0.50, 0.0001, "and is capped at 50%")
+
+	# The formula itself, at the points that matter.
+	sup.near(ColonySim.growth_chance(2.0, _db), 0.47, 0.0001, "two pop: 47%")
+	sup.near(ColonySim.growth_chance(10.0, _db), 0.35, 0.0001, "ten pop: 35%")
+	sup.near(ColonySim.growth_chance(30.0, _db), 0.05, 0.0001,
+		"thirty pop: clamped to the 5% floor")
+
+	# Monotonically decreasing while it is above the floor, and flat at it below.
+	var decreasing := true
+	var previous := 1.0
+	for pop in range(0, 31):
+		var chance := ColonySim.growth_chance(float(pop), _db)
+		if chance > previous:
+			decreasing = false
+		previous = chance
+	sup.ok(decreasing, "the chance never rises as the population rises")
+	sup.near(ColonySim.growth_chance(100.0, _db), floor_chance, 0.0001,
+		"a very large colony sits on the floor")
+	sup.near(ColonySim.growth_chance(1000.0, _db), floor_chance, 0.0001,
+		"and stays there rather than going negative")
+
+	# And it scales back *up* when the population falls, which is the recovery half.
+	sup.ok(ColonySim.growth_chance(4.0, _db) > ColonySim.growth_chance(30.0, _db),
+		"a depopulated colony grows faster than a crowded one")
+	sup.near(ColonySim.growth_chance(0.0, _db), ceiling, 0.0001,
+		"and an empty one is back at the ceiling")
+
+	# The gates are unchanged: a curve is not a licence to grow without housing or food.
+	var g := _galaxy(16000)
+	var faction: FactionState = g.faction(0)
+	var colony := _habitable_colony(g)
+	sup.ok(colony != null, "a world exists for the curve test")
+	if colony == null:
+		return
+
+	# No housing: never grows, whatever the curve says.
+	var homeless := _habitable_colony(g)
+	homeless.structures = {&"farm": 8, &"granary": 1}
+	homeless.population = 4.0
+	homeless.food_stock = 500.0
+	var held := homeless.population
+	for _i in 40:
+		ColonySim.simulate_colony(g, homeless, faction, _defs, _db, _rng(300 + _i))
+		homeless.food_stock = 500.0
+	sup.eq(homeless.population, held, "no housing means no growth, whatever the chance")
+
+	# Below two pop: never grows.
+	var tiny := _habitable_colony(g)
+	tiny.structures = {&"city_complex": 1, &"farm": 8, &"granary": 1}
+	tiny.population = 1.0
+	tiny.food_stock = 500.0
+	ColonySim.simulate_colony(g, tiny, faction, _defs, _db, _rng(340))
+	var tiny_held := tiny.population
+	for _i in 40:
+		ColonySim.simulate_colony(g, tiny, faction, _defs, _db, _rng(341 + _i))
+		tiny.food_stock = 500.0
+	sup.eq(tiny.population, tiny_held, "a colony of one never grows")
+
+	# The measured rate follows the curve, not a flat half.
+	var rate_at := func(pop: float, trials: int) -> float:
+		var colony2: PlanetState = _habitable_colony(g)
+		colony2.structures = {&"city_complex": 4, &"farm": 20, &"granary": 2}
+		var grew: int = 0
+		for _i in trials:
+			colony2.population = pop
+			colony2.food_stock = 500.0
+			var before := colony2.population
+			ColonySim.simulate_colony(g, colony2, faction, _defs, _db, _rng(5000 + _i))
+			if colony2.population > before:
+				grew += 1
+		return float(grew) / float(trials)
+
+	var at_four: float = rate_at.call(4.0, 200)
+	var at_twenty: float = rate_at.call(20.0, 200)
+	var at_fifty: float = rate_at.call(50.0, 200)
+	sup.near(at_four, ColonySim.growth_chance(4.0, _db), 0.08,
+		"four pop grows at roughly the curve's rate (measured %.3f)" % at_four)
+	sup.near(at_twenty, ColonySim.growth_chance(20.0, _db), 0.08,
+		"twenty pop grows at roughly the curve's rate (measured %.3f)" % at_twenty)
+	sup.ok(at_twenty < at_four,
+		"a larger colony grows more slowly (%.3f vs %.3f)" % [at_twenty, at_four])
+	sup.ok(at_fifty < at_twenty,
+		"and a larger one still slower (%.3f vs %.3f)" % [at_fifty, at_twenty])
+	sup.near(at_fifty, ColonySim.growth_chance(50.0, _db), 0.06,
+		"fifty pop grows at the 5%% floor (measured %.3f)" % at_fifty)
+
+	# The report carries the chance it actually rolled against, so the UI can show it.
+	var probe := _habitable_colony(g)
+	probe.structures = {&"city_complex": 2, &"farm": 10, &"granary": 1}
+	probe.population = 12.0
+	probe.food_stock = 500.0
+	var rolled := ColonySim.simulate_colony(g, probe, faction, _defs, _db, _rng(6000))
+	sup.near(rolled.growth_chance, ColonySim.growth_chance(12.0, _db), 0.0001,
+		"the report states the chance it rolled against")
+	var blocked := _habitable_colony(g)
+	blocked.structures = {&"farm": 10, &"granary": 1}
+	blocked.population = 12.0
+	blocked.food_stock = 0.0
+	var none := ColonySim.simulate_colony(g, blocked, faction, _defs, _db, _rng(6001))
+	sup.near(none.growth_chance, 0.0, 0.0001,
+		"and is zero on a colony that could not grow at all")
+
+
+# --- space port hulls -----------------------------------------------------
+
+## A Space Port hands over six hulls the instant it exists.
+##
+## The port's grant is deliberately *local to the planet* rather than written into the
+## faction's unlock set. Writing it would turn one berth into an empire-wide research award,
+## and it would not come back when the port was lost, since unlocks are monotone.
+func _test_space_port_hulls() -> void:
+	sup.begin("space port hulls")
+
+	var g := _galaxy(17000)
+	var colony := _habitable_colony(g)
+	sup.ok(colony != null, "a world exists for the port test")
+	if colony == null:
+		return
+	var faction: FactionState = g.faction(0)
+	colony.structures[&"space_port"] = 0
+
+	# The six, exactly as the design document lists them.
+	var baseline := [
+		&"exploration_ship", &"cargo_transport", &"troop_transport",
+		&"colony_ship", &"corvette", &"frigate",
+	]
+	sup.eq(GameDB.PORT_HULLS.size(), 6, "the port grants six hulls")
+	for hull_id: StringName in baseline:
+		sup.ok(GameDB.PORT_HULLS.has(hull_id), "the port roster includes %s" % hull_id)
+
+	# Before the port, none of them is layable. The four starters are already unlocked by
+	# generation, so the test strips them to isolate the port's contribution -- what matters
+	# is that the *port* is what makes a Corvette and a Frigate available.
+	var saved_unlocks := faction.unlocked_ships.duplicate()
+	for hull_id: Variant in GameDB.PORT_HULLS as Array:
+		faction.unlocked_ships.erase(StringName(hull_id))
+	for hull_id: StringName in baseline:
+		sup.ok(not TurnResolver.hull_available(colony, hull_id, faction),
+			"without a port, %s is not available" % hull_id)
+	sup.ok(TurnResolver.hulls_available_at(colony, faction).is_empty(),
+		"so the construction list is empty")
+
+	# Construct one. The list must populate in the same turn, not the next.
+	colony.structures[&"space_port"] = 1
+	for hull_id: StringName in baseline:
+		sup.ok(TurnResolver.hull_available(colony, hull_id, faction),
+			"a port makes %s immediately available" % hull_id)
+		var offered := TurnResolver.hulls_available_at(colony, faction)
+		sup.ok(offered.has(hull_id),
+			"and the construction list offers %s" % hull_id)
+	sup.ok(not faction.unlocked_ships.has(&"corvette"),
+		"without writing an unlock: the port's grant is local")
+	sup.ok(not faction.unlocked_ships.has(&"frigate"), "nor the frigate")
+
+	# The list is exactly the six, with no capital ships smuggled in.
+	var listed := TurnResolver.hulls_available_at(colony, faction)
+	sup.eq(listed.size(), 6,
+		"the list is exactly the six baseline hulls (got %s)" % str(listed))
+	for hull_id: Variant in [&"destroyer", &"cruiser", &"leviathan"]:
+		sup.ok(not listed.has(StringName(hull_id)),
+			"and %s still needs a population milestone" % hull_id)
+
+	# Destroying the port takes the grant away again, because it was never an unlock.
+	colony.structures[&"space_port"] = 0
+	sup.ok(not TurnResolver.hull_available(colony, &"corvette", faction),
+		"losing the port withdraws the hull again")
+	sup.ok(TurnResolver.hulls_available_at(colony, faction).is_empty(),
+		"and empties the list")
+
+	# A colony elsewhere in the empire does *not* inherit it.
+	colony.structures[&"space_port"] = 1
+	var other := _habitable_colony(g)
+	sup.ok(other != null, "a second colony exists for the isolation check")
+	if other != null:
+		sup.ok(not TurnResolver.hull_available(other, &"corvette", faction),
+			"another colony without a port gets nothing from this one")
+
+	# An empire unlock still applies with no port at all, and both routes coexist.
+	faction.unlocked_ships[&"cruiser"] = true
+	colony.structures[&"space_port"] = 0
+	sup.ok(TurnResolver.hull_available(colony, &"cruiser", faction),
+		"a milestone unlock works with no port")
+	faction.unlocked_ships = saved_unlocks
+
+
+## Landing a Colony Ship consumes the ship and leaves the structure behind it.
+##
+## The Colony Ship is the one building in the roster that cannot be *built*: it flies here and
+## is spent. That is what makes settling a second world a decision with a ship at the end of
+## it rather than a line item.
+func _test_colony_ship_landing() -> void:
+	sup.begin("colony ship landing")
+
+	var g := _galaxy(17500)
+	var faction: FactionState = g.faction(0)
+
+	# There is exactly one Colony Ship building in the roster, and it is not offered by the
+	# construction menu. It is reachable only by landing.
+	sup.eq((_defs.get("buildings") as Dictionary).size(), 12,
+		"the roster still holds twelve structures")
+	var pad := _defs_building(&"colony_ship_building") as Resource
+	sup.ok(pad != null, "the landed Colony Ship structure exists")
+	if pad != null:
+		sup.eq(int(pad.get("max_per_colony")), 1, "and is capped at one per world")
+
+	# A target world nobody owns, and a fleet carrying one kit.
+	var target := _unowned_planet(g)
+	sup.ok(target >= 0, "there is an unclaimed world to settle")
+	if target < 0:
+		return
+	var body: PlanetState = g.planet(target)
+	var carrier := _place_fleet(g, 0, target, {&"colony_ship": 1, &"corvette": 2})
+
+	sup.ok(InvasionStage.can_land_colony_ship(carrier, body),
+		"a fleet with a kit can land on an empty world")
+	var founded_before := faction.colonies_founded
+	sup.ok(InvasionStage.land_colony_ship(g, carrier, body, faction),
+		"landing succeeds")
+	sup.ok(body.colonized, "the world is settled")
+	sup.eq(body.owner, 0, "and owned by the landing empire")
+	sup.eq(body.count(&"colony_ship_building"), 1,
+		"the structure a landed Colony Ship leaves is placed")
+	sup.eq(carrier.ship_count(), 2,
+		"and the ship itself is consumed, the escort untouched")
+	sup.eq(carrier.ships.get(&"colony_ship", 0), 0,
+		"so no Colony Ship remains aboard")
+	sup.eq(faction.colonies_founded, founded_before + 1,
+		"and the empire books a colony founded")
+
+	# The cap holds: a second kit cannot land on a world that already has one.
+	var second := _place_fleet(g, 0, target, {&"colony_ship": 1})
+	sup.ok(not InvasionStage.can_land_colony_ship(second, body),
+		"a world with a landed ship refuses a second")
+	sup.ok(not InvasionStage.land_colony_ship(g, second, body, faction),
+		"and the landing is refused")
+	sup.eq(second.ship_count(), 1, "the refused fleet keeps its ship")
+	sup.eq(body.count(&"colony_ship_building"), 1, "and the world still has exactly one")
+
+	# A fleet with no kit has nothing to land.
+	var empty := _place_fleet(g, 0, _unowned_planet(g, target), {&"corvette": 1})
+	sup.ok(not InvasionStage.can_land_colony_ship(empty, g.planet(_unowned_planet(g, target))),
+		"a fleet with no Colony Ship cannot land")
+
+	# An inhabited world is not a landing site.
+	var settled := _habitable_colony(g)
+	sup.ok(settled != null, "an inhabited world exists for the refusal")
+	if settled != null:
+		var onto := _place_fleet(g, 0, settled.index, {&"colony_ship": 1})
+		sup.ok(not InvasionStage.can_land_colony_ship(onto, settled),
+			"an already-settled world refuses a kit")
+		sup.ok(not InvasionStage.land_colony_ship(g, onto, settled, faction),
+			"so the landing is refused")
+		sup.eq(onto.ship_count(), 1, "and the fleet keeps it")
+
+
+# --- storage capacity ---------------------------------------------------
+
+## Completing a storage structure raises the colony's capacity in the same turn.
+##
+## The assertion is about the *turn*, not merely the eventual number: `finish_construction`
+## recounts immediately, so a Granary's +1000 food is banked the moment the last turn of
+## construction resolves rather than appearing at the start of the next one -- which would
+## leave the colony overflowing for a turn against a store that had already been paid for.
+func _test_storage_capacity() -> void:
+	sup.begin("storage capacity on completion")
+
+	var g := _galaxy(18000)
+	var faction: FactionState = g.faction(0)
+	var base_food := float(_db.get("BASE_FOOD_STORAGE"))
+	var base_power := float(_db.get("BASE_POWER_STORAGE"))
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+
+	# --- Granary: +1000 food each ----------------------------------------------
+	var colony := _habitable_colony(g)
+	sup.ok(colony != null, "a world exists for the storage test")
+	if colony == null:
+		return
+	colony.population = 4.0
+	colony.food_stock = 0.0
+	colony.structures = {&"mine": 2}
+	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(1))
+	sup.near(colony.food_capacity, base_food, 0.001,
+		"a colony with no granary stores only its base pantry")
+
+	# Build one to completion, the way the resolver would.
+	var granary := _defs_building(&"granary") as Resource
+	colony.building_queue[&"granary"] = 1
+	colony.build_turns_remaining = int(granary.get("build_turns"))
+	colony.build_total_turns = int(granary.get("build_turns"))
+	colony.build_metal = 0.0
+	var turns_to_build := colony.build_total_turns
+	for _i in turns_to_build:
+		ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(2 + _i))
+		if colony.count(&"granary") > 0:
+			break
+	sup.eq(colony.count(&"granary"), 1, "the granary is built")
+	sup.near(colony.food_capacity, base_food + 1000.0, 0.001,
+		"and raises max food storage by 1000 in the same turn")
+
+	# A second one adds another 1000, not another 1000 total.
+	colony.building_queue[&"granary"] = 1
+	colony.build_turns_remaining = int(granary.get("build_turns"))
+	colony.build_total_turns = int(granary.get("build_turns"))
+	for _i in colony.build_total_turns:
+		ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(20 + _i))
+		if colony.count(&"granary") > 1:
+			break
+	sup.eq(colony.count(&"granary"), 2, "a second granary is built")
+	sup.near(colony.food_capacity, base_food + 2000.0, 0.001,
+		"and capacity is cumulative: +1000 per granary")
+
+	# --- City Complex: +20 housing each -----------------------------------------
+	var housing_probe := _habitable_colony(g)
+	sup.ok(housing_probe != null, "a second world exists for the housing test")
+	if housing_probe != null:
+		housing_probe.structures = {}
+		housing_probe.population = 4.0
+		housing_probe.food_stock = 500.0
+		ColonySim.simulate_colony(g, housing_probe, faction, _defs, _db, _rng(40))
+		sup.near(housing_probe.housing, 0.0, 0.001, "a bare colony houses nobody")
+		# Growth is impossible without housing, which is what makes the Complex worth building.
+		var held := housing_probe.population
+		for _i in 10:
+			ColonySim.simulate_colony(g, housing_probe, faction, _defs, _db, _rng(41 + _i))
+			housing_probe.food_stock = 500.0
+		sup.eq(housing_probe.population, held, "and cannot grow")
+
+		var city := _defs_building(&"city_complex") as Resource
+		housing_probe.building_queue[&"city_complex"] = 1
+		housing_probe.build_turns_remaining = int(city.get("build_turns"))
+		housing_probe.build_total_turns = int(city.get("build_turns"))
+		for _i in housing_probe.build_total_turns:
+			ColonySim.simulate_colony(g, housing_probe, faction, _defs, _db, _rng(50 + _i))
+			if housing_probe.count(&"city_complex") > 0:
+				break
+		sup.eq(housing_probe.count(&"city_complex"), 1, "the City Complex is built")
+		sup.near(housing_probe.housing, 20.0, 0.001,
+			"and raises housing by 20 in the same turn")
+		# And now it can grow, which is the point of the capacity.
+		sup.ok(housing_probe.housing > housing_probe.population,
+			"leaving room for new arrivals")
+
+	# --- Energy Storage: +1000 power each ---------------------------------------
+	var powered := _habitable_colony(g)
+	sup.ok(powered != null, "a third world exists for the power test")
+	if powered != null:
+		powered.structures = {}
+		powered.population = 4.0
+		powered.food_stock = 500.0
+		powered.power = 0.0
+		ColonySim.simulate_colony(g, powered, faction, _defs, _db, _rng(60))
+		sup.near(powered.power_capacity, base_power, 0.001,
+			"a bare colony banks only its base cells")
+		var storage := _defs_building(&"energy_storage") as Resource
+		powered.building_queue[&"energy_storage"] = 1
+		powered.build_turns_remaining = int(storage.get("build_turns"))
+		powered.build_total_turns = int(storage.get("build_turns"))
+		for _i in powered.build_total_turns:
+			ColonySim.simulate_colony(g, powered, faction, _defs, _db, _rng(70 + _i))
+			if powered.count(&"energy_storage") > 0:
+				break
+		sup.eq(powered.count(&"energy_storage"), 1, "the Energy Storage is built")
+		sup.near(powered.power_capacity, base_power + 1000.0, 0.001,
+			"and raises max power storage by 1000 in the same turn")
+		# And the ceiling it raises is real: surplus power that was being lost now banks.
+		powered.structures[&"solar"] = 20
+		powered.power = 0.0
+		var banked := 0.0
+		for _i in 10:
+			ColonySim.simulate_colony(g, powered, faction, _defs, _db, _rng(80 + _i))
+			banked = maxf(banked, powered.power)
+		# The old ceiling was the base battery alone, so every turn past it silently lost
+		# 20 power. The point of the +1000 is that the surplus now has somewhere to go.
+		sup.ok(banked > base_power,
+			"so surplus power now banks instead of being lost (%.0f, was capped at %.0f)" % [
+				banked, base_power])
+
+	# The three capacities are independent: one structure cannot raise another's.
+	var mixed := _habitable_colony(g)
+	if mixed != null:
+		mixed.structures = {&"granary": 2, &"energy_storage": 1}
+		mixed.population = 4.0
+		mixed.food_stock = 100.0
+		ColonySim.simulate_colony(g, mixed, faction, _defs, _db, _rng(95))
+		sup.near(mixed.food_capacity, base_food + 2000.0, 0.001,
+			"granaries raise food storage only")
+		sup.near(mixed.power_capacity, base_power + 1000.0, 0.001,
+			"and energy storage raises power storage only")
+		sup.near(mixed.housing, 0.0, 0.001,
+			"and neither houses anybody")
+
+
+# --- construction economics ----------------------------------------------
+
+## Boosting a project: the deduction, the cap, and the absence of any refund.
+func _test_metal_boost() -> void:
+	sup.begin("metal boost")
+
+	var g := _galaxy(19000)
+	var faction: FactionState = g.faction(0)
+	var colony := _habitable_colony(g)
+	sup.ok(colony != null, "a world exists for the boost test")
+	if colony == null:
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var granary := _defs_building(&"granary") as Resource
+	var cost := float(granary.get("cost_metals"))
+	colony.structures = {&"mine": 4}
+	colony.population = 4.0
+	colony.food_stock = 500.0
+	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(1))
+
+	# Nothing queued, nothing to spend on.
+	colony.reserve_metals = 500.0
+	sup.near(ColonySim.boost_construction(colony, 100.0, buildings), 0.0, 0.001,
+		"a colony with nothing queued transfers nothing")
+
+	# A project, with production credited so far.
+	colony.building_queue[&"granary"] = 1
+	colony.build_turns_remaining = int(granary.get("build_turns"))
+	colony.build_total_turns = int(granary.get("build_turns"))
+	colony.build_metal = 0.0
+	sup.near(ColonySim.metal_remaining(colony, buildings), cost, 0.001,
+		"a fresh project owes its full metal cost")
+
+	# --- the cap ---------------------------------------------------------------
+	sup.near(ColonySim.max_boost(colony, buildings), minf(500.0, cost), 0.001,
+		"the ceiling is the lesser of storage and metal still owed")
+	var asked := ColonySim.boost_construction(colony, 500.0, buildings)
+	sup.near(asked, cost, 0.001,
+		"asking for the whole stockpile transfers only what the project owes")
+	sup.near(colony.reserve_metals, 500.0 - cost, 0.001,
+		"and storage is debited by exactly that much, not by the whole pile")
+	sup.near(ColonySim.construction_progress(colony, buildings), 1.0, 0.001,
+		"and the project is complete")
+
+	# --- the cap holds over the wire too -----------------------------------------
+	# The client's dialog clamps its slider, but an order arrives from a client this build
+	# does not control. A cap enforced only in the UI is a UI convention, not a rule.
+	colony.building_queue[&"granary"] = 1
+	colony.build_turns_remaining = int(granary.get("build_turns"))
+	colony.build_total_turns = int(granary.get("build_turns"))
+	colony.build_metal = cost * 0.5
+	colony.reserve_metals = 5000.0
+	var wire_store := colony.reserve_metals
+	TurnResolver.resolve_turn(g, [
+		Order.make_boost_build(0, colony.index, 5000.0)
+	], _defs, _db, _rng(4), 0)
+	var wire_gain := colony.reserve_metals - wire_store
+	sup.ok(wire_gain <= cost * 0.5 + 0.001,
+		"a wire order asking for the whole stockpile moves at most what is owed",
+		"moved %.1f of an owed %.1f" % [wire_gain, cost * 0.5])
+
+	# --- no refund -------------------------------------------------------------
+	# The whole point: metal handed over is gone. A boost that was refunded on completion
+	# would make the modal a way to *gain* metal, and a colony could bank a structure and
+	# profit from it.
+	# Mine income is the confound: the colony earns while it builds. Set to a known value and
+	# compare against that plus exactly what the mines produce, so a refund of any size would
+	# show up as a surplus rather than hiding inside the mining.
+	colony.reserve_metals = 100.0
+	var mined_per_turn := ColonySim._metal_output(colony, buildings)
+	var store_before := colony.reserve_metals
+	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(2))
+	sup.eq(colony.count(&"granary"), 1, "the granary is built")
+	sup.near(colony.reserve_metals, store_before + mined_per_turn, 0.001,
+		"storage is the starting pile plus the mines and nothing else: no refund (got %.1f, expected %.1f)" % [
+			colony.reserve_metals, store_before + mined_per_turn])
+	sup.near(colony.build_metal, 0.0, 0.001,
+		"the progress pool is cleared, not paid back")
+
+	# Overpaying cannot be laundered either: the ceiling is what it owed, so there is no
+	# surplus to hand back in the first place.
+	colony.building_queue[&"granary"] = 1
+	colony.build_turns_remaining = int(granary.get("build_turns"))
+	colony.build_total_turns = int(granary.get("build_turns"))
+	colony.build_metal = 0.0
+	colony.reserve_metals = 5000.0
+	var overpay_store := colony.reserve_metals
+	ColonySim.boost_construction(colony, 5000.0, buildings)
+	var mines := ColonySim._metal_output(colony, buildings)
+	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(3))
+	sup.near(colony.reserve_metals, overpay_store - cost + mines, 0.001,
+		"a colony that overpays is not credited any of the difference back")
+	sup.eq(colony.count(&"granary"), 2, "and the structure still lands")
+
+	# --- progress is cost, not turns --------------------------------------------
+	# A three-turn project reads a third complete after one turn, whatever it costs. The old
+	# flat "+1 metal a turn" made a 100-metal structure advance 1% per turn, so the bar told
+	# a player essentially nothing.
+	var timed := _habitable_colony(g)
+	sup.ok(timed != null, "a world exists for the progress-curve test")
+	if timed != null:
+		var city := _defs_building(&"city_complex") as Resource
+		timed.structures = {&"mine": 4}
+		timed.population = 4.0
+		timed.food_stock = 500.0
+		timed.building_queue[&"city_complex"] = 1
+		timed.build_turns_remaining = int(city.get("build_turns"))
+		timed.build_total_turns = int(city.get("build_turns"))
+		timed.build_metal = 0.0
+		sup.eq(timed.build_total_turns, 3, "a City Complex takes three turns")
+		for turn in 3:
+			ColonySim.simulate_colony(g, timed, faction, _defs, _db, _rng(200 + turn))
+			if turn < 2:
+				sup.near(ColonySim.construction_progress(timed, buildings),
+					float(turn + 1) / 3.0, 0.02,
+					"turn %d of 3 reads about a third" % (turn + 1))
+		sup.eq(timed.count(&"city_complex"), 1, "and it lands on the third turn")
 
 
 # --- troops and cargo ---------------------------------------------------

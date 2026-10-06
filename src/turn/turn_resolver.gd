@@ -93,20 +93,28 @@ static func resolve_turn(
 	for researching in galaxy.factions:
 		if researching.defeated:
 			continue
-		research_total += ResearchStage.accumulate(researching, galaxy, defs, db)
+		researching.last_research_granted = ResearchStage.accumulate(
+			researching, galaxy, defs, db)
+		research_total += researching.last_research_granted
 		for completed in ResearchStage.complete_available(researching, defs):
 			var line := ResearchStage.describe_completion(researching, completed, defs)
 			if researching.id == player_faction:
 				report["news"].append(line)
-			else:
-				# The player learns of foreign progress only as a rumour.
-				report["news"].append(
-					"Word reaches us that %s has made a discovery." % researching.name)
+			# A foreign empire's research is deliberately *not* announced. It used to post
+			# "Word reaches us that X has made a discovery" once per node per empire per turn,
+			# which in a four-empire game buried the player's own news under lines about
+			# strangers' science -- and told them nothing actionable, since the node is not
+			# even named. A rival's technology is learned by meeting their fleet.
 		var milestone_hulls := ResearchStage.apply_milestones(
 			researching, _civilian_pop(galaxy, researching.id), defs, db)
-		for hull_id in milestone_hulls:
-			report["news"].append("%s has reached a population milestone: %s is now buildable." % [
-				researching.name, Enums.ship_role_name(_role_of(defs, hull_id))])
+		# Only the player's own unlocks are announced, for the same reason rival research is
+		# not: a line about an empire crossing a population threshold tells the player nothing
+		# they can act on, and four empires crossing several thresholds a turn fills the feed
+		# with it. A rival's fleet size is learned by meeting the fleet.
+		if researching.id == player_faction:
+			for hull_id in milestone_hulls:
+				report["news"].append("%s has reached a population milestone: %s is now buildable." % [
+					researching.name, Enums.ship_role_name(_role_of(defs, hull_id))])
 	report["research_granted"] = research_total
 
 # --- 6. Fog of War -----------------------------------------------------
@@ -163,7 +171,7 @@ static func _apply_order(
 		Enums.OrderType.RECRUIT_TROOP:
 			_apply_recruit_troop(galaxy, faction, order, defs)
 		Enums.OrderType.BOOST_BUILD:
-			_apply_boost_build(galaxy, faction, order)
+			_apply_boost_build(galaxy, faction, order, defs)
 		Enums.OrderType.SET_BUILD_MODE:
 			var mode_planet: PlanetState = galaxy.planet(order.target_planet) as PlanetState
 			if mode_planet != null and mode_planet.owner == order.faction:
@@ -254,13 +262,22 @@ static func _apply_recruit_troop(
 
 
 ## Spend stored metal against the construction in progress.
+##
+## The building table is passed so the transfer is capped by what the project still owes.
+## The client's dialog already clamps the slider, but an order arrives over the wire from a
+## client this build does not control, and the cap has to hold for that too -- otherwise the
+## cap is a UI convention rather than a rule.
 static func _apply_boost_build(
-	galaxy: GalaxyState, faction: FactionState, order: Order
+	galaxy: GalaxyState, faction: FactionState, order: Order, defs: Node
 ) -> void:
 	var planet: PlanetState = galaxy.planet(order.target_planet) as PlanetState
 	if planet == null or planet.owner != order.faction:
 		return
-	ColonySim.boost_construction(planet, float(order.payload.get("metals", 0.0)))
+	var buildings := {} as Dictionary
+	if defs != null:
+		buildings = defs.get("buildings") as Dictionary
+	ColonySim.boost_construction(
+		planet, float(order.payload.get("metals", 0.0)), buildings)
 
 
 ## Move food, metal, power or troops between a world and a fleet parked over it.
@@ -307,23 +324,41 @@ static func can_build_ship(
 	return true
 
 
-## The colony's metal output this turn, which is what `PER_TURN` mode is measured against.
+## The colony's metal output this turn, which is what `PER_TURN` mode is measured against
+## and what the planet detail panel shows as the per-turn delta.
 ##
-## Read from the structure table rather than from `reserve_metals`. The stockpile is a
-## balance that a colony can top up once and then coast on, which would let a player switch
-## on per-turn mode for one turn, queue a fleet, and switch it off again -- the mode would be
-## a way of skipping the production requirement rather than a statement about the colony.
-static func metal_output_per_turn(planet: PlanetState) -> float:
+## Read from the structure table rather than from `reserve_metals`. The stockpile is a balance
+## that a colony can top up once and then coast on, which would let a player switch on
+## per-turn mode for one turn, queue a fleet, and switch it off again -- the mode would be a
+## way of skipping the production requirement rather than a statement about the colony.
+##
+## With a `buildings` table, staffing is honoured: a mine nobody is working produces nothing.
+## The panel passes the table so the number it shows is the number the turn will credit; the
+## build gate passes nothing so it cannot be tripped by a definition that failed to load.
+static func metal_output_per_turn(
+	planet: PlanetState, buildings: Dictionary = {}
+) -> float:
 	if planet == null:
 		return 0.0
 	var total := 0.0
+	var hands := int(floor(planet.population))
 	for building_id: StringName in planet.structures:
 		if building_id != &"mine":
 			continue
 		var count := int(planet.structures[building_id])
 		if count <= 0:
 			continue
-		total += float(count) * MINES_PER_STRUCTURE
+		var per_mine := MINES_PER_STRUCTURE
+		if not buildings.is_empty():
+			var def: Resource = buildings.get(building_id, null) as Resource
+			if def == null:
+				continue
+			if int(def.get("pop_required")) > 0 and hands <= 0:
+				continue
+			per_mine = float(def.get("metal_per_turn"))
+			if int(def.get("pop_required")) > 0:
+				hands -= mini(count, hands)
+		total += float(count) * per_mine
 	return total
 
 
@@ -374,11 +409,52 @@ static func _apply_build_ship(
 	var hull: Resource = defs.ship_hull(hull_id) as Resource
 	if hull == null:
 		return
-	if not faction.unlocked_ships.has(hull_id):
+	if not hull_available(planet, hull_id, faction):
 		return
 	if not can_build_ship(planet, hull, faction, db):
 		return
 	planet.ship_queue.append({"hull": String(hull_id), "turns": int(hull.get("build_turns"))})
+
+
+## Whether `hull_id` can be laid down at `planet` at all, ignoring what it costs.
+##
+## Two routes to a hull, and they are deliberately different in scope:
+##
+##   - the empire's own unlocks (population milestones), which apply everywhere; and
+##   - a Space Port on *this* world, which hands over the six baseline hulls.
+##
+## The port route is checked against the planet rather than written into
+## `faction.unlocked_ships`. Writing it would grant the hull to every world the empire owns,
+## which turns a single berth into an empire-wide research award — and it would not come back
+## when the port was lost, since unlocks are monotone.
+static func hull_available(
+	planet: PlanetState, hull_id: StringName, faction: FactionState
+) -> bool:
+	if planet == null or faction == null:
+		return false
+	if faction.unlocked_ships.has(hull_id):
+		return true
+	return planet.count(&"space_port") > 0 and GameDB.PORT_HULLS.has(hull_id)
+
+
+## Every hull id layable at `planet`, in `GameDB.HULL_LADDER` order then the remaining
+## starters, so a caller rendering a menu lists the same set in the same order.
+static func hulls_available_at(planet: PlanetState, faction: FactionState) -> Array[StringName]:
+	var out: Array[StringName] = []
+	var ladder: Array = GameDB.HULL_LADDER as Array
+	for hull_id: Variant in ladder:
+		var id := StringName(hull_id)
+		if hull_available(planet, id, faction):
+			out.append(id)
+	for hull_id: Variant in GameDB.PORT_HULLS as Array:
+		var id2 := StringName(hull_id)
+		if not out.has(id2) and hull_available(planet, id2, faction):
+			out.append(id2)
+	for hull_id: Variant in GameDB.STARTER_HULLS as Array:
+		var id3 := StringName(hull_id)
+		if not out.has(id3) and hull_available(planet, id3, faction):
+			out.append(id3)
+	return out
 
 
 static func _apply_build_structure(
@@ -410,6 +486,10 @@ static func _apply_build_structure(
 	# ColonySim has worked through build_turns_remaining.
 	planet.building_queue[building_id] = int(planet.building_queue.get(building_id, 0)) + 1
 	planet.build_turns_remaining = int(building.get("build_turns"))
+	# Captured because `build_turns_remaining` counts down, and the per-turn contribution is
+	# `cost / total_turns`. Recomputing the denominator each turn would hand every remaining
+	# turn an equal share of the whole cost and finish the project in half the time.
+	planet.build_total_turns = int(building.get("build_turns"))
 	planet.build_metal = 0.0
 
 

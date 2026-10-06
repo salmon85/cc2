@@ -496,7 +496,7 @@ static func _founding_colony(
 	# its housing and its first turn of food come from), a farm, a mine and enough power to
 	# run one City Complex once it is built. The exact composition follows the Phase 8
 	# roster: the Colony Ship is the only structure a colony cannot build for itself.
-	p.structures[&"colony_pad"] = 1
+	p.structures[&"colony_ship_building"] = 1
 	p.structures[&"farm"] = 2
 	p.structures[&"mine"] = 1
 	p.food_stock = 20.0
