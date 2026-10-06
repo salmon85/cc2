@@ -4250,18 +4250,96 @@ func _step_camera_snap_and_uncolonized() -> void:
 	if other == null:
 		sup.ok(false, "the player has a second colony to select")
 		return
+	# Zoom in first, because at the default framing the whole system is already on screen.
+	#
+	# The camera's range collapses to the centre of the field when the viewport is wider
+	# than the map, so there is nowhere for it to go and every world is visible regardless.
+	# That is correct -- you cannot pan to somewhere the whole map already covers -- but it
+	# means a snap tested at that zoom proves nothing either way. Zoomed in, the promise is
+	# exact: the camera goes to the world, and not to some other one.
+	_client.map.camera().zoom = Vector2(6.0, 6.0)
+	var zoom_before := _client.map.camera_zoom()
 	c.select_planet(colony.index)
-	var before := _client.map.camera_position()
 	_client.macros.colony_selector().select(
 		_client.macros.colony_selector().item_count - 1)
 	_client.macros.colony_selector().emit_signal("item_selected",
 		_client.macros.colony_selector().item_count - 1)
 	var after := _client.map.camera_position()
-	sup.ok(after.is_equal_approx(other.position) or before != after,
+	# Strictly where it landed, not merely "somewhere else".
+	#
+	# The old assertion was `on it, or the camera moved at all`, and the second half is
+	# satisfied by any drift whatsoever -- so it would have passed against a snap that went to
+	# the wrong world entirely, which is the failure this step exists to catch. Choosing a
+	# colony in the build menu has to bring *that* world into view.
+	sup.ok(after.is_equal_approx(other.position),
 		"choosing a colony in the dropdown moves the map onto it",
-		"before=%s after=%s want=%s" % [str(before), str(after), str(other.position)])
-	# Left as the player had it: the snap is a move, not a re-frame.
+		"after=%s want=%s" % [str(after), str(other.position)])
+	sup.ok(_client.map.is_planet_visible(other.index), "which brings it into view")
+	# A snap is a move, not a re-frame: the scale the player was working at is theirs.
+	sup.eq(_client.map.camera_zoom(), zoom_before, "and it leaves the zoom alone")
+	# Left as the player had it.
 	sup.eq(c.selected_planet, other.index, "and selects it")
+
+	# --- the eye beside the dropdown ---------------------------------------------
+	# The same move on demand. Its reason to exist is the one-colony case, which the
+	# dropdown cannot serve: a single-entry list has no row to choose, so `select()` moves
+	# the highlight and emits nothing, and a player who has panned away has no way back.
+	var eye := _client.macros.focus_button()
+	sup.ok(eye != null, "there is an eye button beside the colony dropdown")
+	if eye == null:
+		return
+	sup.eq(eye.get_parent(), _client.macros.colony_selector().get_parent(),
+		"sharing a row with the dropdown rather than sitting on its own line")
+	sup.ok(eye.custom_minimum_size.x > 0.0, "and it reserves room for the glyph")
+	sup.ok(not eye.disabled, "and it is live while there is a colony to show")
+
+	# Pan the map somewhere else entirely, then press it.
+	_client.map.camera().position = other.position + Vector2(900.0, 600.0)
+	sup.ok(not _client.map.is_planet_visible(other.index),
+		"the map has been moved off the colony by hand")
+	eye.emit_signal("pressed")
+	sup.ok(_client.map.camera_position().is_equal_approx(other.position),
+		"and the eye brings the build target back into view",
+		"after=%s want=%s" % [
+			str(_client.map.camera_position()), str(other.position)])
+
+	# The eye follows the dropdown, not the last thing clicked on the map. Otherwise the
+	# button would take the player to whatever world they had just clicked away from, which
+	# is the opposite of a "go home" control.
+	var first: PlanetState = null
+	for p in c.player_colonies():
+		if first == null:
+			first = p
+		if p.index != other.index:
+			c.select_planet(p.index)
+			break
+	if first != null and first.index != other.index:
+		_client.macros.colony_selector().select(0)
+		_client.macros.colony_selector().emit_signal("item_selected", 0)
+		_client.map.camera().position = first.position + Vector2(1500.0, 1100.0)
+		eye.emit_signal("pressed")
+		sup.ok(_client.map.camera_position().is_equal_approx(first.position),
+			"and it goes where the dropdown says, not where the map was last clicked",
+			"after=%s want=%s" % [
+				str(_client.map.camera_position()), str(first.position)])
+
+	# One colony: the case the button is really for. The dropdown cannot fire here, so the
+	# eye is the only way home.
+	var solo := _galaxy_probe(c)
+	if solo != null:
+		_client.macros.colony_selector().clear()
+		_client.macros.colony_selector().add_item(solo.name)
+		_client.macros.colony_selector().set_item_metadata(0, solo.index)
+		_client.macros.colony_selector().select(0)
+		sup.eq(_client.macros.colony_selector().item_count, 1,
+			"the build menu is left with a single colony to choose from")
+		_client.map.camera().position = solo.position + Vector2(1500.0, 1100.0)
+		_client.macros.focus_button().emit_signal("pressed")
+		sup.ok(_client.map.camera_position().is_equal_approx(solo.position),
+			"and the eye still takes the player there",
+			"after=%s want=%s" % [
+				str(_client.map.camera_position()), str(solo.position)])
+
 	_client.macros.refresh()
 
 	# An unclaimed world reports nothing it does not have -- once the player is close enough
@@ -5114,6 +5192,16 @@ func _metal_rate_text(
 ) -> String:
 	var delta := ColonySim.get_projected_metal_delta(colony, buildings, faction)
 	return "(%s)" % Format.signed(delta, 0)
+
+
+## A planet the empire owns, for a fixture that wants one specific world.
+##
+## Named for what it is rather than reaching for `_first_colony`, because the single-colony
+## case needs a body it can put on the board without disturbing the suite's own colonies.
+func _galaxy_probe(c: SessionController) -> PlanetState:
+	for p in c.player_colonies():
+		return p
+	return null
 
 
 func _signed_in(row: String) -> float:

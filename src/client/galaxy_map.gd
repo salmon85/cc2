@@ -767,6 +767,30 @@ func camera_position() -> Vector2:
 	return Vector2.ZERO if _camera == null else _camera.position
 
 
+## Whether a world is inside the visible rectangle right now.
+##
+## Exists because "focus this planet" and "the camera is exactly on this planet" are not the
+## same claim, and only the first is always true. At the default framing the whole system is
+## on screen, the camera's range collapses to the centre of the field, and every world is
+## already visible -- so the camera cannot move onto any of them and must not pretend to.
+## A test asserting the exact position would be asserting something the player cannot have
+## either; this says what they actually got.
+func is_planet_visible(planet_index: int) -> bool:
+	if _camera == null or _controller == null or _controller.galaxy == null:
+		return false
+	var planet: PlanetState = _controller.galaxy.planet(planet_index)
+	if planet == null:
+		return false
+	var view := _sub_viewport.size if _sub_viewport != null else Vector2i(640, 480)
+	var half := Vector2(float(view.x), float(view.y)) * 0.5 / maxf(0.0001, _camera.zoom.x)
+	return Rect2(_camera.position - half, half * 2.0).has_point(planet.position)
+
+
+## The camera's zoom level, so a test can put the map somewhere the camera can actually pan.
+func camera_zoom() -> Vector2:
+	return Vector2.ONE if _camera == null else _camera.zoom
+
+
 ## Whether every in-transit fleet's path is drawn.
 func flight_paths_enabled() -> bool:
 	return _view.flight_paths_enabled()

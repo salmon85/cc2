@@ -28,6 +28,9 @@ var _build_selector: OptionButton = null
 var _build_info: Label = null
 var _colony_selector: OptionButton = null
 
+## The eye beside the colony dropdown: centre the map on the current build target on demand.
+var _focus_button: EyeButton = null
+
 ## The interactive construction progress bar. Clicking it raises `construction_boosted`,
 ## which opens the boost modal.
 var _build_bar: ProgressBar = null
@@ -133,7 +136,26 @@ func _build_construction(col: Control) -> void:
 	_colony_selector.tooltip_text = "Colony to build in"
 	_colony_selector.focus_mode = Control.FOCUS_NONE
 	_colony_selector.item_selected.connect(_on_colony_selected)
-	col.add_child(_colony_selector)
+	_colony_selector.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+
+	# The eye, beside it, because the dropdown's own selection event is not always available.
+	#
+	# Choosing a row moves the map onto that world, which is the point of building here being
+	# one gesture. But with a single colony there is no row to choose: the list has one entry,
+	# `select()` moves the highlight and emits nothing, and the player has no way to bring
+	# their own world back into view after panning away from it. The button is the same move
+	# on demand, so a one-colony empire is not worse off than a four-colony one.
+	_focus_button = EyeButton.new()
+	_focus_button.tooltip_text = "Show this colony on the map"
+	_focus_button.focus_mode = Control.FOCUS_NONE
+	_focus_button.custom_minimum_size = Vector2(26, 0)
+	_focus_button.pressed.connect(_on_focus_pressed)
+
+	var colony_row := HBoxContainer.new()
+	colony_row.add_theme_constant_override("separation", 4)
+	colony_row.add_child(_colony_selector)
+	colony_row.add_child(_focus_button)
+	col.add_child(colony_row)
 
 	_build_selector = OptionButton.new()
 	_build_selector.tooltip_text = "Structure to queue"
@@ -293,6 +315,10 @@ func _refresh_colonies() -> void:
 		# so any write would immediately re-enter `refresh` and stomp whatever the player
 		# just selected on the map or in the inspector.
 	_colony_selector.disabled = _colony_selector.item_count == 0
+	# The eye has nothing to aim at when there is no colony to build in, and says so rather
+	# than pressing to nothing.
+	if _focus_button != null:
+		_focus_button.disabled = _colony_selector.item_count == 0
 	_rebuilding = false
 
 
@@ -675,6 +701,22 @@ func _on_colony_selected(index: int) -> void:
 	snap_camera_to(planet_index)
 
 
+## The eye was pressed. Take the player to the colony they are building in.
+##
+## The *selector's* entry rather than `selected_planet`, so the button and the dropdown agree
+## about what "this colony" means. Reading the controller's selection instead would make the
+## button chase a map click: the player could click a rival's world, and pressing the eye to
+## come home would then take them to the world they had just clicked away from.
+func _on_focus_pressed() -> void:
+	if _focus_button == null or _controller == null:
+		return
+	var planet_index := _colony_at(_colony_selector.selected)
+	if planet_index < 0:
+		return
+	_controller.select_planet(planet_index)
+	snap_camera_to(planet_index)
+
+
 func _on_build_selected(_index: int) -> void:
 	if _rebuilding:
 		return
@@ -807,6 +849,11 @@ func build_selector() -> OptionButton:
 
 func colony_selector() -> OptionButton:
 	return _colony_selector
+
+
+## The eye beside the colony dropdown, for centring the map on the build target.
+func focus_button() -> EyeButton:
+	return _focus_button
 
 
 ## The structure progress bar. Clicking it opens the metal-allocation dialog.
