@@ -18,6 +18,9 @@ signal background_clicked
 
 var _controller: SessionController = null
 
+## Draw every in-transit fleet's path, not only the selected fleet's.
+var _flight_paths := false
+
 ## Set while the pointer is over a star, so the cursor can change.
 var _hover: int = -1
 
@@ -119,6 +122,19 @@ func _draw_bounds(galaxy: GalaxyState) -> void:
 	draw_line(Vector2(hi.x, lo.y), hi, BOUNDS_COLOUR, BOUNDS_WIDTH)
 	draw_line(hi, Vector2(lo.x, hi.y), BOUNDS_COLOUR, BOUNDS_WIDTH)
 	draw_line(Vector2(lo.x, hi.y), lo, BOUNDS_COLOUR, BOUNDS_WIDTH)
+
+
+## Whether the all-fleets flight-path overlay is on.
+func flight_paths_enabled() -> bool:
+	return _flight_paths
+
+
+## Turn the all-fleets flight-path overlay on or off.
+func set_flight_paths(on: bool) -> void:
+	if _flight_paths == on:
+		return
+	_flight_paths = on
+	queue_redraw()
 
 
 ## The star, the planets, owner rings and labels.
@@ -323,7 +339,31 @@ func _label_worth_drawing(galaxy: GalaxyState, p: PlanetState) -> bool:
 ## test calls this, so there is a single implementation that both the drawing and the test
 ## go through. A test that greps the source for a string only proves the string is there.
 func label_worth_drawing(p: PlanetState) -> bool:
-	return _controller != null and _controller.knows_name_of(p.index)
+	if _controller == null:
+		return false
+	if _controller.knows_name_of(p.index):
+		return true
+	# A world the player has their own ships over is named, and stops being named when they
+	# leave -- unless it is theirs, in which case the name stays.
+	#
+	# The asymmetry is the point. A colony is a place you know; a transit stop is somewhere
+	# you have been, and once your fleet leaves there is nothing on the board saying it was
+	# ever more than an unnamed rock. That is also the fog rule working rather than being
+	# circumvented: putting a ship in orbit is the documented way to earn the right to see a
+	# world, and it is how a player is meant to discover the board.
+	return p.surveyed or _friendly_fleet_in_orbit(p)
+
+
+## Whether the player has a stationary ship of their own over `p`.
+func _friendly_fleet_in_orbit(p: PlanetState) -> bool:
+	if _controller == null or _controller.galaxy == null:
+		return false
+	for key: int in _controller.galaxy.fleets:
+		var f: FleetState = _controller.galaxy.fleets[key]
+		if f.active and f.owner == _controller.player_id \
+				and f.destination < 0 and f.system == p.index:
+			return true
+	return false
 
 
 ## Fleet markers. Travelling fleets are drawn at their interpolated position with a
@@ -611,8 +651,54 @@ func _draw() -> void:
 	_draw_field(galaxy)
 	_draw_bounds(galaxy)
 	_draw_systems(galaxy)
+	# Under the fleet markers: a path is a route through space, and drawing it over the ships
+	# that are flying it puts a dashed line across the diamond the player is trying to click.
+	_draw_flight_paths(galaxy)
 	_draw_fleets(galaxy)
 	_draw_order_line(galaxy)
+
+
+## Every fleet currently in transit, drawn at once.
+##
+## Off by default. Each path is a dashed line with an arrowhead at the destination, in the
+## owner's colour, and each carries one turn-count label -- one per fleet rather than one per
+## waypoint, because a line with twelve numbers on it is a line nobody reads.
+##
+## Only the player's own fleets and fleets their sensors have already found: this is an
+## overlay over the same fog the fleet markers obey, not a way around it. A rival's flight is
+## shown where it would already be visible as a diamond, and no wider.
+func _draw_flight_paths(galaxy: GalaxyState) -> void:
+	if not _flight_paths:
+		return
+	var font := ThemeDB.fallback_font
+	for key: int in galaxy.fleets:
+		var f: FleetState = galaxy.fleets[key]
+		if not f.active or f.destination < 0 or f.system < 0:
+			continue
+		var mine := f.owner == _controller.player_id
+		if not mine and not _fleet_visible(galaxy, f):
+			continue
+		var here := galaxy.planet(f.system)
+		var dest := galaxy.planet(f.destination)
+		if here == null or dest == null:
+			continue
+		var base := CC2Theme.faction_color(f.owner) if mine else CC2Theme.WHITE_DIM
+		var colour := Color(base.r, base.g, base.b, 0.75)
+		var at := _fleet_position(galaxy, f)
+		# From where the fleet is, not from where it left: a path drawn from the origin runs
+		# behind the fleet the whole way and reads as a mistake.
+		draw_dashed_line(at, dest.position, colour, 1.0)
+		var dir := (dest.position - at).normalized()
+		if dir.length_squared() > 0.0:
+			var tip := dest.position - dir * 7.0
+			var perp := Vector2(-dir.y, dir.x) * 3.5
+			draw_colored_polygon(
+				PackedVector2Array([dest.position - dir * 2.0, tip + perp, tip - perp]), colour)
+		var pct := int(round(_travel_fraction(galaxy, f) * 100.0))
+		draw_string(
+			font, at + Vector2(8.0, 14.0), "%d%%" % pct,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, CC2Theme.FONT_SMALL, colour
+		)
 
 
 ## The half-extent of the drawn field in *this node's own* coordinates, which are

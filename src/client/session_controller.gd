@@ -514,6 +514,18 @@ func land_colony_ship() -> bool:
 		else:
 			action_rejected.emit("that world already has a landed Colony Ship")
 		return false
+	# The ship is consumed and the structure replaces it, so a fleet that existed only to
+	# carry it has to go with it. It used to survive as an empty marker on the roster: still
+	# selectable, still offered to the cargo dialog, and offering nothing. Leaving the hull in
+	# the fleet was the other half of the same bug -- the colony ship stayed in orbit and
+	# still had five empty passenger berths after it had already been spent.
+	if selected_fleet == f.id and (f.ship_count() <= 0 or galaxy.fleet(f.id) == null):
+		# The landing removes an emptied fleet from the galaxy itself, so the selection has to
+		# be dropped here rather than left pointing at a fleet that is no longer there.
+		selected_fleet = -1
+	# The landing is the structure's first turn of existence, so its capacities and its
+	# staffing are settled now rather than at the top of the next colony pass.
+	ColonySim.recount_capacity(planet, _building_table(), db)
 	state_changed.emit()
 	return true
 
@@ -527,6 +539,33 @@ func can_land_colony_ship() -> bool:
 	if f == null or galaxy == null or f.destination >= 0 or f.system < 0:
 		return false
 	return InvasionStage.can_land_colony_ship(f, galaxy.planet(f.system))
+
+
+## Post one more civilian to `building_id` on the selected colony.
+func assign_worker(building_id: StringName) -> bool:
+	var planet := _selected_owned_planet()
+	if planet == null:
+		return false
+	if not ColonySim.assign_worker(planet, building_id):
+		if ColonySim.idle_workers(planet) <= 0:
+			action_rejected.emit("nobody is free to work it")
+		else:
+			action_rejected.emit("every one of those is already worked")
+		return false
+	state_changed.emit()
+	return true
+
+
+## Pull one civilian off `building_id` on the selected colony.
+func unassign_worker(building_id: StringName) -> bool:
+	var planet := _selected_owned_planet()
+	if planet == null:
+		return false
+	if not ColonySim.unassign_worker(planet, building_id):
+		action_rejected.emit("nobody is posted there")
+		return false
+	state_changed.emit()
+	return true
 
 
 ## Convert one civilian on the selected colony into one troop.
@@ -591,6 +630,71 @@ func refund_construction(metals: float) -> float:
 		return 0.0
 	state_changed.emit()
 	return returned
+
+
+## Everything standing on the selected colony that could be scrapped, as `{label: id}`.
+##
+## The Destroy menu's contents: the colony's structures and the hulls in its orbit. A landed
+## colony ship is *not* offered -- it is the one structure with a cost of zero, because it
+## was paid for by spending the ship, so "half of nothing" is a free building rather than a
+## refund and the menu would be offering a gift.
+func scrap_targets() -> Dictionary:
+	var planet := _selected_owned_planet()
+	if planet == null:
+		return {} as Dictionary
+	var out: Dictionary = {}
+	for id: StringName in planet.structures:
+		if id == &"colony_ship_building":
+			continue
+		out["%s x%d" % [String(id).replace("_", " ").to_upper(),
+			int(planet.structures[id])]] = id
+	for hull_id: StringName in hulls_in_orbit_at(planet.index):
+		var def: Resource = _hull_table().get(hull_id, null) as Resource
+		var label := String(hull_id) if def == null else String(def.display_name)
+		out["%s x%d" % [label.to_upper(), int(hulls_in_orbit_at(planet.index)[hull_id])]] = hull_id
+	return out
+
+
+## Whether `entry` from `scrap_targets` is a structure or a hull.
+##
+## Naming the two kinds apart is unavoidable once the menu lists both: they are different
+## `StringName` spaces and a hull id like `corvette` is not a building id, so the menu has to
+## carry which it is rather than guess from the key.
+func is_ship_scrap(entry: StringName) -> bool:
+	return _hull_table().has(entry) and not _building_table().has(entry)
+
+
+## Scrap a structure or a hull from the selected colony, refunding half its metal cost.
+func scrap(entry: StringName) -> float:
+	var planet := _selected_owned_planet()
+	if planet == null:
+		return 0.0
+	var refund := 0.0
+	if is_ship_scrap(entry):
+		refund = ColonySim.destroy_ship(
+			galaxy, planet, player(), entry, _hull_table())
+	else:
+		refund = ColonySim.destroy_structure(
+			planet, entry, _building_table(), db)
+	if refund <= 0.0:
+		action_rejected.emit("nothing was scrapped")
+		return 0.0
+	state_changed.emit()
+	return refund
+
+
+## The non-blocking notice shown when a queued building would land with nobody to work it.
+##
+## Empty string when there is nothing to say. The order is still accepted: a colony with no
+## idle colonists will have grown one by the time the farm finishes, and refusing the build
+## would turn a warning into a wall.
+func staffing_warning(building_id: StringName) -> String:
+	var planet := _selected_owned_planet()
+	if planet == null:
+		return ""
+	if ColonySim.would_be_staffed(planet, building_id):
+		return ""
+	return "Warning: Insufficient idle population to staff this facility upon completion."
 
 
 ## The building registry, or an empty dictionary when the autoload is missing.

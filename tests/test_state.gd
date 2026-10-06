@@ -233,13 +233,22 @@ func _test_fleet_state_roundtrip() -> void:
 	var freighter := FleetState.new()
 	freighter.bind_hulls(_defs.get("ship_hulls"))
 	freighter.add_ships(&"cargo_transport", 2)
-	_t.near(freighter.cargo_capacity(), 400.0, 0.001,
-		"two cargo transports give 400 units of capacity")
+	# An unbounded hold, so capacity is not a tonnage figure. The assertion that used to sit
+	# here -- "two transports give 400 units" -- was asserting the ceiling this removed.
+	_t.ok(is_inf(freighter.cargo_capacity()),
+		"two cargo transports have an unbounded hold")
 	freighter.cargo = {"metals": 10.0}
-	_t.near(freighter.free_cargo(), 390.0, 0.001, "free cargo tracks the load")
+	_t.ok(is_inf(freighter.free_cargo()),
+		"and free space is not limited by the load either")
+	_t.near(freighter.cargo_load(), 10.0, 0.001,
+		"while the load itself is still tracked exactly")
+	# A negative load is floored rather than allowed to make free space larger than the load
+	# was. With an unbounded hold there is no ceiling to measure against, so the assertion is
+	# that the *load* never goes negative -- which is the invariant the old tonnage figure
+	# used to hide.
 	freighter.cargo = {"metals": -5.0}
-	_t.near(freighter.free_cargo(), 400.0, 0.001,
-		"a negative load cannot inflate capacity")
+	_t.eq(TransferStage.carried(freighter, TransferStage.KIND_METALS), 0.0,
+		"a negative load is floored at zero rather than inflating free space")
 
 	# Phase 8 lift: four troop bays per transport, stacking additively across the fleet.
 	var lift := FleetState.new()

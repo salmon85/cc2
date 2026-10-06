@@ -736,6 +736,53 @@ func frame_galaxy() -> void:
 	clamp_camera()
 
 
+## Centre the camera on a planet, keeping the current zoom.
+##
+## The construction dropdown names a colony in prose -- "Verdania" -- and the map is somewhere
+## else entirely, because the default framing is the whole system. Choosing a target you cannot
+## see is choosing blind: the player has to pan back out, find the world by name on a field
+## of a hundred bodies, and re-zoom, all before they can see whether they picked the right
+## one. Snapping closes that loop.
+##
+## Deliberately *not* a re-frame: the zoom is left exactly as the player set it. They asked to
+## look at a world, not to be moved somewhere else, and a jump that also zooms throws away the
+## scale they were working at.
+##
+## Counts as the player having framed the map themselves, so a later resize does not yank the
+## view back out to the whole system.
+func focus_planet(planet_index: int) -> bool:
+	if _camera == null or _controller == null or _controller.galaxy == null:
+		return false
+	var planet: PlanetState = _controller.galaxy.planet(planet_index)
+	if planet == null:
+		return false
+	_user_framed = true
+	_camera.position = planet.position
+	clamp_camera()
+	return true
+
+
+## The camera position right now, in map coordinates.
+func camera_position() -> Vector2:
+	return Vector2.ZERO if _camera == null else _camera.position
+
+
+## Whether every in-transit fleet's path is drawn.
+func flight_paths_enabled() -> bool:
+	return _view.flight_paths_enabled()
+
+
+## Show or hide every in-transit fleet's path.
+##
+## A per-fleet overlay is a view of one thing at a time; a player asking "where has everything
+## of mine gone" has to click four fleets to answer it. The toggle is off by default so the
+## default map is still the map, and on because a field with four dashed lines crossing it is
+## exactly the picture a player wants when they are managing movement rather than looking at a
+## world.
+func set_flight_paths(on: bool) -> void:
+	_view.set_flight_paths(on)
+
+
 ## Re-frame whenever the map gains area, unless the player has framed it themselves.
 func _on_resized() -> void:
 	if _user_framed or _controller == null:

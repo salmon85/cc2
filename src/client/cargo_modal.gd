@@ -266,10 +266,15 @@ func _kind_row(planet: PlanetState, kind: StringName) -> Control:
 func limit_for(planet: PlanetState, kind: StringName) -> float:
 	var out := 0.0
 	for f in _controller.fleets_in_orbit_at(_planet_index):
-		if _fleet_lifts(f, _hull_id):
-			out = maxf(out, maxf(
-				TransferStage.loadable(planet, f, kind),
-				TransferStage.carried(f, kind)))
+		if not _fleet_lifts(f, _hull_id):
+			continue
+		# The load direction is bounded by the colony; the unload by what is aboard. With an
+		# unbounded hold the first is a real number, so the maximum is a real number -- and
+		# an unbounded hold must never reach a slider, whose range would be `INF`.
+		var loadable := TransferStage.loadable(planet, f, kind)
+		if is_inf(loadable):
+			loadable = TransferStage.planet_stock(planet, kind)
+		out = maxf(out, maxf(loadable, TransferStage.carried(f, kind)))
 	return out
 
 
@@ -318,20 +323,28 @@ func _update_captions() -> void:
 			continue
 		var aboard := 0.0
 		var capacity := 0.0
+		var unbounded := false
 		for f in _controller.fleets_in_orbit_at(_planet_index):
 			if not _fleet_lifts(f, _hull_id):
 				continue
 			aboard += TransferStage.carried(f, kind)
-			capacity += TransferStage.capacity_for(f, kind)
+			var hold := TransferStage.capacity_for(f, kind)
+			if is_inf(hold):
+				unbounded = true
+			else:
+				capacity += hold
 		var pending := float(_pending.get(kind, 0.0))
 		var movement := ""
 		if not is_zero_approx(pending):
 			movement = "%+d %s" % [
 				int(pending), "into hold" if pending > 0.0 else "onto colony"]
-		caption.text = "%s: colony %d, hold %d/%d   %s" % [
+		# An unbounded hold reports the load and not a ratio. Printing `hold 400/0` for a
+		# transport that has taken four hundred is the exact phantom the ceiling created.
+		var hold_text := "unlimited, %d aboard" % int(aboard) if unbounded \
+			else "%d/%d" % [int(aboard), int(capacity)]
+		caption.text = "%s: colony %d, hold %s   %s" % [
 			TransferStage.kind_name(kind),
-			int(TransferStage.planet_stock(planet, kind)),
-			int(aboard), int(capacity), movement]
+			int(TransferStage.planet_stock(planet, kind)), hold_text, movement]
 
 
 func _hull(hull_id: StringName) -> Resource:

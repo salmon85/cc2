@@ -177,13 +177,28 @@ func civilian_capacity() -> float:
 	return total
 
 
-## Total generic cargo capacity, in tonnes. Cargo Transports only.
+## Total generic cargo capacity. `INF` when any member is unbounded.
+##
+## A Cargo Transport is authored with a tonnage of zero, which reads as *no ceiling* -- so
+## the aggregate has to agree, or `free_cargo` would report `0 - 10` for a hold that has
+## taken ten and has room for the rest of the colony.
+##
+## Zero means "no ceiling" only for a hull that *declares* cargo kinds. A warship is also
+## authored at zero and has no hold whatsoever, so the two are told apart by what the hull
+## says it carries rather than by the number -- otherwise every battleship on the board would
+## report an infinite hold.
 func cargo_capacity() -> float:
 	var total := 0.0
 	for key: StringName in ships:
 		var def: Resource = _hulls.get(key, null) as Resource
-		if def != null:
-			total += float(def.get("cargo_capacity")) * int(ships[key])
+		if def == null:
+			continue
+		if (def.get("cargo_kinds") as Array).is_empty():
+			continue
+		var hold := float(def.get("cargo_capacity"))
+		if hold <= 0.0:
+			return INF
+		total += hold * int(ships[key])
 	return total
 
 
@@ -196,13 +211,16 @@ func cargo_load() -> float:
 	return total
 
 
-## Free space in the largest single cargo hold the fleet has.
+## Free space in the fleet's generic hold.
 ##
 ## Meaningless for a fleet of warships and meaningless for a mixed one, which is why the
 ## travel modal asks `TransferStage.free_space(kind)` per kind instead. Retained because the
-## fleet detail readout still shows an aggregate figure.
+## fleet detail readout still shows an aggregate figure. `INF` for an unbounded hold.
 func free_cargo() -> float:
-	return maxf(0.0, cargo_capacity() - cargo_load())
+	var capacity := cargo_capacity()
+	if is_inf(capacity):
+		return INF
+	return maxf(0.0, capacity - cargo_load())
 
 
 ## Combined survey progress this fleet makes per turn, additive across members.

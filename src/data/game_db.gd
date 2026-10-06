@@ -30,6 +30,7 @@ const FOOD_PER_POP := 1.0
 ## The design document's 50%.
 const STARVATION_DEATH_CHANCE := 0.5
 
+
 ## Per-turn chance of one pop being born when there is surplus, housing room and pop >= 2,
 ## before the soft cap below.
 const POP_GROWTH_CHANCE := 0.50
@@ -115,6 +116,23 @@ const BASE_FOOD_STORAGE := 100.0
 
 ## Power every colony can bank without an Energy Storage structure.
 const BASE_POWER_STORAGE := 100.0
+
+## Housing a colony has before it builds anything.
+##
+## Zero, and named anyway. The colony ship's own berths are the only housing a new colony
+## has, and a colony with no City Complex and no landed Colony Ship genuinely has nowhere for
+## a new person to live -- so a positive floor would let a colony grow out of a body it never
+## built. The constant exists so the capacity calculation reads as `base + contributions`
+## rather than as "just the contributions", which is what it looks like otherwise.
+const BASE_HOUSING := 0.0
+
+## Share of a structure's original metal cost returned when it is scrapped.
+##
+## Half, flat, and the *original* cost rather than what was actually paid for it. A refund
+## computed from the amount charged would return less for a project the colony half-built,
+## and a player would learn to scrap early -- which is a way to turn a refund into a discount
+## on unfinished work. Half of the sticker price is the same refund either way.
+const SCRAP_REFUND_RATE := 0.5
 
 ## Warning thresholds. A warning is raised *on the next turn* after the condition is met, so
 ## a player who overflows sees it reported in the following turn's news rather than

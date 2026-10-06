@@ -32,6 +32,22 @@ var population: float = 0.0
 ## Structure counts keyed by `BuildingData.id`.
 var structures: Dictionary = {}
 
+## Civilians the player has posted to each structure, keyed by `BuildingData.id`.
+##
+## An *assignment*, not a count of structures: `{&"farm": 2}` on a colony with three farms
+## means two of the three are being worked. That is the whole distinction between "the colony
+## has three farms" and "the colony has two farm workers", and the two produce different food.
+##
+## It used to be derived -- staffing was automatic, first-come over an iteration order --
+## which made the number a player could read a consequence of Go's dictionary ordering rather
+## than a decision they had made. It is serialised and fingerprinted for the same reason every
+## other piece of colony state is: an assignment is a decision, and a save/load that reshuffled
+## it would silently move the player's labour.
+##
+## Values are counts, never negative, and never sum above the civilian population -- the
+## colony sim clamps both.
+var worker_assignment: Dictionary = {}
+
 ## Local stockpile.
 var reserve_metals: float = 0.0
 var reserve_rare: float = 0.0
@@ -228,6 +244,7 @@ func to_dict() -> Dictionary:
 		"colonized": colonized,
 		"population": population,
 		"structures": structures.duplicate(true),
+		"worker_assignment": worker_assignment.duplicate(true),
 		"reserve_metals": reserve_metals,
 		"reserve_rare": reserve_rare,
 		"reserve_energy": reserve_energy,
@@ -267,6 +284,11 @@ func from_dict(data: Dictionary) -> bool:
 	colonized = bool(data.get("colonized", false))
 	population = float(data.get("population", 0.0))
 	structures = data.get("structures", {}).duplicate(true)
+	# Absent from every save written before workers were assigned by hand, which loads as
+	# "nothing assigned" rather than failing -- and is repaired on the next turn, because
+	# `simulate_colony` reconciles the assignment against the structures every turn.
+	worker_assignment = _coerce_worker_assignment(
+		data.get("worker_assignment", {}), structures)
 	reserve_metals = float(data.get("reserve_metals", 0.0))
 	reserve_rare = float(data.get("reserve_rare", 0.0))
 	reserve_energy = float(data.get("reserve_energy", 0.0))
@@ -291,6 +313,31 @@ func from_dict(data: Dictionary) -> bool:
 	# it is the one every world used to look like.
 	visual_variant = int(data.get("visual_variant", 0))
 	return true
+
+
+## JSON round-trips drop element types and a hand-edited save may name structures the colony
+## does not have. Re-type the assignment map and clamp every entry to what is standing, so a
+## malformed save loads as a colony that is slightly short-handed rather than one that
+## produces food from farms it does not own.
+static func _coerce_worker_assignment(raw: Variant, structures: Dictionary) -> Dictionary:
+	var out: Dictionary = {}
+	if not (raw is Dictionary):
+		return out
+	# A JSON round-trip retypes every key to `String`, so `structures` here is keyed by
+	# `String` while `id` is a `StringName`. Looking up with the `StringName` alone finds
+	# nothing, every assignment is silently dropped, and a reloaded colony quietly loses its
+	# whole labour force -- a save/load that halves a colony's output and raises no warning.
+	for key: Variant in raw as Dictionary:
+		var id := StringName(str(key))
+		var standing := int(structures.get(id, 0))
+		if standing <= 0:
+			standing = int(structures.get(str(id), 0))
+		if standing <= 0:
+			continue
+		var assigned := clampi(int(raw[key]), 0, standing)
+		if assigned > 0:
+			out[id] = assigned
+	return out
 
 
 ## JSON round-trips drop element types, so re-type the warning list and drop anything that is
@@ -325,10 +372,11 @@ func fingerprint() -> String:
 	# layouts that differ only in where a body sits are different games. Leaving it out
 	# would let a regression reorder the whole system without a single determinism test
 	# noticing.
-	return "%d:%s:%s:%d:%.3f,%.3f:%d:%s:%.4f:%s:%.2f:%.2f:%.2f:%.4f:%s:%.4f:%.4f:%d:%d:%.4f:%d:%.2f:%d:%s:%d" % [
+	return "%d:%s:%s:%d:%.3f,%.3f:%d:%s:%.4f:%s:%s:%.2f:%.2f:%.2f:%.4f:%s:%.4f:%.4f:%d:%d:%.4f:%d:%.2f:%d:%s:%d" % [
 		index, String(type_id), name, orbit, position.x, position.y,
 		owner, str(colonized), population,
-		_sorted_keys(structures), reserve_metals, reserve_rare, reserve_energy,
+		_sorted_keys(structures), _sorted_keys(worker_assignment),
+		reserve_metals, reserve_rare, reserve_energy,
 		terraform_progress, _sorted_keys(building_queue), shipyard_progress,
 		food_stock, build_turns_remaining, troops, power, build_mode, build_metal,
 		build_total_turns,

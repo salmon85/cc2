@@ -53,6 +53,13 @@ class_name ShipHullData
 @export var shield_slots: int = 0
 
 ## Capacities.
+##
+## `cargo_capacity` is **tonnes per hull, or zero for no ceiling**. A Cargo Transport is
+## authored at zero deliberately: it is the hull that exists to carry things, and a tonnage
+## figure put a hard stop on the one ship in the roster whose purpose is to have none. Zero
+## means unlimited for `cargo_capacity` and "no such hold" for `troop_capacity` and
+## `civilian_capacity`; `TransferStage` reads the difference, and a hull with any of them at
+## zero would lift nothing at all if the same rule applied to all three.
 @export var cargo_capacity: float = 0.0
 ## Ground troops this hull can land in an invasion.
 @export var troop_capacity: float = 0.0
@@ -146,8 +153,11 @@ func validate() -> PackedStringArray:
 		issues.append("a scout with sensor_range < 1 is useless")
 	if role == int(Enums.ShipRole.COLONY) and not colony_kit:
 		issues.append("a colony hull needs colony_kit")
+	# `cargo_capacity` at zero means *unlimited* rather than *none*, so it cannot be read as
+	# "lifts nothing" here -- that would have failed every unbounded transport against the
+	# very rule meant to catch an empty hull. A declared cargo kind is what proves it lifts.
 	if Enums.role_is_support(role) and cargo_capacity <= 0.0 and troop_capacity <= 0.0 \
-			and civilian_capacity <= 0.0:
+			and civilian_capacity <= 0.0 and cargo_kinds.is_empty():
 		issues.append("a support hull that lifts nothing is useless")
 	for kind in cargo_kinds:
 		if kind < 0 or kind > CargoKind.CIVILIANS:

@@ -181,6 +181,149 @@ static func max_refund(planet: PlanetState) -> float:
 	return project_paid(planet)
 
 
+## Recount every capacity and re-seed the worker assignment from the structure table.
+##
+## Public, and called the moment a structure lands *or* is scrapped, because a capacity that
+## is correct only at the start of the next turn is wrong for the whole of this one: a
+## Granary's +1000 food has to be bankable the turn it is paid for, and a scrapped City
+## Complex's +20 housing has to stop counting immediately. Waiting for the next colony pass
+## left the panel quoting a colony that no longer existed for a full turn.
+static func recount_capacity(planet: PlanetState, buildings: Dictionary, db: Node) -> void:
+	_recount_capacity(planet, buildings, db)
+	reconcile_workers(planet)
+
+
+## Bring the worker assignment back in line with the structures that exist and the people
+## available to work them.
+##
+## Three rules, applied in this order, and each of them is a case the model can actually reach:
+##   - an assignment to a structure that is gone is dropped;
+##   - an assignment larger than the number standing is trimmed to it;
+##   - the total is trimmed to the civilian population, taking from the largest assignments
+##     first so the loss is not concentrated on whichever hash-ordered key came first.
+##
+## Called after every construction event and at the top of every colony turn, so a colony can
+## never be running more workers than it has people -- which would otherwise let food and metal
+## scale off the population entirely.
+static func reconcile_workers(planet: PlanetState) -> void:
+	if planet == null:
+		return
+	var cleaned: Dictionary = {}
+	for id: StringName in planet.worker_assignment:
+		var standing := int(planet.structures.get(id, 0))
+		if standing <= 0:
+			continue
+		var assigned := int(planet.worker_assignment[id])
+		if assigned > 0:
+			cleaned[id] = mini(assigned, standing)
+	# Trim to the population, largest assignment first.
+	var population := int(floor(planet.population))
+	var total := 0
+	for id: StringName in cleaned:
+		total += int(cleaned[id])
+	while total > population:
+		var worst: StringName = &""
+		var worst_count := 0
+		for id: StringName in cleaned:
+			if int(cleaned[id]) > worst_count:
+				worst_count = int(cleaned[id])
+				worst = id
+		if worst == &"":
+			break
+		cleaned[worst] = worst_count - 1
+		total -= 1
+		if worst_count - 1 <= 0:
+			cleaned.erase(worst)
+	planet.worker_assignment = cleaned
+
+
+## Civilians posted to `building_id`, or 0.
+static func workers_on(planet: PlanetState, building_id: StringName) -> int:
+	if planet == null:
+		return 0
+	return int(planet.worker_assignment.get(building_id, 0))
+
+
+## Total civilians currently posted to a job somewhere on this colony.
+static func workers_assigned(planet: PlanetState) -> int:
+	if planet == null:
+		return 0
+	var total := 0
+	for id: StringName in planet.worker_assignment:
+		total += int(planet.worker_assignment[id])
+	return total
+
+
+## Civilians with no job, who therefore do nothing but research.
+static func idle_workers(planet: PlanetState) -> int:
+	if planet == null:
+		return 0
+	return maxi(0, int(floor(planet.population)) - workers_assigned(planet))
+
+
+## Structures that can be staffed, and want to be.
+##
+## A colony-ship landing, a solar array and a granary are all standing structures that nobody
+## staffs. This is the roster a `+` on the panel walks, so the two agree by construction.
+const STAFFABLE: Array[StringName] = [&"farm", &"mine"]
+
+
+## Post one more civilian to `building_id`. Returns whether anybody was posted.
+##
+## Refused on two counts, both of them the player's own labour: past the structures that
+## exist, and past the people there are. The second is the one that used to be missing -- a
+## colony could staff more farms than it had colonists and produce food out of nobody.
+static func assign_worker(planet: PlanetState, building_id: StringName) -> bool:
+	if planet == null or not STAFFABLE.has(building_id):
+		return false
+	if workers_on(planet, building_id) >= int(planet.structures.get(building_id, 0)):
+		return false
+	if idle_workers(planet) <= 0:
+		return false
+	planet.worker_assignment[building_id] = workers_on(planet, building_id) + 1
+	return true
+
+
+## Pull one civilian off `building_id`. Returns whether anybody was pulled.
+static func unassign_worker(planet: PlanetState, building_id: StringName) -> bool:
+	if planet == null:
+		return false
+	var current := workers_on(planet, building_id)
+	if current <= 0:
+		return false
+	if current <= 1:
+		planet.worker_assignment.erase(building_id)
+	else:
+		planet.worker_assignment[building_id] = current - 1
+	return true
+
+
+## Take one civilian off a randomly chosen worked farm or mine, or do nothing.
+##
+## Called when a colonist dies. The point is that the death is not *also* an invisible change
+## to somebody's staffing: a colony that staffed all four of its workers and then lost one to
+## starvation would carry on producing as though it had not, because the assignment table and
+## the population had drifted apart. Returns the structure that lost the worker, or `&""`.
+##
+## The choice is random rather than a fixed order because any fixed order makes one building
+## the one that always loses, and a player who noticed would be being told something false
+## about which of their farms was marginal.
+static func release_random_worker(planet: PlanetState, rng: RandomNumberGenerator = null) -> StringName:
+	if planet == null:
+		return &""
+	var staffed: Array[StringName] = []
+	for id: StringName in STAFFABLE:
+		if workers_on(planet, id) > 0:
+			staffed.append(id)
+	if staffed.is_empty():
+		return &""
+	var pick := staffed[0]
+	if rng != null and staffed.size() > 1:
+		pick = staffed[rng.randi() % staffed.size()]
+	unassign_worker(planet, pick)
+	return pick
+
+
 ## Simulate one colony. Mutates `planet` and returns its report.
 ##
 ## `faction` supplies tech bonuses; `defs` is the registry; `db` holds the tuning constants.
@@ -211,6 +354,9 @@ static func simulate_colony(
 	# each re-deriving them (and getting a different answer when a structure finishes
 	# mid-turn).
 	_recount_capacity(planet, buildings, db)
+	# Before food and mining, because both now read the assignment table and must be looking
+	# at a table that matches the structures and the population standing this turn.
+	reconcile_workers(planet)
 
 	# --- Food ------------------------------------------------------------------
 	var food_bonus := 1.0 + faction.tech_effect(&"food_bonus")
@@ -258,6 +404,10 @@ static func simulate_colony(
 			if rng != null and rng.randf() < chance:
 				planet.population = maxf(0.0, planet.population - 1.0)
 				report.population_delta -= 1.0
+				# The dead colonist was somebody's farmhand. Dropping them without
+				# touching the assignment would leave the colony staffed past its own
+				# population, which is exactly what `reconcile_workers` exists to prevent.
+				release_random_worker(planet, rng)
 
 	# --- Power -----------------------------------------------------------------
 	_power_turn(planet, buildings, report)
@@ -327,9 +477,12 @@ static func _recount_capacity(planet: PlanetState, buildings: Dictionary, db: No
 static func capacity_for(planet: PlanetState, buildings: Dictionary, db: Node) -> Dictionary:
 	var food_cap := float(db.get("BASE_FOOD_STORAGE"))
 	var power_cap := float(db.get("BASE_POWER_STORAGE"))
+	# Named as a constant even though it is zero: the colony ship's berths are the only
+	# housing a new colony has, so a floor of one would let a body nobody built house a
+	# colonist. See `BASE_HOUSING`.
+	var houses := float(db.get("BASE_HOUSING"))
 	var power_out := 0.0
 	var power_in := 0.0
-	var houses := 0.0
 	if planet == null:
 		return {
 			"food": food_cap, "power": power_cap,
@@ -401,6 +554,12 @@ static func _power_turn(
 	planet.power -= planet.power_drawn
 	report.power_generated = planet.power_generated
 	report.power_drawn = planet.power_drawn
+	# A power shortage costs *buildings*, not people. That asymmetry is deliberate and is the
+	# design's, not an oversight: running out of power stops new construction and everything
+	# already standing keeps working, while running out of food kills. Making a blacked-out
+	# colony lethal as well would have meant two independent 50% death rolls a colony short of
+	# both could face -- 75% of turns losing somebody -- for a shortage the design explicitly
+	# declines to make a penalty.
 	if planet.power < 0.0:
 		planet.power = 0.0
 		report.power_short = true
@@ -416,57 +575,73 @@ static func _add_warning(planet: PlanetState, key: StringName) -> void:
 
 # --- Definition helpers --------------------------------------------------------
 
-## Food produced this turn, once staffing is accounted for.
+## Food produced this turn, from the farms that are actually worked.
 ##
-## A structure with a `pop_required` only produces while the colony has the civilians to
-## staff it. That is the whole of what "requires 1 pop" means for a farm: unstaffed, it
-## feeds nobody, and a colony that has spent its people on mines and barracks has to choose
-## which of the two it can afford to feed.
+## A farm produces only while a civilian is posted to it. That is the whole of what "requires
+## 1 pop" means, and the number of workers is the player's decision rather than a side effect
+## of an iteration order -- so three farms with two farmhands produce for two, not three.
 static func _food_output(planet: PlanetState, buildings: Dictionary) -> float:
-	var total := 0.0
-	for building_id: StringName in planet.structures:
-		var count := int(planet.structures[building_id])
-		if count <= 0:
-			# A key left at zero is not a structure. The Phase 8 tests strip farms by writing
-			# a zero rather than erasing the key, and a zero-count entry that still produced
-			# food would be a colony feeding itself from buildings it does not have.
-			continue
-		var def: Resource = buildings.get(building_id, null) as Resource
-		if def == null:
-			continue
-		if float(def.get("yield_amount")) <= 0.0:
-			continue
-		total += count * _staffed(planet, def) * float(def.get("yield_amount"))
-	return total
+	return _output_for(planet, buildings, &"farm", "yield_amount")
 
 
 static func _metal_output(planet: PlanetState, buildings: Dictionary) -> float:
-	var total := 0.0
-	for building_id: StringName in planet.structures:
-		var count := int(planet.structures[building_id])
-		if count <= 0:
-			continue
-		var def: Resource = buildings.get(building_id, null) as Resource
-		if def == null:
-			continue
-		if float(def.get("metal_per_turn")) <= 0.0:
-			continue
-		total += count * _staffed(planet, def) * float(def.get("metal_per_turn"))
-	return total
+	return _output_for(planet, buildings, &"mine", "metal_per_turn")
 
 
-## Whether one copy of `def` is staffed and therefore working.
+## Output from the worked copies of one structure kind.
 ##
-## `pop_required` is a threshold rather than a per-structure reservation: a farm works if the
-## colony has at least one civilian to work it. That is what "requires 1 pop" buys a player —
-## a colony that has spent its people on Barracks conversions cannot also staff every farm it
-## has ever built, and which of the two it can afford is a decision. Making it a *reservation*
-## instead would let one colonist work five farms at once, which is exactly the double
-## counting the removed per-population multiplier did.
-static func _staffed(planet: PlanetState, def: Resource) -> int:
+## The yield is read from the field the Phase 8 roster actually states -- farms are
+## `yield_amount`, mines are `metal_per_turn` -- because the two are authored in different
+## fields and a single accessor that guessed would be wrong for one of them.
+static func _output_for(
+	planet: PlanetState, buildings: Dictionary, building_id: StringName, yield_field: StringName
+) -> float:
+	if planet == null:
+		return 0.0
+	var def: Resource = buildings.get(building_id, null) as Resource
+	if def == null:
+		return 0.0
+	var per_copy := float(def.get(yield_field))
+	if per_copy <= 0.0:
+		return 0.0
+	# `_staffed` gates on the *assignment*, not on the population: a colony of six with two
+	# farmhands runs two farms however many it built, and a colony of two with none runs
+	# none however many it built.
+	return per_copy * float(_staffed(planet, def, building_id))
+
+
+## Whether one copy of `def` is worked and therefore producing.
+##
+## For a farm or a mine the answer is *is anyone posted to it*, read from the assignment table.
+## It used to be *does the colony have any civilians at all*, which is a threshold rather than
+## a reservation: one colonist satisfied every farm on the planet at once, so a colony with
+## nine farms and one person fed nine. Making it an explicit posting is what lets a colony
+## choose where its labour goes.
+##
+## Anything that is not a farm or a mine produces unattended. A granary stores and a landed
+## colony ship runs off its own reactor; there is nobody to post to them and a `pop_required`
+## on such a structure describes a staffing *threshold* for its output, not a job.
+static func _staffed(planet: PlanetState, def: Resource, building_id: StringName = &"") -> int:
+	var id := building_id if building_id != &"" else StringName(str(def.get("id")))
+	if STAFFABLE.has(id):
+		return workers_on(planet, id)
 	if int(def.get("pop_required")) <= 0:
 		return 1
 	return 1 if planet.population >= 1.0 else 0
+
+
+## Whether `building_id` would have somebody to work it when it finishes.
+##
+## The check behind the build-order warning: queueing a farm with no idle colonists is legal
+## -- the colony will grow, or a Barracks conversion will free one, before the farm lands --
+## but it is worth saying, because the structure finishes *unworked* and produces nothing.
+static func would_be_staffed(planet: PlanetState, building_id: StringName) -> bool:
+	if planet == null or not STAFFABLE.has(building_id):
+		return true
+	# Only about the idle pool, and not about whether the colony already stands a farm. The
+	# question the warning asks is "will the new farm have somebody working it", and a colony
+	# with six unstaffed farms and no idle colonists still has nobody for the seventh.
+	return idle_workers(planet) >= 1
 
 
 ## Advance the construction and shipyard queues by one turn.
@@ -519,9 +694,13 @@ static func _advance_structure(
 	var total_turns := maxi(1, planet.build_total_turns)
 	planet.build_metal += _draw_metal(planet, cost / float(total_turns), cost)
 	planet.build_turns_remaining -= 1
-	# Completion is decided by the metal, not the clock. A player who pushes metal in through
-	# the dialog finishes early; one whose colony simply produces enough finishes on
-	# schedule; neither is held to the turn counter.
+	# Completion is decided by the pool, not by the clock, and the pool is *accumulated*.
+	# Metal the player pushed in through the dialog lives in the same figure as metal the
+	# mines produced, so it survives every subsequent turn: nothing here resets it, and the
+	# share drawn this turn is added to it rather than replacing it. That is what makes a
+	# boost a payment towards the project rather than a nudge that evaporates on the next
+	# turn. A colony that pays the whole cost by hand finishes immediately rather than having
+	# to earn the same metal a second time before the structure lands.
 	if planet.build_metal >= cost - 0.001:
 		finish_construction(planet, buildings, db)
 
@@ -541,6 +720,9 @@ static func _advance_ship(
 	var cost := float(hull.get("cost_metals"))
 	var total_turns := maxi(1, int(job.get("turns", 1)))
 	job["metal"] = float(job.get("metal", 0.0)) + _draw_metal(planet, cost / float(total_turns), cost)
+	# Same rule as the structure queue: metal already assigned is not owed again. The hull
+	# gets it back through the same `boost_construction` path, so a ship paid for by hand and
+	# a ship paid for by the mines both advance the same bar.
 	if float(job.get("metal", 0.0)) >= cost - 0.001:
 		planet.shipyard_progress = float(job.get("metal", 0.0))
 		planet.ship_queue.pop_front()
@@ -744,6 +926,80 @@ static func finish_construction(
 	# Complex's +20 housing and an Energy Storage's +1000 energy appear the moment the
 	# project completes rather than at the start of the following turn.
 	_recount_capacity(planet, buildings, db)
+	reconcile_workers(planet)
+
+
+## Scrap one structure, returning half its original metal cost to the colony.
+##
+## Returns the refund, or 0.0 when nothing was scrapped. The refund is the *original* cost's
+## half rather than a share of what was actually paid, so scrapping a half-finished project
+## returns exactly what scrapping a finished one would: a refund scaled by the work done is a
+## discount on stopping early, and a player who works that out never finishes anything.
+##
+## Any worker posted to it goes back to the idle pool in the same call, because a scrapped farm
+## holding a farmhand's labour would be a way to keep a job that no longer exists.
+static func destroy_structure(
+	planet: PlanetState, building_id: StringName, buildings: Dictionary, db: Node
+) -> float:
+	if planet == null or building_id == &"":
+		return 0.0
+	if int(planet.structures.get(building_id, 0)) <= 0:
+		return 0.0
+	# A structure under construction is cancelled, not scrapped: the queue entry goes and the
+	# metal banked against it goes with it, rather than the project becoming a standing
+	# building that never had its metal paid for.
+	if int(planet.building_queue.get(building_id, 0)) > 0:
+		planet.building_queue.erase(building_id)
+		planet.build_metal = 0.0
+		planet.build_turns_remaining = 0
+		planet.build_total_turns = 0
+		return 0.0
+	var def: Resource = buildings.get(building_id, null) as Resource
+	if def == null:
+		return 0.0
+	var refund := float(def.get("cost_metals")) * GameDB.SCRAP_REFUND_RATE
+	planet.structures[building_id] = int(planet.structures[building_id]) - 1
+	if int(planet.structures[building_id]) <= 0:
+		planet.structures.erase(building_id)
+	# The worker goes home before the recount, so the released labour is visible to it.
+	planet.worker_assignment.erase(building_id)
+	planet.reserve_metals += refund
+	recount_capacity(planet, buildings, db)
+	return refund
+
+
+## Scrap one hull from the fleet parked over `planet_index`, returning half its metal cost.
+##
+## Finds the orbital fleet the same way delivery does, for the same reason: a hull is either
+## in a fleet or in the yard, and there is no third place to scrap one from.
+static func destroy_ship(
+	galaxy: GalaxyState, planet: PlanetState, faction: FactionState,
+	hull_id: StringName, hulls: Dictionary
+) -> float:
+	if planet == null or faction == null or hull_id == &"":
+		return 0.0
+	var orbiter := galactic_orbital_fleet(galaxy, planet.index, faction.id)
+	if orbiter == null or orbiter.remove_ships(hull_id, 1) <= 0:
+		return 0.0
+	var def: Resource = hulls.get(hull_id, null) as Resource
+	var refund := 0.0
+	if def != null:
+		refund = float(def.get("cost_metals")) * GameDB.SCRAP_REFUND_RATE
+	planet.reserve_metals += refund
+	# An emptied fleet is removed rather than left standing as an empty marker: an empty
+	# orbital fleet is still a selectable thing on the roster, and selecting it offers nothing.
+	if orbiter.ship_count() <= 0 and galaxy != null:
+		galaxy.remove_fleet(orbiter.id)
+	return refund
+
+
+## `GalaxyState.orbital_fleet`, spelled out so this file names its own dependency.
+static func galactic_orbital_fleet(
+	galaxy: GalaxyState, planet_index: int, faction_id: int
+) -> FleetState:
+	if galaxy == null:
+		return null
+	return galaxy.orbital_fleet(planet_index, faction_id)
 
 
 ## Completion progress for the *building* queue, 0..1.

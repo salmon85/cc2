@@ -45,6 +45,10 @@ var cargo: CargoModal = null
 ## rather than on the map because the map is a pure drawing layer and this is a decision.
 var travel_step: int = TravelStep.NONE
 
+## What the map asks for, at each stage. Named so the flow and its tests quote one string.
+const SOURCE_PROMPT := "Select Source Location - click a planet with your ships in orbit"
+const DESTINATION_PROMPT := "Select Destination Planet"
+
 ## The stages of the interactive travel flow.
 enum TravelStep {
 	NONE,     ## Not travelling; a map click selects normally.
@@ -59,6 +63,17 @@ var travel_source: int = -1
 ## holds no `AudioStreamPlayer` at all unless the run is allowed to open an audio device --
 ## see `BackgroundMusic`.
 var music: BackgroundMusic = null
+
+## A prominent line over the map for whatever question the client is currently asking.
+##
+## The travel flow's two map clicks were previously invisible: the player pressed TRAVEL and
+## had to infer from the fact that clicking things did something unusual that the next click
+## was a question. A workflow with two unanswered questions is one the player cannot back out
+## of, because there is nothing on screen to say "cancel".
+var prompt_label: Label = null
+
+## Draw every fleet's transit path at once, not just the selected fleet's.
+var flight_paths := false
 
 var _log: RichTextLabel = null
 ## Every line the session log has shown, kept as plain strings.
@@ -81,6 +96,7 @@ func _ready() -> void:
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
 	_build_music()
+	_build_overlays()
 	_build_layout()
 	_build_travel_overlay()
 	_build_boost_overlay()
@@ -90,6 +106,44 @@ func _ready() -> void:
 	# panels it needs did not exist yet.
 	if _pending_galaxy != null:
 		_attach_session()
+
+
+## Mount the two things that overlay the map rather than sitting in a column.
+##
+## Both before the layout, because a sibling added later draws on top -- and a prompt line
+## buried under the map would be worse than no prompt line at all.
+func _build_overlays() -> void:
+	prompt_label = Label.new()
+	prompt_label.name = "PromptLabel"
+	prompt_label.set_anchors_preset(Control.PRESET_CENTER_TOP)
+	prompt_label.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	prompt_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	prompt_label.visible = false
+	prompt_label.add_theme_color_override("font_color", CC2Theme.PHOSPHOR)
+	prompt_label.add_theme_font_size_override("font_size", CC2Theme.FONT_BIG)
+	prompt_label.add_theme_color_override("font_outline_color", CC2Theme.BG)
+	prompt_label.add_theme_constant_override("outline_size", 4)
+	add_child(prompt_label)
+
+
+## Show a line of text over the map, or clear it with "".
+func set_prompt(text: String) -> void:
+	if prompt_label == null:
+		return
+	prompt_label.text = text
+	prompt_label.visible = not text.is_empty()
+
+
+## The prompt currently on screen, or "".
+func prompt_text() -> String:
+	return "" if prompt_label == null else prompt_label.text
+
+
+## Turn the all-fleets flight-path overlay on or off.
+func set_flight_paths(on: bool) -> void:
+	flight_paths = on
+	if map != null:
+		map.set_flight_paths(on)
 
 
 ## Mount the background music.
@@ -312,6 +366,9 @@ func _wire() -> void:
 	cargo.transfer_confirmed.connect(_on_transfer_confirmed)
 	cargo.transfer_cancelled.connect(_on_transfer_cancelled)
 	macros.build_requested.connect(_on_build_requested)
+	macros.scrap_requested.connect(_on_scrap_requested)
+	macros.staffing_requested.connect(_on_staffing_requested)
+	macros.camera_snap_requested.connect(_on_camera_snap)
 	macros.construction_boosted.connect(_on_construction_boosted)
 	macros.ship_construction_boosted.connect(_on_construction_boosted)
 	boost.boost_confirmed.connect(_on_boost_confirmed)
@@ -445,6 +502,7 @@ func _advance_travel_flow(index: int) -> bool:
 		travel_source = index
 		travel_step = TravelStep.DESTINATION
 		_log_line("TRAVEL SOURCE -> %s" % controller.display_name(index))
+		set_prompt(DESTINATION_PROMPT)
 		status_message.emit("Select Destination")
 		return true
 	if travel_step == TravelStep.DESTINATION:
@@ -457,6 +515,7 @@ func _advance_travel_flow(index: int) -> bool:
 				% CC2Theme.ALERT.to_html(false))
 			return true
 		travel_step = TravelStep.NONE
+		set_prompt("")
 		_log_line("TRAVEL DESTINATION -> %s" % controller.display_name(index))
 		return true
 	return false
@@ -476,6 +535,7 @@ func _on_travel_requested() -> void:
 		return
 	_abandon_travel()
 	travel_step = TravelStep.SOURCE
+	set_prompt(SOURCE_PROMPT)
 	status_message.emit("Select Source Location")
 	_log_line("TRAVEL: select the world your ships are orbiting")
 
@@ -484,6 +544,7 @@ func _on_travel_requested() -> void:
 func _abandon_travel() -> void:
 	travel_step = TravelStep.NONE
 	travel_source = -1
+	set_prompt("")
 	if travel != null:
 		travel.close()
 	if manifest != null:
@@ -617,6 +678,40 @@ func _on_fleet_selected(fleet_id: int) -> void:
 	var f := controller.fleet()
 	if f != null:
 		_log_line("FLEET %03d SELECTED" % f.id)
+
+
+## The construction dropdown named a colony; bring the map to it.
+func _on_camera_snap(planet_index: int) -> void:
+	if map != null:
+		map.focus_planet(planet_index)
+
+
+## The Destroy menu's SCRAP button. Returns half the metal cost to the colony immediately.
+func _on_scrap_requested(entry: StringName) -> void:
+	var planet := controller.galaxy.planet(controller.selected_planet)
+	if planet == null:
+		return
+	var refund := controller.scrap(entry)
+	if refund <= 0.0:
+		return
+	_log_line("SCRAPPED %s @ %s (+M%d)" % [
+		String(entry).to_upper(), controller.display_name(planet.index), int(refund)])
+
+
+## A `+` or `-` on a farm or mine's worker row.
+func _on_staffing_requested(building_id: StringName, adding: bool) -> void:
+	var planet := controller.galaxy.planet(controller.selected_planet)
+	if planet == null:
+		return
+	var taken := controller.assign_worker(building_id) if adding \
+		else controller.unassign_worker(building_id)
+	if not taken:
+		return
+	_log_line("%s %s worker: %s now %d of %d" % [
+		"Posted" if adding else "Pulled", String(building_id),
+		"worked" if adding else "idle",
+		ColonySim.workers_on(planet, building_id),
+		planet.count(building_id)])
 
 
 func _on_build_requested(building_id: StringName) -> void:

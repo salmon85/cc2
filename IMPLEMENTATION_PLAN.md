@@ -1558,3 +1558,134 @@ device. A guard that can only be exercised by running audio is a guard nobody ex
   spellings of "repeat".
 - `test_gui_integration` (580) -- the client has a music node that holds no player, refuses an
   explicit start, and the client tree contains no `AudioStreamPlayer` at all.
+
+---
+
+# Phase 8 corrections III: entities, labour, scrapping, camera
+
+Six corrections. Where the brief's letter and the model's behaviour disagreed, the note says
+which one won and why.
+
+## A landed Colony Ship is a building and nothing else
+
+`land_colony_ship` already consumed the hull and granted the structure, but two things stayed
+behind. A fleet whose only purpose was carrying the kit survived as an active marker on the
+roster: selectable, and offering nothing. The emptiness now belongs to the model --
+`InvasionStage` retires it -- rather than to whichever caller remembered to clean up, which is
+how a dedicated server and a client ended up with different rosters after the same landing.
+
+The structure's four numbers were already right (+5 housing, +5 food, +5 metal, +5 power) and
+are now asserted per copy rather than in total, the way the granary and city complex are.
+
+## Capacities settle the turn they change
+
+`ColonySim.recount_capacity` is public and is called the instant a structure lands *or* is
+scrapped. A capacity correct only at the start of the next turn is wrong for the whole of this
+one: a Granary's +1000 food has to be bankable the turn it is paid for, and a scrapped City
+Complex's +20 housing has to stop counting immediately.
+
+`BASE_HOUSING` is named even though it is zero. The colony ship's berths are the only housing
+a new colony has, and a positive floor would let a colony grow out of a body nobody built; the
+constant exists so the calculation reads as `base + contributions` instead of as "just the
+contributions", which is what it otherwise looks like.
+
+## Labour is assigned, and assignment is what produces
+
+Farms and mines now produce for the workers posted to them, read from a new serialised
+`PlanetState.worker_assignment`. Before this, staffing was a threshold -- *does the colony have
+any civilians at all* -- so one colonist satisfied every farm on the planet and a colony with
+nine farms and one person fed nine.
+
+The panel gained a `+` / `-` pair per staffable structure and prints `Farms 3 (2)`: three stand,
+two are worked. A colony with nine farms and one farmhand used to look exactly like a colony
+with nine farmhands, and the two differ by forty food a turn.
+
+`reconcile_workers` runs at the top of every colony turn: assignments to structures that are
+gone are dropped, assignments larger than the standing count are trimmed, and the total is
+capped at the civilian population -- trimming the *largest* assignment first, so the loss is
+not concentrated on whichever hash-ordered key happened to come first.
+
+Queuing a farm with nobody free is allowed and warned about, not refused:
+"Warning: Insufficient idle population to staff this facility upon completion." The colony will
+probably have grown a colonist by the time it lands, and refusing three turns out would have the
+sim deciding for the player.
+
+## Scrapping returns half, and gives the job back
+
+`destroy_structure` and `destroy_ship` refund `cost_metals * SCRAP_REFUND_RATE` into the
+stockpile immediately. The refund is the *original* cost's half, not a share of what was paid,
+so scrapping a half-finished project returns exactly what scrapping a finished one would: a
+refund scaled by the work done is a discount on stopping early, and a player who works that out
+never finishes anything.
+
+A structure under construction is *cancelled*, not scrapped, and refunds nothing. The landed
+Colony Ship is never offered at all -- it cost a ship rather than metal, so "half of nothing" is
+a gift.
+
+A worker posted to a scrapped farm goes home in the same call, and an emptied orbital fleet is
+removed rather than left as a dead marker.
+
+## Starvation takes a worker with it
+
+When a colonist dies of hunger, one worked farm or mine loses its worker at random. Without it
+the assignment table and the population drift apart: a colony that staffed every one of its
+workers and then lost one would go on producing as though it had not. The choice is random
+rather than a fixed order, because a fixed order makes one building the one that always loses
+and tells the player something false about which farm was marginal.
+
+**Power shortage still costs buildings, not people**, and this is where the brief and the model
+disagree. It asks only for starvation, and that is what is implemented. Making a blacked-out
+colony lethal as well would mean two independent 50% death rolls a colony short of both could
+face -- 75% of turns losing somebody -- for a shortage the design explicitly declines to
+penalise. `power_short` remains a warning that blocks new construction.
+
+## The menu is one list, and the map comes to you
+
+Hulls moved into the construction dropdown. They had their own selector and their own Build Ship
+button, which made building a structure and building a ship two gestures for two things, each
+with its own progress bar, in a panel carrying both. One queue, one Build button, and the
+project's bar directly beneath it. The dropdown's metadata carries `{id, kind}` rather than a
+bare id, so the panel does not have to infer which is which later.
+
+Choosing a colony in that dropdown now snaps the camera onto it. The default framing is the
+whole system, so naming a world in a list gave the player no way to see whether they had picked
+the right one. The zoom is left exactly as the player set it -- they asked to look at a world,
+not to be moved somewhere else.
+
+The travel flow announces itself: "Select Source Location", then "Select Destination Planet",
+as a prominent line over the map. Two map clicks with nothing on screen saying what they were
+for is a workflow the player cannot back out of. A "Show Flight Paths" toggle draws every
+in-transit fleet's route at once, under the same fog the markers obey.
+
+## An unclaimed world says it has no colony
+
+Visiting a world with no colony used to print `POPULATION 0 (0/0)` and `METAL 0 (+0)` -- true,
+and indistinguishable from a colony that had collapsed, four rows of nothing on every rock on
+the board. It now says `NO COLONY` and stops. Unsurveyed, it still stops at `UNSURVEYED`, which
+is the stronger statement.
+
+Names follow presence. A world with the player's own ships in orbit is named, and stops being
+named when they leave; a colony is named for ever. A survey also earns a name, which is why two
+fog fixtures now clear the flag explicitly rather than depending on which body the other
+scenarios left marked.
+
+## A Cargo Transport's hold is unbounded
+
+`cargo_capacity = 0` now means *no ceiling* for a hull that declares cargo kinds, and `INF` is
+what `capacity_for` and `FleetState.cargo_capacity` report. Zero still means "no hold at all" for
+a warship, which is also authored at zero -- the two are told apart by what the hull says it
+carries, or every battleship would report an infinite hold.
+
+The load dialog resolves `INF` before it reaches a slider, and reports the load rather than a
+ratio, because `hold 400/0` is the exact phantom the ceiling created.
+
+## Verification
+
+- `tools/verify.sh`: **12 suites, 3021 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_turn_engine`: 977 (was 909) -- the landed kit as a building, capacities settling on
+  both landing and scrapping, the labour cap and `reconcile_workers`, scrapping's refund and
+  released worker, and a starvation death taking a job with it.
+- `test_gui_integration`: 642 (was 580) -- the worker rows and their cap, the staffing notice
+  being non-blocking, the Destroy menu and its refunds, the travel prompt, the flight-path
+  toggle, the camera snap, unclaimed-world stats, orbit-driven labels, and the cargo sliders
+  matching an unbounded hold.

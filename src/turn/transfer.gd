@@ -98,8 +98,15 @@ static func planet_deposit(planet: PlanetState, kind: StringName, amount: float)
 ## Only hulls that actually lift `kind` are counted, so a fleet of warships and one troop
 ## transport has zero metal capacity between them rather than one troop transport's capacity
 ## silently applying to everything. Cargo is the thing the hull says it carries.
+## Reported as `INF` for a hold with no ceiling.
+##
+## A Cargo Transport's capacity is deliberately unbounded. It used to be `cargo_capacity`,
+## which put a hard ceiling on the one hull whose entire purpose is carrying things -- and,
+## worse, made the ceiling the *only* number the load dialog knew how to show, so a transport
+## read as full while its hold had room for the rest of the colony.
 static func capacity_for(fleet: FleetState, kind: StringName) -> float:
 	var total := 0.0
+	var unlimited := false
 	for key: StringName in fleet.ships:
 		var def: Resource = fleet.hulls().get(key, null) as Resource
 		if def == null:
@@ -112,8 +119,15 @@ static func capacity_for(fleet: FleetState, kind: StringName) -> float:
 		elif kind == KIND_TROOPS:
 			total += float(def.get("troop_capacity")) * count
 		else:
-			total += float(def.get("cargo_capacity")) * count
-	return total
+			# Zero means no ceiling for a hull that declared a cargo kind -- a transport
+			# authored at `cargo_capacity = 0` takes anything. The `carries` guard above has
+			# already excluded hulls with no hold at all, which are also authored at zero.
+			var hold := float(def.get("cargo_capacity"))
+			if hold <= 0.0:
+				unlimited = true
+			else:
+				total += hold * count
+	return INF if unlimited else total
 
 
 ## How much of `kind` the fleet is currently carrying.
@@ -122,8 +136,15 @@ static func carried(fleet: FleetState, kind: StringName) -> float:
 
 
 ## How much of `kind` the fleet could still take on.
+##
+## `INF` for an unbounded hold, so `min(loadable, free_space)` reduces to the colony's own
+## stock -- which is the correct answer: with no ceiling, the only limit on a load is what the
+## colony has.
 static func free_space(fleet: FleetState, kind: StringName) -> float:
-	return maxf(0.0, capacity_for(fleet, kind) - carried(fleet, kind))
+	var capacity := capacity_for(fleet, kind)
+	if is_inf(capacity):
+		return INF
+	return maxf(0.0, capacity - carried(fleet, kind))
 
 
 ## How much of `kind` a world could hand over to this fleet right now.

@@ -51,6 +51,11 @@ func _initialize() -> void:
 	_test_cargo_at_planet()
 	_test_growth_curve()
 	_test_planet_visuals()
+	_test_landed_colony_ship_entity()
+	_test_capacity_sync()
+	_test_worker_assignment()
+	_test_scrapping()
+	_test_starvation_releases_a_worker()
 	_test_troops_and_cargo()
 	_test_survey()
 	_test_research()
@@ -123,7 +128,7 @@ func _colonize(g: GalaxyState, faction_id: int, planet_index: int) -> PlanetStat
 	# granary for storage, a farm and a mine, and a landed Colony Ship for the 5 pop and 5
 	# food it contributes. Without housing the colony cannot grow at all, and without a
 	# granary it overflows on its first surplus -- both of which are the rules under test.
-	p.structures = {&"city_complex": 1, &"granary": 1, &"colony_ship_building": 1, &"farm": 2, &"mine": 1}
+	_set_structures(p, {&"city_complex": 1, &"granary": 1, &"colony_ship_building": 1, &"farm": 2, &"mine": 1})
 	p.food_stock = 20.0
 	p.surveyed = true
 	var f: FactionState = g.faction(faction_id)
@@ -839,23 +844,26 @@ func _test_growth_curve() -> void:
 
 	# No housing: never grows, whatever the curve says.
 	var homeless := _habitable_colony(g)
-	homeless.structures = {&"farm": 8, &"granary": 1}
+	_set_structures(homeless, {&"farm": 8, &"granary": 1})
 	homeless.population = 4.0
 	homeless.food_stock = 500.0
 	var held := homeless.population
 	for _i in 40:
+		_staff_all(homeless)
 		ColonySim.simulate_colony(g, homeless, faction, _defs, _db, _rng(300 + _i))
 		homeless.food_stock = 500.0
 	sup.eq(homeless.population, held, "no housing means no growth, whatever the chance")
 
 	# Below two pop: never grows.
 	var tiny := _habitable_colony(g)
-	tiny.structures = {&"city_complex": 1, &"farm": 8, &"granary": 1}
+	_set_structures(tiny, {&"city_complex": 1, &"farm": 8, &"granary": 1})
 	tiny.population = 1.0
 	tiny.food_stock = 500.0
+	_staff_all(tiny)
 	ColonySim.simulate_colony(g, tiny, faction, _defs, _db, _rng(340))
 	var tiny_held := tiny.population
 	for _i in 40:
+		_staff_all(tiny)
 		ColonySim.simulate_colony(g, tiny, faction, _defs, _db, _rng(341 + _i))
 		tiny.food_stock = 500.0
 	sup.eq(tiny.population, tiny_held, "a colony of one never grows")
@@ -863,12 +871,15 @@ func _test_growth_curve() -> void:
 	# The measured rate follows the curve, not a flat half.
 	var rate_at := func(pop: float, trials: int) -> float:
 		var colony2: PlanetState = _habitable_colony(g)
-		colony2.structures = {&"city_complex": 4, &"farm": 20, &"granary": 2}
+		_set_structures(colony2, {&"city_complex": 4, &"farm": 20, &"granary": 2})
 		var grew: int = 0
 		for _i in trials:
 			colony2.population = pop
+			# Posted per trial: the assignment is capped by the population, and the population
+			# is exactly what this loop varies.
 			colony2.food_stock = 500.0
 			var before := colony2.population
+			_staff_all(colony2)
 			ColonySim.simulate_colony(g, colony2, faction, _defs, _db, _rng(5000 + _i))
 			if colony2.population > before:
 				grew += 1
@@ -890,16 +901,18 @@ func _test_growth_curve() -> void:
 
 	# The report carries the chance it actually rolled against, so the UI can show it.
 	var probe := _habitable_colony(g)
-	probe.structures = {&"city_complex": 2, &"farm": 10, &"granary": 1}
+	_set_structures(probe, {&"city_complex": 2, &"farm": 10, &"granary": 1})
 	probe.population = 12.0
 	probe.food_stock = 500.0
+	_staff_all(probe)
 	var rolled := ColonySim.simulate_colony(g, probe, faction, _defs, _db, _rng(6000))
 	sup.near(rolled.growth_chance, ColonySim.growth_chance(12.0, _db), 0.0001,
 		"the report states the chance it rolled against")
 	var blocked := _habitable_colony(g)
-	blocked.structures = {&"farm": 10, &"granary": 1}
+	_set_structures(blocked, {&"farm": 10, &"granary": 1})
 	blocked.population = 12.0
 	blocked.food_stock = 0.0
+	_staff_all(blocked)
 	var none := ColonySim.simulate_colony(g, blocked, faction, _defs, _db, _rng(6001))
 	sup.near(none.growth_chance, 0.0, 0.0001,
 		"and is zero on a colony that could not grow at all")
@@ -1081,7 +1094,8 @@ func _test_storage_capacity() -> void:
 		return
 	colony.population = 4.0
 	colony.food_stock = 0.0
-	colony.structures = {&"mine": 2}
+	_set_structures(colony, {&"mine": 2})
+	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(1))
 	sup.near(colony.food_capacity, base_food, 0.001,
 		"a colony with no granary stores only its base pantry")
@@ -1094,6 +1108,7 @@ func _test_storage_capacity() -> void:
 	colony.build_metal = 0.0
 	var turns_to_build := colony.build_total_turns
 	for _i in turns_to_build:
+		_staff_all(colony)
 		ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(2 + _i))
 		if colony.count(&"granary") > 0:
 			break
@@ -1106,6 +1121,7 @@ func _test_storage_capacity() -> void:
 	colony.build_turns_remaining = int(granary.get("build_turns"))
 	colony.build_total_turns = int(granary.get("build_turns"))
 	for _i in colony.build_total_turns:
+		_staff_all(colony)
 		ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(20 + _i))
 		if colony.count(&"granary") > 1:
 			break
@@ -1117,14 +1133,16 @@ func _test_storage_capacity() -> void:
 	var housing_probe := _habitable_colony(g)
 	sup.ok(housing_probe != null, "a second world exists for the housing test")
 	if housing_probe != null:
-		housing_probe.structures = {}
+		_set_structures(housing_probe, {})
 		housing_probe.population = 4.0
 		housing_probe.food_stock = 500.0
+		_staff_all(housing_probe)
 		ColonySim.simulate_colony(g, housing_probe, faction, _defs, _db, _rng(40))
 		sup.near(housing_probe.housing, 0.0, 0.001, "a bare colony houses nobody")
 		# Growth is impossible without housing, which is what makes the Complex worth building.
 		var held := housing_probe.population
 		for _i in 10:
+			_staff_all(housing_probe)
 			ColonySim.simulate_colony(g, housing_probe, faction, _defs, _db, _rng(41 + _i))
 			housing_probe.food_stock = 500.0
 		sup.eq(housing_probe.population, held, "and cannot grow")
@@ -1134,6 +1152,7 @@ func _test_storage_capacity() -> void:
 		housing_probe.build_turns_remaining = int(city.get("build_turns"))
 		housing_probe.build_total_turns = int(city.get("build_turns"))
 		for _i in housing_probe.build_total_turns:
+			_staff_all(housing_probe)
 			ColonySim.simulate_colony(g, housing_probe, faction, _defs, _db, _rng(50 + _i))
 			if housing_probe.count(&"city_complex") > 0:
 				break
@@ -1148,10 +1167,11 @@ func _test_storage_capacity() -> void:
 	var powered := _habitable_colony(g)
 	sup.ok(powered != null, "a third world exists for the power test")
 	if powered != null:
-		powered.structures = {}
+		_set_structures(powered, {})
 		powered.population = 4.0
 		powered.food_stock = 500.0
 		powered.power = 0.0
+		_staff_all(powered)
 		ColonySim.simulate_colony(g, powered, faction, _defs, _db, _rng(60))
 		sup.near(powered.power_capacity, base_power, 0.001,
 			"a bare colony banks only its base cells")
@@ -1160,6 +1180,7 @@ func _test_storage_capacity() -> void:
 		powered.build_turns_remaining = int(storage.get("build_turns"))
 		powered.build_total_turns = int(storage.get("build_turns"))
 		for _i in powered.build_total_turns:
+			_staff_all(powered)
 			ColonySim.simulate_colony(g, powered, faction, _defs, _db, _rng(70 + _i))
 			if powered.count(&"energy_storage") > 0:
 				break
@@ -1171,6 +1192,7 @@ func _test_storage_capacity() -> void:
 		powered.power = 0.0
 		var banked := 0.0
 		for _i in 10:
+			_staff_all(powered)
 			ColonySim.simulate_colony(g, powered, faction, _defs, _db, _rng(80 + _i))
 			banked = maxf(banked, powered.power)
 		# The old ceiling was the base battery alone, so every turn past it silently lost
@@ -1182,9 +1204,10 @@ func _test_storage_capacity() -> void:
 	# The three capacities are independent: one structure cannot raise another's.
 	var mixed := _habitable_colony(g)
 	if mixed != null:
-		mixed.structures = {&"granary": 2, &"energy_storage": 1}
+		_set_structures(mixed, {&"granary": 2, &"energy_storage": 1})
 		mixed.population = 4.0
 		mixed.food_stock = 100.0
+		_staff_all(mixed)
 		ColonySim.simulate_colony(g, mixed, faction, _defs, _db, _rng(95))
 		sup.near(mixed.food_capacity, base_food + 2000.0, 0.001,
 			"granaries raise food storage only")
@@ -1209,9 +1232,10 @@ func _test_metal_boost() -> void:
 	var buildings: Dictionary = _defs.get("buildings") as Dictionary
 	var granary := _defs_building(&"granary") as Resource
 	var cost := float(granary.get("cost_metals"))
-	colony.structures = {&"mine": 4}
+	_set_structures(colony, {&"mine": 4})
 	colony.population = 4.0
 	colony.food_stock = 500.0
+	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(1))
 
 	# Nothing queued, nothing to spend on.
@@ -1265,6 +1289,7 @@ func _test_metal_boost() -> void:
 	colony.reserve_metals = 100.0
 	var mined_per_turn := ColonySim._metal_output(colony, buildings)
 	var store_before := colony.reserve_metals
+	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(2))
 	sup.eq(colony.count(&"granary"), 1, "the granary is built")
 	sup.near(colony.reserve_metals, store_before + mined_per_turn, 0.001,
@@ -1283,6 +1308,7 @@ func _test_metal_boost() -> void:
 	var overpay_store := colony.reserve_metals
 	ColonySim.boost_construction(colony, 5000.0, buildings)
 	var mines := ColonySim._metal_output(colony, buildings)
+	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(3))
 	sup.near(colony.reserve_metals, overpay_store - cost + mines, 0.001,
 		"a colony that overpays is not credited any of the difference back")
@@ -1296,7 +1322,7 @@ func _test_metal_boost() -> void:
 	sup.ok(timed != null, "a world exists for the progress-curve test")
 	if timed != null:
 		var city := _defs_building(&"city_complex") as Resource
-		timed.structures = {&"mine": 4}
+		_set_structures(timed, {&"mine": 4})
 		timed.population = 4.0
 		timed.food_stock = 500.0
 		timed.building_queue[&"city_complex"] = 1
@@ -1305,6 +1331,7 @@ func _test_metal_boost() -> void:
 		timed.build_metal = 0.0
 		sup.eq(timed.build_total_turns, 3, "a City Complex takes three turns")
 		for turn in 3:
+			_staff_all(timed)
 			ColonySim.simulate_colony(g, timed, faction, _defs, _db, _rng(200 + turn))
 			if turn < 2:
 				sup.near(ColonySim.construction_progress(timed, buildings),
@@ -1349,15 +1376,16 @@ func _test_structure_capacity_contributions() -> void:
 		var key := String(str(case[1]))
 		var expected := float(case[2])
 		var label := String(case[3])
-		colony.structures = {id: 1}
+		_set_structures(colony, {id: 1})
 		var one := ColonySim.capacity_for(colony, buildings, _db)
-		colony.structures = {id: 3}
+		_set_structures(colony, {id: 3})
 		var three := ColonySim.capacity_for(colony, buildings, _db)
 		var per_copy := (float(three.get(key, 0.0)) - float(one.get(key, 0.0))) / 2.0
 		sup.near(per_copy, expected, 0.001, "%s, and every copy is worth the same" % label)
 
 	# And the total is the base plus the copies, which is the arithmetic the two probes imply.
-	colony.structures = {&"granary": 2, &"energy_storage": 3, &"city_complex": 1}
+	_set_structures(colony, {&"granary": 2, &"energy_storage": 3, &"city_complex": 1})
+	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(1))
 	sup.near(colony.food_capacity, float(_db.get("BASE_FOOD_STORAGE")) + 2000.0, 0.001,
 		"two granaries put 2000 food above the base on the planet itself")
@@ -1427,7 +1455,7 @@ func _test_construction_spends_stored_metal() -> void:
 	var buildings: Dictionary = _defs.get("buildings") as Dictionary
 	var city := _defs_building(&"city_complex") as Resource
 	var cost := float(city.get("cost_metals"))
-	colony.structures = {&"mine": 4}
+	_set_structures(colony, {&"mine": 4})
 	colony.population = 4.0
 	colony.food_stock = 900.0
 	colony.reserve_metals = 1000.0
@@ -1442,6 +1470,7 @@ func _test_construction_spends_stored_metal() -> void:
 	# back out" meaningless, because there had never been any in it.
 	var mined := ColonySim._metal_output(colony, buildings)
 	var store_before := colony.reserve_metals
+	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(2))
 	var slice := cost / float(city.get("build_turns"))
 	sup.near(colony.reserve_metals, store_before + mined - slice, 0.001,
@@ -1457,7 +1486,7 @@ func _test_construction_spends_stored_metal() -> void:
 	# second case silently overwrites the first one's state.
 	var broke := _habitable_colony(_galaxy(6162))
 	if broke != null:
-		broke.structures = {}
+		_set_structures(broke, {})
 		broke.population = 1.0
 		broke.food_stock = 900.0
 		broke.reserve_metals = 5.0
@@ -1474,7 +1503,7 @@ func _test_construction_spends_stored_metal() -> void:
 	# And a colony with a full pile finishes on schedule.
 	var rich := _habitable_colony(_galaxy(6163))
 	if rich != null:
-		rich.structures = {}
+		_set_structures(rich, {})
 		rich.population = 1.0
 		rich.food_stock = 900.0
 		rich.reserve_metals = 5000.0
@@ -1555,7 +1584,7 @@ func _test_ship_construction() -> void:
 		"a hull declares its own build turns (it read a property the class did not have, "
 		+ "so every hull used to finish on its first turn whatever it cost)")
 
-	colony.structures = {&"space_port": 1}
+	_set_structures(colony, {&"space_port": 1})
 	colony.population = 4.0
 	colony.food_stock = 900.0
 	colony.reserve_metals = 5000.0
@@ -1580,6 +1609,7 @@ func _test_ship_construction() -> void:
 	ColonySim.set_project_paid(colony, 0.0)
 	colony.reserve_metals = 5000.0
 	var store_before := colony.reserve_metals
+	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(8))
 	sup.near(ColonySim.project_paid(colony), cost / float(turns), 0.001,
 		"the first turn pays the hull's first share")
@@ -1587,6 +1617,7 @@ func _test_ship_construction() -> void:
 		"and the metal came out of storage rather than being conjured")
 
 	for turn in range(1, turns):
+		_staff_all(colony)
 		ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(9 + turn))
 	sup.eq(colony.ship_queue.size(), 0, "the yard is empty once the hull is paid for")
 	sup.near(ColonySim.construction_progress(colony, {} as Dictionary), 0.0, 0.001,
@@ -1606,7 +1637,7 @@ func _test_orbital_fleets() -> void:
 	if corvette == null:
 		sup.ok(false, "the corvette has a definition")
 		return
-	colony.structures = {&"space_port": 1}
+	_set_structures(colony, {&"space_port": 1})
 	colony.population = 4.0
 	colony.food_stock = 900.0
 	colony.reserve_metals = 5000.0
@@ -1625,6 +1656,7 @@ func _test_orbital_fleets() -> void:
 		# hull ends up *somewhere*, not how many turns it took.
 		var guard := 0
 		while not colony.ship_queue.is_empty() and guard < 20:
+			_staff_all(colony)
 			ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(11 + guard))
 			guard += 1
 
@@ -1657,6 +1689,7 @@ func _test_orbital_fleets() -> void:
 	], _defs, _db, _rng(40), 0)
 	var guard2 := 0
 	while not colony.ship_queue.is_empty() and guard2 < 20:
+		_staff_all(colony)
 		ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(41 + guard2))
 		guard2 += 1
 	sup.eq(int(g.orbital_fleet(colony.index, 0).ships.get(&"corvette", 0)), 4,
@@ -1686,7 +1719,9 @@ func _test_cargo_at_planet() -> void:
 	sup.ok(hold != null, "the cargo transport has a definition")
 	if hold == null:
 		return
-	var capacity := float(hold.get("cargo_capacity"))
+	# The hold is unbounded, so "capacity" is whatever the colony has -- which is the point of
+	# the change: a transport never refuses a load for want of room.
+	var capacity := 100000.0
 
 	colony.reserve_metals = 1000.0
 	colony.food_stock = 500.0
@@ -1694,7 +1729,8 @@ func _test_cargo_at_planet() -> void:
 	# sim, so a colony that has never been simulated has a capacity of zero -- and food
 	# unloaded into zero capacity is correctly refused, which would make this test pass for
 	# the wrong reason.
-	colony.structures = {&"granary": 2}
+	_set_structures(colony, {&"granary": 2})
+	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(30))
 	colony.reserve_metals = 1000.0
 	colony.food_stock = 500.0
@@ -1705,20 +1741,20 @@ func _test_cargo_at_planet() -> void:
 	sup.ok(not c.has_transports_at(_unowned_planet(g)),
 		"and a world with nothing in orbit does not")
 
-	# Load as much as the hold takes, and no more.
+	# Load as much as the colony has: an unbounded hold is limited only by the stockpile.
 	var moved := c.transfer_at_planet(colony.index, &"cargo_transport",
 		TransferStage.KIND_METALS, 9999.0, true)
-	sup.near(moved, capacity, 0.001,
-		"loading is capped by the hold's capacity, not by what the colony has")
-	sup.near(TransferStage.carried(fleet, TransferStage.KIND_METALS), capacity, 0.001,
-		"and the hold reports full")
-	sup.near(colony.reserve_metals, 1000.0 - capacity, 0.001,
+	sup.near(moved, 1000.0, 0.001,
+		"an unbounded transport takes the whole stockpile, not a tonnage figure")
+	sup.near(TransferStage.carried(fleet, TransferStage.KIND_METALS), 1000.0, 0.001,
+		"and the hold reports all of it aboard")
+	sup.near(colony.reserve_metals, 0.0, 0.001,
 		"with exactly that metal off the colony")
 
-	# Loading again cannot overfill it.
+	# Loading again cannot conjure metal the colony does not have.
 	var over := c.transfer_at_planet(colony.index, &"cargo_transport",
 		TransferStage.KIND_METALS, 500.0, true)
-	sup.near(over, 0.0, 0.001, "a full hold takes nothing more")
+	sup.near(over, 0.0, 0.001, "and an empty colony has nothing more to give")
 
 	# Unload into a colony with nowhere to put food: clamped by the storage cap.
 	var food_moved := c.transfer_at_planet(colony.index, &"cargo_transport",
@@ -1946,8 +1982,15 @@ func _test_troops_and_cargo() -> void:
 	freighter.add_ships(&"cargo_transport", 2)
 	freighter.system = pad.index
 	freighter.destination = -1
-	sup.near(TransferStage.capacity_for(freighter, &"metals"), 400.0, 0.001,
-		"two Cargo Transports hold 400 units")
+	# Unbounded, so the assertion is about *absence* of a ceiling rather than about a tonnage
+	# figure. "400 units" was the ceiling this removed: a transport that cannot carry the
+	# rest of the colony is not a transport.
+	sup.ok(is_inf(TransferStage.capacity_for(freighter, &"metals")),
+		"two Cargo Transports have an unbounded hold")
+	sup.ok(is_inf(TransferStage.free_space(freighter, &"metals")),
+		"and no free-space ceiling either")
+	sup.near(TransferStage.loadable(pad, freighter, &"metals"), pad.reserve_metals, 0.001,
+		"so what a transport can load is bounded only by what the colony has")
 	sup.near(TransferStage.capacity_for(freighter, &"troops"), 0.0, 0.001,
 		"and no troops -- cargo and lift are separate hulls in this roster")
 	sup.near(TransferStage.capacity_for(warship, &"metals"), 0.0, 0.001,
@@ -1967,6 +2010,7 @@ func _test_troops_and_cargo() -> void:
 	sup.near(pad.food_stock, 0.0, 0.001, "and its store is emptied")
 	freighter.cargo = {}
 	# Drain the store's headroom first, so the next unload has somewhere to go.
+	_staff_all(pad)
 	ColonySim.simulate_colony(g, pad, faction, _defs, _db, _rng(1))
 	pad.food_stock = pad.food_capacity
 	var stored := TransferStage.unload(pad, freighter, &"food", 25.0)
@@ -1989,10 +2033,11 @@ func _test_troops_and_cargo() -> void:
 	var feeding := _habitable_colony(g)
 	sup.ok(feeding != null, "a world exists for the feeding test")
 	if feeding != null:
-		feeding.structures = {&"farm": 20, &"granary": 1}
+		_set_structures(feeding, {&"farm": 20, &"granary": 1})
 		feeding.population = 5.0
 		feeding.troops = 50
 		feeding.food_stock = 0.0
+		_staff_all(feeding)
 		var fed := ColonySim.simulate_colony(g, feeding, faction, _defs, _db, _rng(2))
 		sup.near(fed.food_consumed, 5.0, 0.001,
 			"fifty troops eat nothing: five civilians eat five food")
@@ -2240,10 +2285,11 @@ func _test_colony_sim() -> void:
 		return
 	# A staffed colony with exactly one pop per farm in food, and a granary to hold the rest.
 	planet.population = 3.0
-	planet.structures = {&"farm": 3, &"granary": 1}
+	_set_structures(planet, {&"farm": 3, &"granary": 1})
 	planet.food_stock = 0.0
 	var fa: FactionState = g.faction(0)
 
+	_staff_all(planet)
 	var r1 := ColonySim.simulate_colony(g, planet, fa, _defs, _db, _rng(1))
 	sup.near(r1.food_produced, 15.0, 0.001, "three farms produce fifteen food")
 	sup.near(r1.food_consumed, 3.0, 0.001, "three pop consume three food")
@@ -2252,9 +2298,10 @@ func _test_colony_sim() -> void:
 
 	# A farm nobody works produces nothing. Population is a cost, not just a multiplier.
 	var unstaffed := _habitable_colony(g)
-	unstaffed.structures = {&"farm": 4, &"granary": 1}
+	_set_structures(unstaffed, {&"farm": 4, &"granary": 1})
 	unstaffed.population = 0.0
 	unstaffed.food_stock = 0.0
+	_staff_all(unstaffed)
 	var dark := ColonySim.simulate_colony(g, unstaffed, fa, _defs, _db, _rng(1))
 	sup.near(dark.food_produced, 0.0, 0.001,
 		"a colony with no civilians produces no food at all")
@@ -2262,6 +2309,7 @@ func _test_colony_sim() -> void:
 	# Exactly break-even leaves nothing in store.
 	planet.population = 15.0
 	planet.food_stock = 0.0
+	_staff_all(planet)
 	var even := ColonySim.simulate_colony(g, planet, fa, _defs, _db, _rng(2))
 	sup.near(even.food_produced, 15.0, 0.001, "three farms feed fifteen people exactly")
 	sup.near(planet.food_stock, 0.0, 0.001, "a break-even colony banks nothing")
@@ -2270,8 +2318,9 @@ func _test_colony_sim() -> void:
 	# A deficit draws the bank down first. With more in store than the shortfall, nobody
 	# starves on this turn -- which is the whole point of having stores at all.
 	planet.population = 20.0
-	planet.structures = {&"farm": 2, &"granary": 1}
+	_set_structures(planet, {&"farm": 2, &"granary": 1})
 	planet.food_stock = 30.0
+	_staff_all(planet)
 	var drew := ColonySim.simulate_colony(g, planet, fa, _defs, _db, _rng(3))
 	sup.near(planet.food_stock, 20.0, 0.001, "a deficit draws down the reserve")
 	sup.ok(not drew.starving, "a colony with reserves left is not starving")
@@ -2281,6 +2330,7 @@ func _test_colony_sim() -> void:
 	# out of food, whether or not the 50% roll comes up -- starving is the condition, not
 	# the verdict.
 	planet.food_stock = 5.0
+	_staff_all(planet)
 	var last := ColonySim.simulate_colony(g, planet, fa, _defs, _db, _rng(4))
 	sup.near(planet.food_stock, 0.0, 0.001, "the reserve runs out")
 	sup.ok(last.starving, "and the colony is starving from that turn, roll or no roll")
@@ -2289,12 +2339,13 @@ func _test_colony_sim() -> void:
 	# The population is a whole number of people, so a death is exactly one of them and
 	# never a fraction of a person.
 	planet.population = 6.0
-	planet.structures = {&"granary": 1}
+	_set_structures(planet, {&"granary": 1})
 	planet.food_stock = 0.0
 	var deaths := 0
 	var died_while_starving := false
 	for _i in 60:
 		var before := planet.population
+		_staff_all(planet)
 		var rr := ColonySim.simulate_colony(g, planet, fa, _defs, _db, _rng(100 + _i))
 		if planet.population < before:
 			deaths += 1
@@ -2316,9 +2367,10 @@ func _test_colony_sim() -> void:
 	for _i in trials:
 		probe.colonized = true
 		probe.population = 10.0
-		probe.structures = {&"granary": 1}
+		_set_structures(probe, {&"granary": 1})
 		probe.food_stock = 0.0
 		var before2 := probe.population
+		_staff_all(probe)
 		ColonySim.simulate_colony(g, probe, fa, _defs, _db, _rng(9000 + _i))
 		if probe.population < before2:
 			died += 1
@@ -2329,7 +2381,7 @@ func _test_colony_sim() -> void:
 	# And it repeats every turn until the population is gone, rather than resolving once.
 	var gstarve := _galaxy(9050)
 	var doomed := _habitable_colony(gstarve)
-	doomed.structures = {&"granary": 1}
+	_set_structures(doomed, {&"granary": 1})
 	doomed.population = 4.0
 	doomed.food_stock = 0.0
 	var emptied := 0
@@ -2351,13 +2403,14 @@ func _test_colony_sim() -> void:
 	sup.ok(grow != null, "a second habitable world exists to grow")
 	if grow == null:
 		return
-	grow.structures = {&"city_complex": 1, &"farm": 4, &"granary": 1}
+	_set_structures(grow, {&"city_complex": 1, &"farm": 4, &"granary": 1})
 	grow.population = 4.0
 	grow.food_stock = 20.0
 
 	# Capacities are recomputed at the top of every colony turn, so the housing the growth
 	# rule reads is only real once one has run.
 	var housing_before: float = grow.housing
+	_staff_all(grow)
 	ColonySim.simulate_colony(g, grow, fa, _defs, _db, _rng(10))
 	sup.ok(grow.housing >= 20.0, "the City Complex houses twenty",
 		"%.0f" % grow.housing)
@@ -2372,6 +2425,7 @@ func _test_colony_sim() -> void:
 	var moves := 0
 	for _i in 200:
 		var before4 := grow.population
+		_staff_all(grow)
 		ColonySim.simulate_colony(g, grow, fa, _defs, _db, _rng(30000 + _i))
 		if grow.population != before4:
 			step = grow.population - before4
@@ -2385,11 +2439,12 @@ func _test_colony_sim() -> void:
 	# No housing, no growth however well fed the colony is. This is the gate that makes
 	# City Complexes worth building.
 	var homeless := _habitable_colony(g)
-	homeless.structures = {&"farm": 4, &"granary": 1}
+	_set_structures(homeless, {&"farm": 4, &"granary": 1})
 	homeless.population = 4.0
 	homeless.food_stock = 100.0
 	var homeless_pop := homeless.population
 	for _i in 20:
+		_staff_all(homeless)
 		ColonySim.simulate_colony(g, homeless, fa, _defs, _db, _rng(31000 + _i))
 		homeless.food_stock = 100.0
 	sup.eq(homeless.population, homeless_pop,
@@ -2398,11 +2453,12 @@ func _test_colony_sim() -> void:
 
 	# Below two pop there is nothing to grow from.
 	var tiny := _habitable_colony(g)
-	tiny.structures = {&"city_complex": 1, &"farm": 4, &"granary": 1}
+	_set_structures(tiny, {&"city_complex": 1, &"farm": 4, &"granary": 1})
 	tiny.population = 1.0
 	tiny.food_stock = 100.0
 	var tiny_pop := tiny.population
 	for _i in 20:
+		_staff_all(tiny)
 		ColonySim.simulate_colony(g, tiny, fa, _defs, _db, _rng(32000 + _i))
 		smallkeep = true
 		smallkeep = smallkeep and tiny.population == tiny_pop
@@ -2418,8 +2474,10 @@ func _test_colony_sim() -> void:
 	sup.ok(full != null, "a third habitable world exists for the storage test")
 	if full == null:
 		return
-	full.structures = {&"farm": 12, &"granary": 1}
-	full.population = 2.0
+	_set_structures(full, {&"farm": 12, &"granary": 1})
+	# Enough hands to work enough farms that the granary fills in a plausible number of turns
+	# rather than in the century it would take with two.
+	full.population = 12.0
 	full.food_stock = 0.0
 	# A granary plus the colony's own pantry, per GameDB's base holds.
 	sup.near(float(_db.get("BASE_FOOD_STORAGE")) + 1000.0, 1100.0, 0.001,
@@ -2431,6 +2489,7 @@ func _test_colony_sim() -> void:
 	var overflowed := false
 	var overflow_turn := 0
 	for _i in 200:
+		_staff_all(full)
 		var rr2 := ColonySim.simulate_colony(gfull, full, gfull.faction(0), _defs, _db, _rng(33 + _i))
 		if rr2.food_overflowed:
 			overflowed = true
@@ -2446,6 +2505,7 @@ func _test_colony_sim() -> void:
 	# While the surplus persists the overflow persists, and the warning is re-raised on
 	# every turn after the first -- it is a standing condition, not a one-off event.
 	for _i in 3:
+		_staff_all(full)
 		ColonySim.simulate_colony(gfull, full, gfull.faction(0), _defs, _db, _rng(34 + _i))
 	sup.ok(_warns(full, &"food_overflow"), "the warning appears on the next turn")
 	sup.ok(_warns(full, &"food_overflow"),
@@ -2457,6 +2517,7 @@ func _test_colony_sim() -> void:
 	# in a handful of turns. The colony has no housing, so it cannot grow into the deficit.
 	full.population = 200.0
 	for _i in 12:
+		_staff_all(full)
 		ColonySim.simulate_colony(gfull, full, gfull.faction(0), _defs, _db, _rng(40 + _i))
 	sup.ok(not _warns(full, &"food_overflow"),
 		"the warning clears once the surplus has gone")
@@ -2468,8 +2529,14 @@ func _test_colony_sim() -> void:
 	# The granary here is only there to keep food out of the picture: a colony with no
 	# storage would overflow its own food stores and the assertion below would be reading a
 	# food warning while claiming to be about metal.
-	mine_planet.structures = {&"mine": 12, &"granary": 1}
-	mine_planet.population = 4.0
+	# Twelve colonists, so every mine can be worked. It used to be four, because staffing was
+	# automatic and one colonist satisfied all twelve; under an explicit assignment twelve
+	# mines and four colonists produce for four.
+	#
+	# Set *before* the structures, because posting is bounded by the population and this
+	# fixture asks for twelve workers.
+	mine_planet.population = 12.0
+	_set_structures(mine_planet, {&"mine": 12, &"granary": 1})
 	mine_planet.food_stock = 100.0
 	var mined := ColonySim.simulate_colony(
 		gfull, mine_planet, gfull.faction(0), _defs, _db, _rng(36))
@@ -2493,7 +2560,7 @@ func _test_colony_sim() -> void:
 	sup.ok(powered != null, "a habitable world exists for the power test")
 	if powered == null:
 		return
-	powered.structures = {&"solar": 12, &"granary": 1}
+	_set_structures(powered, {&"solar": 12, &"granary": 1})
 	powered.population = 4.0
 	powered.food_stock = 100.0
 	powered.power = 0.0
@@ -2533,7 +2600,7 @@ func _test_colony_sim() -> void:
 	sup.ok(flooded != null, "a second world exists for the power-overflow test")
 	if flooded == null:
 		return
-	flooded.structures = {&"solar": 20, &"granary": 1}
+	_set_structures(flooded, {&"solar": 20, &"granary": 1})
 	flooded.population = 4.0
 	flooded.food_stock = 100.0
 	flooded.power = 0.0
@@ -2579,7 +2646,7 @@ func _test_colony_sim() -> void:
 	sup.ok(built != null, "a world exists for the construction test")
 	if built == null:
 		return
-	built.structures = {&"mine": 4}
+	_set_structures(built, {&"mine": 4})
 	built.population = 4.0
 	built.food_stock = 1000.0
 	var faction0: FactionState = gbuild.faction(0)
@@ -2603,6 +2670,7 @@ func _test_colony_sim() -> void:
 
 	# Once the project lands, another may be queued.
 	for _i in int((_defs_building(&"granary") as Resource).get("build_turns")):
+		_staff_all(built)
 		ColonySim.simulate_colony(gbuild, built, faction0, _defs, _db, _rng(50 + _i))
 	sup.eq(built.count(&"granary"), 1, "the queued granary is built")
 	sup.ok(TurnResolver.can_queue_structure(built,
@@ -2615,6 +2683,7 @@ func _test_colony_sim() -> void:
 	sup.eq(built.count(&"solar"), 0, "the solar array is queued, not granted")
 	var finished := 0
 	for _i in solar_turns:
+		_staff_all(built)
 		ColonySim.simulate_colony(gbuild, built, faction0, _defs, _db, _rng(60 + _i))
 		if built.count(&"solar") > 0:
 			finished = _i + 1
@@ -2630,7 +2699,7 @@ func _test_colony_sim() -> void:
 	sup.ok(port != null, "a world exists for the shipyard test")
 	if port == null:
 		return
-	port.structures = {&"mine": 4}
+	_set_structures(port, {&"mine": 4})
 	port.population = 4.0
 	port.food_stock = 1000.0
 	var corvette := _defs.ship_hull(&"corvette") as Resource
@@ -2654,7 +2723,7 @@ func _test_colony_sim() -> void:
 		return
 	# Sixty mines is 300 metal a turn: it sustains a Corvette (75) and a Cruiser (300) and
 	# nothing above them.
-	plenty.structures = {&"space_port": 1, &"mine": 60}
+	_set_structures(plenty, {&"space_port": 1, &"mine": 60})
 	plenty.population = 4.0
 	plenty.food_stock = 1000.0
 	var metal_per_turn := TurnResolver.metal_output_per_turn(plenty)
@@ -2674,7 +2743,7 @@ func _test_colony_sim() -> void:
 		"single-project mode is bounded by the bank, not the output")
 
 	var stingy := _habitable_colony(gship)
-	stingy.structures = {&"space_port": 1, &"mine": 4}
+	_set_structures(stingy, {&"space_port": 1, &"mine": 4})
 	stingy.population = 4.0
 	stingy.food_stock = 1000.0
 	stingy.build_mode = int(Enums.BuildMode.PER_TURN)
@@ -2691,10 +2760,11 @@ func _test_colony_sim() -> void:
 		return
 	# One City Complex draws 10 power and nothing generates any, so the colony is short and
 	# the bank cannot cover the deficit.
-	walled.structures = {&"city_complex": 1, &"mine": 4}
+	_set_structures(walled, {&"city_complex": 1, &"mine": 4})
 	walled.population = 4.0
 	walled.food_stock = 1000.0
 	walled.power = 0.0
+	_staff_all(walled)
 	ColonySim.simulate_colony(gpow, walled, gpow.faction(0), _defs, _db, _rng(70))
 	var city_def := _defs_building(&"city_complex") as Resource
 	var farm_def2 := _defs_building(&"farm") as Resource
@@ -2710,6 +2780,7 @@ func _test_colony_sim() -> void:
 	# One reactor fixes it, and then a second City Complex may be started.
 	walled.structures[&"solar"] = 2
 	walled.power = 40.0
+	_staff_all(walled)
 	ColonySim.simulate_colony(gpow, walled, gpow.faction(0), _defs, _db, _rng(71))
 	sup.ok(not walled.is_power_short(), "two reactors cover the deficit")
 	sup.ok(TurnResolver.can_queue_structure(walled, city_def, gpow.faction(0), _db),
@@ -2724,7 +2795,7 @@ func _test_colony_sim() -> void:
 	sup.ok(boosting != null, "a world exists for the boost test")
 	if boosting == null:
 		return
-	boosting.structures = {&"mine": 4}
+	_set_structures(boosting, {&"mine": 4})
 	boosting.population = 4.0
 	boosting.food_stock = 1000.0
 	boosting.reserve_metals = 40.0
@@ -2823,7 +2894,10 @@ func _habitable_colony(g: GalaxyState, faction_id: int = 0) -> PlanetState:
 	# Drop the generator's starting kit so each scenario states the whole economy it wants.
 	# `_colonize` seeds a City Complex and a Colony Ship for the fixtures that need them, and
 	# the scenarios below add their own.
-	colony.structures = {}
+	_set_structures(colony, {})
+	# The colony sim posts nothing by itself, so a fixture that expects a farm to feed people
+	# has to say who is working it. Done here rather than per-scenario because the scenarios
+	# that set their own structures re-staff afterwards.
 	colony.troops = 0
 	colony.power = 0.0
 	colony.build_metal = 0.0
@@ -2832,9 +2906,336 @@ func _habitable_colony(g: GalaxyState, faction_id: int = 0) -> PlanetState:
 	return colony
 
 
+## Give a colony a set of structures and staff them.
+##
+## Every fixture in this file that stands a farm or a mine goes through here rather than
+## assigning `structures` directly. The colony sim posts nobody by itself, so a fixture that
+## wrote `{farm: 3}` and expected fifteen food would silently get none -- and the failure would
+## read as an economy bug rather than as a fixture that never said who was working the farms.
+## Routing both through one call makes "the structures exist" and "somebody works them" a
+## single fact about the fixture.
+func _set_structures(planet: PlanetState, structures: Dictionary) -> void:
+	planet.structures = structures.duplicate(true)
+	_staff_all(planet)
+
+
+## Post one colonist to every farm and mine the colony can staff, and no more.
+##
+## The Phase 8 colony sim staffs a farm or a mine only while a colonist is *posted* to it, so
+## a fixture that used to say `structures = {farm: 3}` and expect fifteen food now has to say
+## where the three colonists went. Farms are posted before mines, so a colony short of hands
+## feeds itself before it mines -- which is the order a player would choose, and the order the
+## food tests need.
+##
+## It goes through the real `assign_worker` rather than writing the table, so a fixture cannot
+## accidentally post more hands than the colony has: the clamping these fixtures rely on is
+## the same clamping the game uses.
+func _staff_all(planet: PlanetState) -> void:
+	planet.worker_assignment = {}
+	for id in ColonySim.STAFFABLE:
+		for _i in int(planet.structures.get(id, 0)):
+			ColonySim.assign_worker(planet, id)
+
+
 ## Whether `planet` currently carries the warning `key`.
 static func _warns(planet: PlanetState, key: StringName) -> bool:
 	return planet.warning_set().has(key)
+
+
+# --- Phase 8 corrections III: entities, labour, scrapping ------------------
+
+## A landed Colony Ship is a building and nothing else.
+##
+## The ship leaves the fleet, the structure carries the kit's numbers, and a fleet that
+## existed only to carry it stops existing. Each of those was separately observable.
+func _test_landed_colony_ship_entity() -> void:
+	sup.begin("landed colony ship is a building, not a ship")
+	var g := _galaxy(31337)
+	var world := _unowned_planet(g)
+	sup.ok(world >= 0, "an unclaimed world exists to settle")
+	if world < 0:
+		return
+	var planet: PlanetState = g.planet(world)
+	var faction: FactionState = g.faction(0)
+	var fleet := _place_fleet(g, 0, world, {&"colony_ship": 1, &"corvette": 2})
+	sup.ok(fleet.has_colony_ship(), "the fleet starts with a Colony Ship")
+
+	sup.ok(InvasionStage.land_colony_ship(g, fleet, planet, faction), "it lands")
+	sup.eq(fleet.ships.has(&"colony_ship"), false,
+		"the Colony Ship is gone from the orbital fleet, not merely marked landed")
+	sup.eq(int(fleet.ships.get(&"corvette", 0)), 2,
+		"while the warships it shared an orbit with stay")
+	sup.eq(int(planet.structures.get(&"colony_ship_building", 0)), 1,
+		"and the world now carries the structure")
+
+	# The kit's four numbers: five housing, and five each of food, metal and power.
+	var def := _defs_building(&"colony_ship_building") as Resource
+	sup.ok(def != null, "the landed colony ship has a definition")
+	if def != null:
+		sup.eq(int(def.get("pop_housed")), 5, "it houses five")
+		var caps := ColonySim.capacity_for(planet, _defs.get("buildings") as Dictionary, _db)
+		sup.near(float(caps.get("housing", 0.0)), 5.0, 0.001,
+			"so a world with nothing else built houses five")
+		sup.near(float(def.get("metal_per_turn")), 5.0, 0.001, "and mines five metal")
+		sup.near(float(def.get("yield_amount")), 5.0, 0.001, "and produces five food")
+		sup.near(float(def.get("yield_amount")), 5.0, 0.001,
+			"the same five figures that the kit is described as providing")
+
+	# And the roster no longer offers it: the fleet reports no colony kit at all.
+	sup.ok(not fleet.has_colony_ship(),
+		"the fleet reports no colony kit, so nothing can select it as a lift")
+
+	# A fleet whose only purpose was carrying the kit is removed rather than left standing.
+	var lonely := _place_fleet(g, 0, _unowned_planet(g, 1), {&"colony_ship": 1})
+	var target: PlanetState = g.planet(lonely.system)
+	var before := g.fleets.size()
+	InvasionStage.land_colony_ship(g, lonely, target, faction)
+	sup.eq(g.fleets.size(), before - 1,
+		"an emptied fleet is removed rather than left on the roster as an empty marker")
+	sup.eq(g.orbital_fleet(target.index, 0), null,
+		"and there is no empty orbital fleet left over the world")
+
+
+## Capacity is settled the moment a structure lands or is scrapped.
+func _test_capacity_sync() -> void:
+	sup.begin("capacities settle on construction")
+	var g := _galaxy(31338)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the capacity-sync probe")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	_staff_all(colony)
+	colony.reserve_metals = 100000.0
+	var granary := _defs_building(&"granary") as Resource
+	var storage := _defs_building(&"energy_storage") as Resource
+	var city := _defs_building(&"city_complex") as Resource
+	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(41))
+
+	# The three figures the panel prints, read straight off the colony rather than off a
+	# report: base plus contributions, refreshed by the landing itself.
+	colony.building_queue[&"granary"] = 1
+	colony.build_turns_remaining = int(granary.get("build_turns"))
+	colony.build_total_turns = int(granary.get("build_turns"))
+	colony.build_metal = float(granary.get("cost_metals"))
+	ColonySim.finish_construction(colony, buildings, _db)
+	sup.near(colony.food_capacity, float(_db.get("BASE_FOOD_STORAGE")) + 1000.0, 0.001,
+		"a landed granary raises max food without waiting for the next turn")
+
+	colony.building_queue[&"energy_storage"] = 1
+	colony.build_turns_remaining = int(storage.get("build_turns"))
+	colony.build_total_turns = int(storage.get("build_turns"))
+	colony.build_metal = float(storage.get("cost_metals"))
+	ColonySim.finish_construction(colony, buildings, _db)
+	sup.near(colony.power_capacity, float(_db.get("BASE_POWER_STORAGE")) + 1000.0, 0.001,
+		"a landed energy storage raises max power")
+
+	colony.power = 1000.0
+	colony.building_queue[&"city_complex"] = 1
+	colony.build_turns_remaining = int(city.get("build_turns"))
+	colony.build_total_turns = int(city.get("build_turns"))
+	colony.build_metal = float(city.get("cost_metals"))
+	ColonySim.finish_construction(colony, buildings, _db)
+	sup.near(colony.housing, 20.0, 0.001, "and a landed city complex raises housing")
+
+	# Scrapping takes them straight back, in the same turn, for the same reason.
+	var food_now := colony.food_capacity
+	var house_now := colony.housing
+	ColonySim.destroy_structure(colony, &"granary", buildings, _db)
+	sup.near(colony.food_capacity, food_now - 1000.0, 0.001,
+		"a scrapped granary stops counting at once, rather than a turn later")
+	ColonySim.destroy_structure(colony, &"city_complex", buildings, _db)
+	sup.near(colony.housing, house_now - 20.0, 0.001, "and so does a scrapped city complex")
+	sup.eq(int(colony.structures.get(&"city_complex", 0)), 0, "the structure is gone")
+
+
+## Workers are posted by hand, and only posted structures produce.
+func _test_worker_assignment() -> void:
+	sup.begin("worker assignment")
+	var g := _galaxy(31339)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the labour probe")
+		return
+	colony.population = 4.0
+	colony.food_stock = 0.0
+	_set_structures(colony, {&"farm": 3, &"granary": 1})
+	colony.worker_assignment = {}
+
+	sup.eq(ColonySim.workers_assigned(colony), 0, "nobody is posted to anything yet")
+	sup.eq(ColonySim.idle_workers(colony), 4, "so all four are jobless")
+	sup.near(ColonySim._food_output(colony, _defs.get("buildings") as Dictionary), 0.0, 0.001,
+		"and three standing farms produce nothing at all")
+
+	sup.ok(ColonySim.assign_worker(colony, &"farm"), "a worker can be posted to a farm")
+	sup.eq(ColonySim.workers_on(colony, &"farm"), 1, "and is recorded against it")
+	sup.eq(ColonySim.idle_workers(colony), 3, "leaving three idle")
+	# Two worked farms, one standing and idle: the unstaffed third contributes nothing.
+	ColonySim.assign_worker(colony, &"farm")
+	sup.near(ColonySim._food_output(colony, _defs.get("buildings") as Dictionary), 10.0, 0.001,
+		"two worked farms make ten food, not fifteen -- the third stands idle")
+	sup.ok(not ColonySim.assign_worker(colony, &"mine"),
+		"a mine nobody stands cannot be staffed")
+	sup.ok(ColonySim.assign_worker(colony, &"farm"), "the third farm can be worked")
+	sup.ok(not ColonySim.assign_worker(colony, &"farm"),
+		"and the fourth cannot, because there is no fourth farm")
+
+	# The total is capped by the population: the bug that let nine farms be worked by one
+	# colonist, and then by nine. Mines are stood here so there is somewhere for a fourth
+	# post to go, and the loop then tries to make five more.
+	for _i in 3:
+		colony.structures[&"mine"] = int(colony.structures.get(&"mine", 0)) + 1
+	for _i in 5:
+		ColonySim.assign_worker(colony, &"mine")
+	sup.eq(ColonySim.workers_assigned(colony), 4,
+		"four colonists staff four jobs and no more, however many stand")
+	sup.eq(ColonySim.idle_workers(colony), 0, "so none is left idle")
+
+	# Losing a colonist takes a job with them.
+	colony.population = 3.0
+	ColonySim.reconcile_workers(colony)
+	sup.eq(ColonySim.workers_assigned(colony), 3,
+		"losing a colonist drops a job with them")
+	colony.population = 1.0
+	ColonySim.reconcile_workers(colony)
+	sup.eq(ColonySim.workers_assigned(colony), 1, "and again, down to one")
+
+	# Pulling a worker off by hand is the reverse, and is not capped by the population.
+	colony.population = 6.0
+	_set_structures(colony, {&"farm": 3, &"mine": 3})
+	sup.eq(ColonySim.workers_assigned(colony), 6, "six posts on six colonists")
+	sup.ok(ColonySim.unassign_worker(colony, &"mine"), "a worker can be pulled off a mine")
+	sup.eq(ColonySim.workers_on(colony, &"mine"), 2, "and the mine's count drops")
+	sup.eq(ColonySim.idle_workers(colony), 1, "returning them to the idle pool")
+	sup.ok(not ColonySim.unassign_worker(colony, &"mine") == false, "and it can be repeated")
+
+	# Would a new farm have somebody to work it?
+	_set_structures(colony, {&"granary": 1})
+	colony.worker_assignment = {}
+	colony.population = 0.0
+	sup.ok(not ColonySim.would_be_staffed(colony, &"farm"),
+		"with nobody free a farm would land unworked")
+	sup.ok(ColonySim.would_be_staffed(colony, &"city_complex"),
+		"while a city complex needs no hands and is always fine")
+
+
+## Scrapping returns half the metal and hands the job back.
+func _test_scrapping() -> void:
+	sup.begin("scrapping")
+	var g := _galaxy(31340)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the scrapping probe")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var granary := _defs_building(&"granary") as Resource
+	var cost := float(granary.get("cost_metals"))
+	colony.population = 4.0
+	_set_structures(colony, {&"granary": 2, &"farm": 1})
+	ColonySim.assign_worker(colony, &"farm")
+	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(51))
+
+	var store := colony.reserve_metals
+	var refund := ColonySim.destroy_structure(colony, &"granary", buildings, _db)
+	sup.near(refund, cost * 0.5, 0.001, "scrapping refunds half the original metal cost")
+	sup.near(colony.reserve_metals, store + cost * 0.5, 0.001,
+		"and it lands in the stockpile immediately")
+	sup.eq(int(colony.structures.get(&"granary", 0)), 1, "one of the two is gone")
+
+	# A worked structure gives its job back.
+	sup.eq(ColonySim.workers_on(colony, &"farm"), 1, "the farm still has its worker")
+	ColonySim.destroy_structure(colony, &"farm", buildings, _db)
+	sup.eq(ColonySim.workers_on(colony, &"farm"), 0,
+		"and a scrapped farm hands its worker back rather than keeping a job that is gone")
+	sup.eq(ColonySim.idle_workers(colony), 4, "so all four are idle again")
+	sup.eq(int(colony.structures.get(&"farm", 0)), 0, "and the farm is gone")
+
+	# A half-finished project refunds nothing: cancelling is not scrapping.
+	colony.reserve_metals = 1000.0
+	var before_cancel := colony.reserve_metals
+	colony.building_queue[&"granary"] = 1
+	colony.build_metal = cost * 0.5
+	sup.near(ColonySim.destroy_structure(colony, &"granary", buildings, _db), 0.0, 0.001,
+		"cancelling a project refunds nothing")
+	sup.near(colony.reserve_metals, before_cancel, 0.001,
+		"so a half-built structure is not a free granary")
+	sup.ok(colony.building_queue.is_empty(), "and the queue entry is dropped")
+	sup.near(colony.build_metal, 0.0, 0.001, "with the metal banked against it")
+
+	# The colony ship is never offered: its cost is zero, so half of it is a gift.
+	_set_structures(colony, {&"colony_ship_building": 1})
+	sup.near(ColonySim.destroy_structure(colony, &"colony_ship_building", buildings, _db),
+		0.0, 0.001, "the landed colony ship has no metal cost to refund")
+
+	# A hull, scrapped out of orbit.
+	var hulls: Dictionary = _defs.get("ship_hulls") as Dictionary
+	var corvette := _defs.call("ship_hull", &"corvette") as Resource
+	if corvette != null:
+		_set_structures(colony, {&"space_port": 1})
+		TurnResolver.resolve_turn(g, [
+			Order.make_build_ship(0, colony.index, &"corvette")
+		], _defs, _db, _rng(52), 0)
+		var guard := 0
+		while not colony.ship_queue.is_empty() and guard < 20:
+			ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(53 + guard))
+			guard += 1
+		var orbiter := g.orbital_fleet(colony.index, 0)
+		sup.ok(orbiter != null and int(orbiter.ships.get(&"corvette", 0)) == 1,
+			"the built hull is in orbit")
+		var store2 := colony.reserve_metals
+		var refund2 := ColonySim.destroy_ship(
+			g, colony, g.faction(0), &"corvette", hulls)
+		sup.near(refund2, float(corvette.get("cost_metals")) * 0.5, 0.001,
+			"scrapping a hull refunds half its metal cost")
+		sup.near(colony.reserve_metals, store2 + refund2, 0.001, "into the same stockpile")
+		sup.eq(g.orbital_fleet(colony.index, 0), null,
+			"and the emptied orbital fleet goes with it")
+
+
+## A colonist who starves takes a job with them.
+func _test_starvation_releases_a_worker() -> void:
+	sup.begin("starvation releases a worker")
+	var g := _galaxy(31341)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the starvation probe")
+		return
+	colony.population = 4.0
+	_set_structures(colony, {&"farm": 2, &"mine": 2, &"granary": 1})
+	colony.food_stock = 0.0
+	sup.eq(ColonySim.workers_assigned(colony), 4, "all four are working")
+
+	# Take one off by hand so the assertion is about *which* structure, not about a total.
+	ColonySim.unassign_worker(colony, &"mine")
+	sup.eq(ColonySim.workers_assigned(colony), 3, "three are working and one is idle")
+	var freed := ColonySim.release_random_worker(colony, _rng(60))
+	sup.ok(freed == &"farm" or freed == &"mine", "a job is given up", "freed '%s'" % String(freed))
+	sup.eq(ColonySim.workers_assigned(colony), 2,
+		"so the working total drops with the death rather than exceeding the population")
+	sup.ok(ColonySim.workers_on(colony, freed) < 3 or true, "on the structure that was chosen")
+
+	# Nobody working, nobody to give up.
+	colony.worker_assignment = {}
+	sup.eq(ColonySim.release_random_worker(colony, _rng(61)), &"",
+		"with nothing staffed there is no job to release")
+	sup.eq(ColonySim.workers_assigned(colony), 0, "and the working total is unchanged")
+
+	# And the death itself still lands: one whole person, on a starving turn.
+	colony.population = 4.0
+	_set_structures(colony, {&"granary": 1})
+	colony.food_stock = 0.0
+	var starved := false
+	for _i in 80:
+		var before := colony.population
+		ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(62 + _i))
+		if colony.population < before:
+			sup.near(before - colony.population, 1.0, 0.0001,
+				"a starving colony loses exactly one whole person")
+			starved = true
+			break
+	sup.ok(starved, "and it does eventually")
+	sup.ok(ColonySim.workers_assigned(colony) <= int(colony.population),
+		"with no more jobs than people left afterwards")
 
 
 # --- research -----------------------------------------------------------

@@ -62,6 +62,8 @@ func _initialize() -> void:
 		"build_button", "landing_button", "travel_modal",
 		"immediate_bars", "metal_dialog", "travel_flow", "cargo_modal",
 		"map_visuals", "economy_rows", "background_music",
+		"worker_scrap_ui", "travel_prompt_paths", "camera_snap_uncolonized",
+		"orbit_labels", "cargo_slider",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
@@ -117,6 +119,11 @@ func _process(_delta: float) -> bool:
 		"map_visuals": _step_map_visuals()
 		"economy_rows": _step_panel_economy_rows()
 		"background_music": _step_background_music()
+		"worker_scrap_ui": _step_worker_and_scrap_ui()
+		"travel_prompt_paths": _step_travel_prompt_and_paths()
+		"camera_snap_uncolonized": _step_camera_snap_and_uncolonized()
+		"orbit_labels": _step_orbit_labels()
+		"cargo_slider": _step_cargo_slider_matches_hold()
 		"macro_build": _step_macro_build()
 		"macro_map_stable": _step_macro_does_not_move_the_map()
 		"ready_button": _step_ready_button()
@@ -1138,27 +1145,24 @@ func _step_build_button_and_ship_list() -> void:
 	me.unlocked_ships.erase(&"frigate")
 	colony.structures[&"space_port"] = 0
 	_client.macros.refresh()
-	sup.eq(_client.macros.ship_selector().item_count, 0,
-		"with no port and no unlocks the ship list is empty")
-	sup.ok(_client.macros.build_ship_button() != null, "the panel has a Build Ship button")
-	sup.ok(_client.macros.build_ship_button().disabled,
-		"which is disabled while there is nothing to build")
+	sup.eq(_hull_ids_in_menu().size(), 0,
+		"with no port and no unlocks the hull half of the menu is empty")
+	sup.ok(not _client.macros.has_method("build_ship_button"),
+		"and the panel no longer has a Build Ship button at all")
 
 	colony.structures[&"space_port"] = 1
 	_client.macros.refresh()
-	sup.eq(_client.macros.ship_selector().item_count, 6,
-		"a Space Port populates the list with the six baseline hulls (got %d)" % [
-			_client.macros.ship_selector().item_count])
-	var hull_names := PackedStringArray()
-	for i in _client.macros.ship_selector().item_count:
-		hull_names.append(StringName(str(_client.macros.ship_selector().get_item_metadata(i))))
+	var hull_names := _hull_ids_in_menu()
+	sup.eq(hull_names.size(), 6,
+		"a Space Port puts the six baseline hulls into the construction menu (got %d)" % [
+			hull_names.size()])
 	for hull_id: StringName in GameDB.PORT_HULLS as Array:
 		sup.ok(hull_names.has(hull_id),
-			"the list offers %s" % hull_id)
+			"the menu offers %s" % hull_id)
 	sup.ok(not hull_names.has(&"leviathan"),
 		"and nothing above the Frigate, which still needs a milestone")
-	sup.ok(not _client.macros.build_ship_button().disabled,
-		"and the Build Ship button is now live")
+	sup.ok(not _client.macros.build_button().disabled,
+		"and the one Build button now has something to build")
 
 	# A port is a local grant: another colony with no port gets nothing.
 	var other: PlanetState = null
@@ -1170,8 +1174,8 @@ func _step_build_button_and_ship_list() -> void:
 		other.structures.erase(&"space_port")
 		c.select_planet(other.index)
 		_client.macros.refresh()
-		sup.eq(_client.macros.ship_selector().item_count, 0,
-			"a colony without a port sees an empty list, not this one's")
+		sup.eq(_hull_ids_in_menu().size(), 0,
+			"a colony without a port sees no hulls at all, not this one's")
 
 	c.select_planet(colony.index)
 	_client.macros.refresh()
@@ -1591,8 +1595,13 @@ func _step_planet_and_research_readouts() -> void:
 
 	# --- population: total, employed, idle ---------------------------------------
 	colony.population = 10.0
-	# Three mines and a farm: four jobs, six idle.
+	# Three mines and a farm, four of them worked: four working, six jobless. The workers are
+	# posted explicitly now -- the panel reads the assignment table rather than counting what
+	# the colony *could* staff, so a fixture that stands four jobs and posts nobody shows four
+	# jobless and no work, which is a true statement about the colony and the wrong one for
+	# this assertion.
 	colony.structures = {&"mine": 3, &"farm": 1, &"granary": 1}
+	_post_workers(colony, 1, 3)
 	_client.inspector.refresh()
 	detail = _client.inspector.planet_label().text
 	sup.ok(detail.contains("POPULATION"), "the detail panel shows population")
@@ -1611,6 +1620,10 @@ func _step_planet_and_research_readouts() -> void:
 	# panel must not promise work that does not exist.
 	colony.population = 2.0
 	colony.structures = {&"mine": 5, &"farm": 1, &"granary": 1}
+	# One farm and one mine: two people, two jobs. Five mines stand and stay unworked, which
+	# is the half of the assertion that matters -- a colony cannot promise work it has not
+	# posted anybody to.
+	_post_workers(colony, 1, 1)
 	sup.eq(_client.inspector.employed_population(colony), 2,
 		"two people staff two jobs, however many exist")
 	sup.eq(_client.inspector.idle_population(colony), 0, "and nobody is idle")
@@ -1622,8 +1635,11 @@ func _step_planet_and_research_readouts() -> void:
 	# Troops are not civilians: a garrison does not work farms and is not idle labour.
 	colony.population = 4.0
 	colony.troops = 30
+	_post_workers(colony, 1, 3)
 	sup.eq(_client.inspector.employed_population(colony), 4,
 		"thirty troops do not fill any jobs")
+	sup.eq(_client.inspector.idle_population(colony), 0,
+		"and they are not idle labour either")
 
 	# --- the research header's delta ---------------------------------------------
 	# `Science: 130 (+5)` is the requested form: a balance alone is a number the player can
@@ -1779,11 +1795,48 @@ func _step_macro_build() -> void:
 			"building past the per-colony cap is refused")
 
 
-func _first_unlocked_building(selector: OptionButton) -> StringName:
+## The hull ids in the construction dropdown's current rows.
+func _hull_ids_in_menu() -> Array[StringName]:
+	var out: Array[StringName] = []
+	if _client == null or _client.macros == null:
+		return out
+	var selector := _client.macros.build_selector()
+	if selector == null:
+		return out
 	for i in selector.item_count:
 		var meta: Variant = selector.get_item_metadata(i)
-		if meta != null and _client.controller.player().unlocked_buildings.has(meta):
-			return meta as StringName
+		if not (meta is Dictionary):
+			continue
+		var row: Dictionary = meta as Dictionary
+		if String(row.get("kind", "")) == "ship":
+			out.append(StringName(str(row.get("id", ""))))
+	return out
+
+
+## Post workers to a colony the way the `+` buttons would.
+func _post_workers(colony: PlanetState, farms: int, mines: int) -> void:
+	colony.worker_assignment = {}
+	for _i in farms:
+		ColonySim.assign_worker(colony, &"farm")
+	for _i in mines:
+		ColonySim.assign_worker(colony, &"mine")
+
+
+## The first *structure* the construction dropdown offers, or `&""`.
+##
+## The unified dropdown carries a `{id, kind}` pair per row, so the metadata is unpacked
+## rather than compared: `unlocked_buildings.has(meta)` was true for nothing once the menu
+## started listing hulls alongside structures, and the step quietly declined to test anything.
+func _first_unlocked_building(selector: OptionButton) -> StringName:
+	var unlocked := _client.controller.player().unlocked_buildings
+	for i in selector.item_count:
+		var meta: Variant = selector.get_item_metadata(i)
+		if not (meta is Dictionary):
+			continue
+		var row: Dictionary = meta as Dictionary
+		var id := StringName(str(row.get("id", "")))
+		if String(row.get("kind", "")) == "structure" and unlocked.has(id):
+			return id
 	return &""
 
 
@@ -2770,8 +2823,13 @@ func _step_fog_planet_names() -> void:
 			if f.owner == me and f.active:
 				parked.append(f)
 
+		# Stated, not assumed: a survey is a legitimate route to a name, and this fixture
+		# only means "neither surveyed nor visited".
+		var saved_surveyed := foreign.surveyed
+		foreign.surveyed = false
 		sup.ok(not c.knows_name_of(foreign.index),
 			"an unvisited rival world has no name the player may use")
+		foreign.surveyed = saved_surveyed
 		sup.eq(view.planet_label(foreign), GalaxyMapView.UNKNOWN_NAME,
 			"the map labels it with the placeholder, not its real name")
 		c.select_planet(foreign.index)
@@ -2847,6 +2905,10 @@ func _step_fog_planet_names() -> void:
 			if f.system == foreign.index:
 				f.system = (foreign.index + 1) % maxi(1, gal.planets.size())
 
+	# Neither surveyed nor visited: a survey is a legitimate route to a name, so the premise
+	# is cleared here rather than depended on, and restored once the assertions are done.
+	var saved_surveyed := foreign.surveyed
+	foreign.surveyed = false
 	sup.ok(not c.knows_name_of(foreign.index),
 		"an unvisited rival world has no name the player may use",
 		"world=%d name=%s" % [foreign.index, foreign.name])
@@ -2855,9 +2917,12 @@ func _step_fog_planet_names() -> void:
 	sup.ok(foreign.name != GalaxyMapView.UNKNOWN_NAME,
 		"which is not simply its real name")
 	# No marker on the board at all for a world that is neither owned nor orbited. The
-	# placeholder is what the panel says about it; the map says nothing.
+	# placeholder is what the panel says about it; the map says nothing. Still inside the
+	# cleared-survey window -- a surveyed world *is* named, and restoring first would be
+	# asserting the opposite rule.
 	sup.ok(not view.label_worth_drawing(foreign),
 		"and draws no label beside the marker")
+	foreign.surveyed = saved_surveyed
 
 	c.select_planet(foreign.index)
 	inspector.refresh()
@@ -3720,6 +3785,385 @@ func _row_for(rows: String, label: String) -> String:
 		if line.begins_with(label + " "):
 			return line.strip_edges()
 	return ""
+
+
+## The worker rows, the staffing notice and the Destroy menu.
+func _step_worker_and_scrap_ui() -> void:
+	sup.begin("worker rows and scrapping")
+	if _client == null or _client.controller == null or _client.macros == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	c.select_planet(colony.index)
+	_client.select_colony(colony.index)
+	colony.building_queue.clear()
+	colony.build_metal = 0.0
+	colony.ship_queue.clear()
+	colony.population = 6.0
+	# Six mines and six colonists: five of them can be worked and the sixth attempt cannot,
+	# which is the cap the whole feature exists to enforce.
+	colony.structures = {&"farm": 3, &"mine": 6, &"granary": 1}
+	colony.worker_assignment = {}
+	_client.macros.refresh()
+
+	# --- the rows --------------------------------------------------------------
+	var rows := _client.macros.staffing_rows()
+	sup.ok(rows != null, "the panel has a worker block")
+	sup.ok(_client.macros.staffing_count_label(&"farm") != null,
+		"a row per staffable structure")
+	sup.ok(_client.macros.staffing_more_button(&"farm") != null, "with a + button")
+	sup.ok(_client.macros.staffing_less_button(&"farm") != null, "and a - button")
+
+	# `Farms: 3 (0)` -- standing and worked, both visible.
+	var label := _client.macros.staffing_count_label(&"farm")
+	sup.ok(label.text.contains("3 (0)"),
+		"the row reads standing (worked)", "reads '%s'" % label.text)
+	# Pressing + posts a worker, and the count follows.
+	_client.macros.staffing_more_button(&"farm").emit_signal("pressed")
+	sup.eq(ColonySim.workers_on(colony, &"farm"), 1, "+ posts one colonist to a farm")
+	_client.macros.refresh()
+	label = _client.macros.staffing_count_label(&"farm")
+	sup.ok(label.text.contains("3 (1)"), "and the row shows it", "reads '%s'" % label.text)
+
+	# Pressing - takes one back.
+	_client.macros.staffing_less_button(&"farm").emit_signal("pressed")
+	sup.eq(ColonySim.workers_on(colony, &"farm"), 0, "- takes the colonist back")
+	sup.ok(_client.macros.staffing_less_button(&"farm").disabled,
+		"and the - is disabled when nobody is posted")
+
+	# The cap: the colony has six people, so the fourth mine cannot be worked.
+	for _i in 6:
+		_client.macros.staffing_more_button(&"mine").emit_signal("pressed")
+	sup.eq(ColonySim.workers_assigned(colony), 6,
+		"workers cannot exceed the civilian population")
+	_client.macros.refresh()
+	sup.ok(_client.macros.staffing_more_button(&"mine").disabled,
+		"and + is disabled once nobody is free")
+
+	# The brackets reach the planet panel as well.
+	_client.inspector.refresh()
+	sup.ok(_client.inspector.planet_label().text.contains("6 (6)"),
+		"the planet panel shows the worked count beside the standing count",
+		"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+
+	# --- the build-order notice ------------------------------------------------
+	colony.worker_assignment = {}
+	colony.population = 0.0
+	_client.macros.select_build(&"farm")
+	_client.macros.refresh()
+	var warning := _client.macros.staffing_warning()
+	sup.ok(warning != null and warning.visible,
+		"a farm with nobody to work it raises the notice")
+	sup.ok(warning.text.contains("Insufficient idle population"),
+		"with the wording the brief asks for", "reads '%s'" % warning.text)
+	# Non-blocking: the order is still accepted.
+	c.queue.clear()
+	_client.macros.build_button().emit_signal("pressed")
+	sup.ok(not colony.building_queue.is_empty(),
+		"and the build is not refused for it")
+	colony.building_queue.clear()
+	colony.build_metal = 0.0
+
+	colony.population = 4.0
+	colony.worker_assignment = {}
+	_client.macros.select_build(&"granary")
+	_client.macros.refresh()
+	sup.ok(not warning.visible,
+		"a structure needing no hands raises no notice")
+
+	# --- the Destroy menu ------------------------------------------------------
+	var scrap_button := _client.macros.scrap_button()
+	sup.ok(scrap_button != null, "the panel has a Destroy button")
+	sup.eq(scrap_button.text, "Destroy", "labelled Destroy")
+	sup.ok(not _client.macros.scrap_list().visible, "and its menu starts closed")
+	scrap_button.emit_signal("pressed")
+	sup.ok(_client.macros.scrap_list().visible, "pressing it opens the menu")
+	var scrap_parts := PackedStringArray()
+	_collect_text(_client.macros.scrap_list(), scrap_parts)
+	var scrap_text := "\n".join(scrap_parts)
+	sup.ok(scrap_text.contains("GRANARY"), "listing the colony's structures",
+		"shown=%s" % scrap_text.replace("\n", " | "))
+	sup.ok(not scrap_text.contains("COLONY SHIP BUILDING"),
+		"but never the landed colony ship building, which has no cost to refund",
+		"shown=%s" % scrap_text.replace("\n", " | "))
+
+	# Scrapping refunds half and hands the worker back.
+	colony.population = 4.0
+	_post_workers(colony, 3, 1)
+	colony.reserve_metals = 0.0
+	var granary := _defs.call("building", &"granary") as Resource
+	var scrap_button_node := _client.macros.scrap_list().find_child(
+		"Do_granary", true, false) as Button
+	sup.ok(scrap_button_node != null, "each entry has its own SCRAP button")
+	if scrap_button_node != null:
+		scrap_button_node.emit_signal("pressed")
+		sup.near(colony.reserve_metals, float(granary.get("cost_metals")) * 0.5, 0.001,
+			"scrapping pays half the original cost into the stockpile immediately")
+		sup.eq(int(colony.structures.get(&"granary", 0)), 0, "and removes the structure")
+
+	_post_workers(colony, 1, 0)
+	colony.reserve_metals = 0.0
+	var farm_button := _client.macros.scrap_list().find_child("Do_farm", true, false) as Button
+	if farm_button != null:
+		farm_button.emit_signal("pressed")
+		sup.eq(ColonySim.workers_on(colony, &"farm"), 0,
+			"and a scrapped farm hands its worker back")
+	_client.macros.scrap_button().emit_signal("pressed")
+
+
+## The travel flow's prompt, and the all-fleets flight-path overlay.
+func _step_travel_prompt_and_paths() -> void:
+	sup.begin("travel prompt and flight paths")
+	if _client == null or _client.controller == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	sup.ok(_client.prompt_label != null, "the client has a prompt label over the map")
+	if _client.prompt_label == null:
+		return
+
+	sup.eq(_client.prompt_text(), "", "with nothing to say to begin with")
+	_ensure_transport(colony.index, &"corvette")
+	c.select_planet(colony.index)
+	_client.fleets.travel_button().emit_signal("pressed")
+	sup.eq(_client.travel_step, GameClient.TravelStep.SOURCE, "Travel starts the flow")
+	sup.ok(_client.prompt_text().contains("Source"),
+		"and the first thing it asks for is the source", "reads '%s'" % _client.prompt_text())
+
+	_client._on_planet_picked(colony.index)
+	sup.eq(_client.travel_step, GameClient.TravelStep.DESTINATION, "the source is picked")
+	sup.eq(_client.prompt_text(), GameClient.DESTINATION_PROMPT,
+		"and the prompt becomes the destination question the brief specifies")
+
+	var dest := _other_planet_index(colony.index)
+	_client._on_planet_picked(dest)
+	sup.eq(_client.prompt_text(), "", "and clears once the manifest opens")
+	_client._abandon_travel()
+	sup.eq(_client.prompt_text(), "", "staying clear after the flow is abandoned")
+
+	# The flight-path overlay, off by default and shared with the map view.
+	sup.ok(not _client.flight_paths, "flight paths are off to begin with")
+	sup.ok(not _client.map.flight_paths_enabled(),
+		"and the map view agrees they are off")
+	_client.set_flight_paths(true)
+	sup.ok(_client.flight_paths, "turning them on is recorded")
+	sup.ok(_client.map.flight_paths_enabled(),
+		"and reaches the draw layer that renders them")
+	_client.set_flight_paths(false)
+	sup.ok(not _client.map.flight_paths_enabled(), "and can be turned back off")
+
+
+## The map centres on the world the construction dropdown names, and an unclaimed world
+## reports no economy.
+func _step_camera_snap_and_uncolonized() -> void:
+	sup.begin("camera snap and unclaimed worlds")
+	if _client == null or _client.controller == null or _client.map == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+
+	# Pick a colony other than the current selection so the move is observable.
+	var other: PlanetState = null
+	for p in c.player_colonies():
+		if p.index != colony.index:
+			other = p
+			break
+	if other == null:
+		sup.ok(false, "the player has a second colony to select")
+		return
+	c.select_planet(colony.index)
+	var before := _client.map.camera_position()
+	_client.macros.colony_selector().select(
+		_client.macros.colony_selector().item_count - 1)
+	_client.macros.colony_selector().emit_signal("item_selected",
+		_client.macros.colony_selector().item_count - 1)
+	var after := _client.map.camera_position()
+	sup.ok(after.is_equal_approx(other.position) or before != after,
+		"choosing a colony in the dropdown moves the map onto it",
+		"before=%s after=%s want=%s" % [str(before), str(after), str(other.position)])
+	# Left as the player had it: the snap is a move, not a re-frame.
+	sup.eq(c.selected_planet, other.index, "and selects it")
+	_client.macros.refresh()
+
+	# An unclaimed world reports nothing it does not have -- once the player is close enough
+	# to be told anything at all. Unsurveyed, the panel says UNSURVEYED and stops, which is
+	# the stronger statement and the one it has always made.
+	var empty := _unowned_body(c.galaxy)
+	if empty >= 0:
+		c.select_planet(empty)
+		_client.inspector.refresh()
+		var unseen := _client.inspector.planet_label().text
+		sup.ok(unseen.contains("UNSURVEYED"), "an unvisited world reports nothing",
+			"shown=%s" % unseen.replace("\n", " | "))
+		sup.ok(not unseen.contains("POPULATION") and not unseen.contains("METAL"),
+			"and no phantom population or metal either")
+
+		# Put a ship in orbit: that is how a player earns the right to see a world at all.
+		var target: PlanetState = c.galaxy.planet(empty)
+		target.surveyed = true
+		_ensure_transport(empty, &"corvette")
+		c.select_planet(empty)
+		_client.inspector.refresh()
+		var shown := _client.inspector.planet_label().text
+		sup.ok(shown.contains("NO COLONY"),
+			"and a visited one says it has no colony", "shown=%s" % shown.replace("\n", " | "))
+		sup.ok(not shown.contains("POPULATION"),
+			"reporting no phantom population", "shown=%s" % shown.replace("\n", " | "))
+		sup.ok(not shown.contains("METAL"),
+			"and no phantom metal", "shown=%s" % shown.replace("\n", " | "))
+		sup.ok(not shown.contains("FOOD"),
+			"and no phantom food", "shown=%s" % shown.replace("\n", " | "))
+
+
+## The name of an uncolonised world is shown while the player has ships in orbit over it,
+## and hidden again when they leave.
+func _step_orbit_labels() -> void:
+	sup.begin("orbit labels")
+	if _client == null or _client.controller == null or _client.map == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	var view := _client.map.view()
+	# Picked by what is *absent*: unclaimed, unsurveyed and with nothing of the player's
+	# already in orbit. An earlier step may have surveyed or visited the first unclaimed
+	# world on the board, and the fixture would then be asserting about a world the map has
+	# every reason to name.
+	var world: PlanetState = null
+	for p in c.galaxy.planets:
+		if p.owner >= 0 or p.colonized or p.surveyed:
+			continue
+		if not c.fleets_in_orbit_at(p.index).is_empty():
+			continue
+		world = p
+		break
+	if world == null:
+		sup.ok(false, "an untouched world exists to visit")
+		return
+
+	sup.ok(not view.label_worth_drawing(world),
+		"an unvisited, unclaimed world is not named")
+	_ensure_transport(world.index, &"corvette")
+	sup.ok(view.label_worth_drawing(world),
+		"putting a ship in orbit names it -- that is how a player finds the board")
+	sup.ok(c.knows_name_of(world.index),
+		"and the map's rule agrees with the controller's, rather than second-guessing it")
+
+	# The ships leave: the name goes with them, because there is nothing left on the board
+	# saying that world was ever more than a rock.
+	# The fleets are removed outright rather than emptied: an emptied fleet is still an
+	# active marker, so a player would still have "ships" in that orbit.
+	for f in c.fleets_in_orbit_at(world.index):
+		c.galaxy.remove_fleet(f.id)
+	sup.eq(c.fleets_in_orbit_at(world.index).size(), 0, "every ship has left the orbit")
+	sup.ok(not view.label_worth_drawing(world),
+		"and it stops being named once the fleet has gone")
+
+	# A colony keeps its name for ever.
+	colony.owner = c.player_id
+	colony.colonized = true
+	sup.ok(view.label_worth_drawing(colony),
+		"while a world the player has settled is named regardless of who is orbiting it")
+	colony.owner = c.player_id
+
+
+## The cargo dialog's sliders match the hold, and a transport's hold is not capped.
+func _step_cargo_slider_matches_hold() -> void:
+	sup.begin("cargo sliders match the hold")
+	if _client == null or _client.controller == null or _client.cargo == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	_ensure_transport(colony.index, &"cargo_transport")
+	c.select_planet(colony.index)
+	colony.population = 10.0
+	colony.reserve_metals = 4000.0
+	colony.food_stock = 400.0
+	sup.ok(_client.cargo.open(colony.index), "the cargo dialog opens")
+
+	# Pick the transport by name: the dialog opens on whichever lift sorts first, and an
+	# earlier step may have left a Colony Ship in this orbit, which lifts no metal at all.
+	_select_cargo_hull(&"cargo_transport")
+	var metal := TransferStage.KIND_METALS
+	var caption := _client.cargo.caption_label(metal)
+	sup.ok(caption != null and caption.text.contains("unlimited"),
+		"an unbounded hold says so rather than reporting a ceiling",
+		"reads '%s'" % ("" if caption == null else caption.text))
+
+	# The slider's range is a real number, and covers everything in the hold.
+	var slider := _client.cargo.amount_slider(metal)
+	sup.ok(slider != null, "the metal slider exists")
+	if slider != null:
+		sup.ok(not is_inf(slider.max_value),
+			"and its range is a finite number rather than INF",
+			"max=%s" % str(slider.max_value))
+		sup.ok(slider.max_value >= 4000.0,
+			"covering the whole stockpile, since the hold takes anything",
+			"max=%s" % str(slider.max_value))
+		sup.ok(not is_inf(_client.cargo.limit_for(colony, metal)),
+			"and the ceiling the dialog computes is finite too")
+
+	# Loading then unloading returns the hold to empty and the colony to full.
+	var hold_before := 0.0
+	for f in c.fleets_in_orbit_at(colony.index):
+		hold_before += TransferStage.carried(f, metal)
+	_client.cargo.load_button(metal).emit_signal("pressed")
+	_client.cargo.ok_button().emit_signal("pressed")
+	var loaded := 0.0
+	for f in c.fleets_in_orbit_at(colony.index):
+		loaded += TransferStage.carried(f, metal)
+	sup.near(loaded - hold_before, 4000.0, 0.001,
+		"a transport takes the entire stockpile, not a tonnage figure")
+
+	_client.cargo.open(colony.index)
+	# Re-selected every open: `open` starts on whichever lift sorts first, and this orbit has
+	# more than one kind.
+	_select_cargo_hull(&"cargo_transport")
+	_client.cargo.unload_button(metal).emit_signal("pressed")
+	_client.cargo.ok_button().emit_signal("pressed")
+	var unloaded := 0.0
+	for f in c.fleets_in_orbit_at(colony.index):
+		unloaded += TransferStage.carried(f, metal)
+	sup.near(unloaded, 0.0, 0.001, "and hands all of it back")
+	sup.near(colony.reserve_metals, 4000.0, 0.001,
+		"with the colony's stockpile whole again")
+
+
+## Select a named hull in the cargo dialog's hull dropdown.
+func _select_cargo_hull(hull_id: StringName) -> void:
+	var selector := _client.cargo.hull_selector()
+	if selector == null:
+		return
+	for i in selector.item_count:
+		var meta: Variant = selector.get_item_metadata(i)
+		if meta != null and StringName(str(meta)) == hull_id:
+			selector.select(i)
+			selector.emit_signal("item_selected", i)
+			return
+
+
+## An unclaimed, unowned, unvisited body in `galaxy`, or -1.
+func _unowned_body(galaxy: GalaxyState) -> int:
+	if galaxy == null:
+		return -1
+	for p in galaxy.planets:
+		if p.owner < 0 and not p.colonized:
+			return p.index
+	return -1
 
 
 func _step_teardown() -> void:

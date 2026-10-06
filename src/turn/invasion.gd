@@ -260,6 +260,13 @@ static func land_colony_ship(
 
 	if fleet.remove_ships(&"colony_ship", 1) <= 0:
 		return false
+	# A fleet that existed only to carry the kit has served its purpose. Left standing it is
+	# still an active marker on the roster, still selectable, and offers nothing -- and the
+	# emptiness belongs to the model rather than to whichever caller happened to remember to
+	# clean up after it.
+	if fleet.ship_count() <= 0:
+		fleet.active = false
+		galaxy.remove_fleet(fleet.id)
 	planet.structures[&"colony_ship_building"] = 1
 	planet.owner = faction.id
 	planet.colonized = true

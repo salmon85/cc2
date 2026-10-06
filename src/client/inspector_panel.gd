@@ -109,6 +109,17 @@ func _refresh_planet() -> void:
 
 	lines.append(Format.field("TYPE", String(p.type_id).capitalize()))
 
+	# A world the player has merely visited reports no economy at all.
+	#
+	# It used to print `POPULATION 0 (0/0)` and `METAL 0 (+0)` -- zeros that were true, but
+	# indistinguishable from a colony that had collapsed, and they filled the panel of every
+	# rock on the board with rows about nothing. Stating that there is no colony is one line
+	# and says more than four rows of zeroes.
+	if not p.colonized:
+		lines.append("[color=#%s]NO COLONY[/color]" % CC2Theme.WHITE_DIM.to_html(false))
+		_planet_label.text = "\n".join(lines)
+		return
+
 	# Metal: the stockpile and what the next turn adds to it. The delta is read from the
 	# colony's own mines rather than a generic economy figure, so "METAL 599 (+15)" is the
 	# number the resolver is about to credit.
@@ -151,7 +162,7 @@ func _refresh_planet() -> void:
 	# "other space_port x1" two lines apart.
 	lines.append("")
 	for id in _ROSTER:
-		lines.append(Format.field(_label_for(id), str(p.count(id))))
+		lines.append(Format.field(_label_for(id), _roster_value(p, id)))
 	lines.append(Format.field("SHIPS", "%d building, %d queued" % [
 		int(p.shipyard_progress), p.ship_queue.size()]))
 
@@ -229,8 +240,15 @@ func _planet_detail_known(p: PlanetState) -> bool:
 ## The habitability multiplier is gone, and deliberately. In Phase 8 a farm is "requires 1
 ## pop, generates +5 food/turn" -- an absolute figure -- so scaling it by habitability made
 ## the number in this panel a different quantity from the one the resolver uses.
+##
+## Read from the colony sim rather than recomputed from a hard-coded 5.0 per farm: the figure
+## has to be what the worked farms produce, and it used to be what *every* farm would produce
+## if each had a colonist -- so a colony with one farmhand was shown feeding five.
 func _food_balance(p: PlanetState) -> float:
-	var produced := float(p.count(&"farm")) * 5.0
+	if _controller == null or _controller.defs == null:
+		return 0.0
+	var buildings: Dictionary = _controller.defs.get("buildings") as Dictionary
+	var produced := ColonySim._food_output(p, buildings)
 	if p.count(&"colony_ship_building") > 0:
 		produced += 5.0
 	return produced - p.population
@@ -253,6 +271,21 @@ const _ROSTER: Array[StringName] = [
 	&"space_port", &"barracks", &"planetary_defense",
 ]
 
+## A roster row's value: the count, plus the worked count for a staffable structure.
+##
+## `Farms 3 (2)` reads as "three farms, two of them worked", which is the whole of what
+## decides food. Without the bracket a colony with nine farms and one farmhand looks exactly
+## like a colony with nine farmhands, and the two differ by forty food a turn.
+##
+## Read from `ColonySim.workers_on` rather than recomputed here, so the panel and the turn
+## resolver cannot disagree about how many people are on a farm.
+func _roster_value(p: PlanetState, id: StringName) -> String:
+	var standing := int(p.count(id))
+	if not ColonySim.STAFFABLE.has(id):
+		return str(standing)
+	return "%d (%d)" % [standing, ColonySim.workers_on(p, id)]
+
+
 ## Readable label for a roster entry, without needing the definition table.
 func _label_for(id: StringName) -> String:
 	match id:
@@ -266,31 +299,17 @@ func _label_for(id: StringName) -> String:
 
 ## Civilians working an active structure right now.
 ##
-## One person per staffed structure, in `pop_required` order, so the figure is the number of
-## buildings the colony can actually man rather than the sum of what it *could* staff. A
-## colony with four farms and two people has two employed, not four.
+## Delegated to `ColonySim`, which reads the assignment table. This used to *derive* the figure
+## by walking the structures and handing out one colonist per staffed building until the
+## population ran out -- which is the automatic behaviour the assignment table replaced, kept
+## alive in the panel where it disagreed with what the farms actually produced.
 func employed_population(p: PlanetState) -> int:
-	if _controller == null or _controller.defs == null or p == null:
-		return 0
-	var buildings: Dictionary = _controller.defs.get("buildings") as Dictionary
-	var jobs := 0
-	var hands := int(floor(p.population))
-	for building_id: StringName in p.structures:
-		var count := int(p.structures[building_id])
-		if count <= 0 or hands <= 0:
-			continue
-		var def: Resource = buildings.get(building_id, null) as Resource
-		if def == null or int(def.get("pop_required")) <= 0:
-			continue
-		var staffed: int = mini(count, hands)
-		jobs += staffed
-		hands -= staffed
-	return jobs
+	return ColonySim.workers_assigned(p)
 
 
 ## Civilians with no job, who therefore do nothing but research.
 func idle_population(p: PlanetState) -> int:
-	return maxi(0, int(round(p.population)) - employed_population(p))
+	return ColonySim.idle_workers(p)
 
 
 ## Metal this colony's mines will credit next turn.

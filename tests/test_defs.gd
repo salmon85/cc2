@@ -157,8 +157,14 @@ func _test_ship_hulls(defs: Node) -> void:
 	var trooper := defs.call("ship_hull", &"troop_transport") as Resource
 	_t.near(trooper.get("troop_capacity"), 4.0, 0.001,
 		"a troop transport carries four troops")
+	# A Cargo Transport's tonnage is zero, which means *no ceiling* rather than *no hold* --
+	# the one hull whose job is carrying things should not be the one that runs out of room.
+	# What proves it lifts is the declared cargo kinds.
 	var freighter := defs.call("ship_hull", &"cargo_transport") as Resource
-	_t.ok(freighter.get("cargo_capacity") > 0.0, "a cargo transport carries cargo")
+	_t.eq(float(freighter.get("cargo_capacity")), 0.0,
+		"a cargo transport's hold is unbounded")
+	_t.ok((freighter.get("cargo_kinds") as Array).size() > 0,
+		"and it declares the kinds it lifts")
 	var dread := defs.call("ship_hull", &"dreadnought") as Resource
 	_t.ok(dread.get("bombardment") > 0.0, "dreadnoughts can bombard planets")
 
