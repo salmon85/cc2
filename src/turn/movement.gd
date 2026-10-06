@@ -223,6 +223,11 @@ static func orbit_distance(from: PlanetState, to: PlanetState) -> float:
 
 
 ## Every active fleet sitting on `planet_index`. Pass -1 for `faction_id` to get them all.
+##
+## "Sitting" means arrived, not merely last seen there: a fleet with a destination is under
+## way and is not contesting the orbit it departed from. Callers that want transit fleets --
+## the map's drawing code, the fog stage's sensor sweep -- ask for them explicitly through
+## `fleets_in_orbit`, so that neither reading is available by accident.
 static func fleets_in_system(
 	galaxy: GalaxyState, planet_index: int, faction_id: int
 ) -> Array[FleetState]:
@@ -232,6 +237,32 @@ static func fleets_in_system(
 	for id: int in ids:
 		var f: FleetState = galaxy.fleets[id] as FleetState
 		if f == null or not f.active or f.system != planet_index:
+			continue
+		if f.destination >= 0:
+			continue
+		if faction_id >= 0 and f.owner != faction_id:
+			continue
+		out.append(f)
+	return out
+
+
+## As `fleets_in_system`, but includes fleets that are under way to this world.
+##
+## This is the reach of a ship's guns in transit: a fleet that has left but not yet arrived
+## is still covering the world it is crossing away from. Nothing resolves combat from it --
+## `find_engagements` is the only thing that fights, and it excludes transit fleets -- so
+## this narrower, honest sense of presence is safe for the drawing and fog layers to use.
+static func fleets_at_or_bound_for(
+	galaxy: GalaxyState, planet_index: int, faction_id: int
+) -> Array[FleetState]:
+	var out: Array[FleetState] = []
+	var ids := galaxy.fleets.keys()
+	ids.sort()
+	for id: int in ids:
+		var f: FleetState = galaxy.fleets[id] as FleetState
+		if f == null or not f.active:
+			continue
+		if f.system != planet_index and f.destination != planet_index:
 			continue
 		if faction_id >= 0 and f.owner != faction_id:
 			continue
@@ -266,6 +297,13 @@ static func fleets_in_orbit(galaxy: GalaxyState, faction_id: int = -1) -> Array[
 ## Sharing an *orbit* is what counts, not sharing a neighbourhood: two fleets pass each other
 ## 400 parsecs apart and do not fight, which is what stops the whole map becoming one
 ## battle the moment two empires expand.
+##
+## NO MID-FLIGHT COMBAT. A fleet with a destination is excluded outright. This is the rule
+## the design document is most emphatic about — "fleets traversing flight paths NEVER engage
+## in combat during transit" — and it is enforced here, at the only place engagements are
+## discovered, rather than in the combat stage. Two fleets crossing paths at opposite ends of
+## the map, or passing within a hundred parsecs of each other, resolve nothing: combat happens
+## at turn end between fleets *arrived* in the same orbit, and nowhere else.
 static func find_engagements(galaxy: GalaxyState) -> Array:
 	var pairs: Array = []
 	var by_system: Dictionary = {}
@@ -275,6 +313,10 @@ static func find_engagements(galaxy: GalaxyState) -> Array:
 	for id: int in ids:
 		var f: FleetState = galaxy.fleets[id] as FleetState
 		if f == null or not f.active or f.system < 0:
+			continue
+		# Under way is not here. A fleet bound for another world is not contesting the
+		# one it left, whatever the two fleets' paths overlap.
+		if f.destination >= 0:
 			continue
 		if not by_system.has(f.system):
 			by_system[f.system] = [] as Array[FleetState]

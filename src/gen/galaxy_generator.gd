@@ -177,6 +177,15 @@ static func generate(
 	for f in galaxy.factions:
 		f.bind_tech(tech_nodes)
 
+	# Seed each faction's starting hull unlocks from the population ladder, so turn 1 sees
+	# the same unlock state a turn-1 save would. Generation no longer hands out the whole
+	# hull table: hulls are milestones, and a fresh empire has not crossed any.
+	for f in galaxy.factions:
+		var civilians := 0.0
+		for colony in galaxy.colonies_of(f.id):
+			civilians += colony.population
+		ResearchStage.apply_milestones(f, civilians, defs, db)
+
 	# Seed each faction's sensor picture before the first turn resolves. Visibility is
 	# otherwise only computed at the end of a turn, which leaves a freshly generated
 	# galaxy completely dark -- the player would not even see their own homeworld, and
@@ -439,33 +448,23 @@ static func _create_faction(
 	f.metals = db.get("START_METALS")
 	f.rare_elements = db.get("START_RARE_ELEMENTS")
 	f.energy = db.get("START_ENERGY")
-	f.tax_rate = db.get("DEFAULT_TAX_RATE")
+
+	# No tax rate and no research allocation: Phase 8 removed both sliders. The fields still
+	# exist on `FactionState` so an old save round-trips, but generation leaves them at their
+	# defaults rather than implying the player set them.
 	f.research_allocation = _default_research_allocation()
 
-	# Starting tech: one tier-1 node per field, so every empire can pursue anything.
-	var tech := defs.get("tech_nodes") as Dictionary
-	var roots_by_field: Dictionary = {}
-	for id: StringName in tech:
-		var node := tech[id] as Resource
-		var prereqs: Array = node.get("prerequisites")
-		if prereqs.is_empty():
-			var field := int(node.get("field"))
-			var current: Resource = roots_by_field.get(field, null) as Resource
-			if current == null or int(node.get("cost")) < float(current.get("cost")):
-				roots_by_field[field] = node
+	# Ships come off the population ladder, so an empire starts with only the hulls it can
+	# actually use: a Colony Ship to settle with and an Exploration Ship to survey with.
+	# `tech_tier` stays at -1, which is the "nothing past the starting roster" marker.
+	var starters: Array = GameDB.STARTER_HULLS
+	for hull_id: Variant in starters:
+		f.unlocked_ships[StringName(hull_id)] = true
 
-	for field: int in roots_by_field:
-		var root := roots_by_field[field] as Resource
-		f.researched[root.get("id")] = true
-		f.tech_points[field] = 0.0
-
-	# Ships and structures are unlocked by owning the tier-1 node.
-	var hulls := defs.get("ship_hulls") as Dictionary
-	for id: StringName in hulls:
-		f.unlocked_ships[id] = true
-	var buildings := defs.get("buildings") as Dictionary
-	for id: StringName in buildings:
-		f.unlocked_buildings[id] = true
+	# Every structure in the roster is available from the start. Buildings are not gated
+	# behind the ladder: they need population to staff, so the population *is* the gate.
+	for building_id: StringName in ResearchStage.starter_buildings(defs):
+		f.unlocked_buildings[building_id] = true
 
 	galaxy.factions.append(f)
 	_founding_colony(galaxy, defs, f, home_planet, db)
@@ -493,14 +492,23 @@ static func _founding_colony(
 	p.surveyed = true
 	p.population = float(db.get("START_POPULATION"))
 
-	# A starting colony is never barren: it comes with a working economy.
-	p.structures[&"farm"] = 3
-	p.structures[&"mine"] = 2
-	p.structures[&"garrison"] = 1
-	p.food_stock = 6.0
+	# A starting colony is never barren: it comes with a landed Colony Ship (which is where
+	# its housing and its first turn of food come from), a farm, a mine and enough power to
+	# run one City Complex once it is built. The exact composition follows the Phase 8
+	# roster: the Colony Ship is the only structure a colony cannot build for itself.
+	p.structures[&"colony_pad"] = 1
+	p.structures[&"farm"] = 2
+	p.structures[&"mine"] = 1
+	p.food_stock = 20.0
+	p.power = 5.0
 
 
-## Give each faction a scout and a colony ship, so turn 1 always has a legal move.
+## Give each faction a starting force, so turn 1 always has a legal move.
+##
+## One Colony Ship (to settle a second world) and one Exploration Ship (to survey this one),
+## parked over the homeworld. Deliberately small: the Phase 8 roster is a *ladder* the player
+## climbs by population, so handing out a destroyer here would skip the first four rungs of
+## it and the milestone unlocks would have nothing left to give.
 static func _establish_starting_forces(
 	galaxy: GalaxyState, rng: RandomNumberGenerator, defs: Node
 ) -> void:
@@ -509,14 +517,14 @@ static func _establish_starting_forces(
 		var home := _homeworld_of(galaxy, f.id)
 		if home == -1:
 			continue
-		var scout := FleetState.new()
-		scout.bind_hulls(hulls)
-		scout.owner = f.id
-		scout.system = home
-		scout.name = "%s Scouts" % f.name
-		scout.add_ships(&"scout", 1)
-		scout.add_ships(&"colony_ship", 1)
-		galaxy.add_fleet(scout)
+		var starting := FleetState.new()
+		starting.bind_hulls(hulls)
+		starting.owner = f.id
+		starting.system = home
+		starting.name = "%s Fleet" % f.name
+		starting.add_ships(&"colony_ship", 1)
+		starting.add_ships(&"exploration_ship", 1)
+		galaxy.add_fleet(starting)
 
 
 ## A faction's homeworld planet index, or -1.

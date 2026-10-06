@@ -52,6 +52,44 @@ static func update_visibility(galaxy: GalaxyState, faction_id: int, db: Node) ->
 	return visible
 
 
+## Advance the survey of every world a faction's Exploration Ships are sitting over.
+##
+## The Phase 8 roster makes surveying a *research* activity rather than a side effect of
+## being seen: an Exploration Ship contributes 25% per turn, additively across the fleet, so
+## two of them survey a world in two turns and one takes four. A fleet that merely sails past
+## a world contributes nothing -- it has to be parked over it -- which is what makes holding
+## an orbit worth something beyond winning it.
+##
+## Returns the number of worlds newly surveyed.
+static func advance_surveys(galaxy: GalaxyState, faction_id: int, rng: RandomNumberGenerator) -> int:
+	var faction: FactionState = galaxy.faction(faction_id)
+	if faction == null or rng == null:
+		return 0
+	var newly := 0
+	var surveyed: Dictionary = galaxy.surveyed_systems.get(faction_id, {}) as Dictionary
+
+	for fleet in galaxy.fleets_of(faction_id):
+		# Under way is not surveying. The hulls are packed and the instruments are on the
+		# drive; the rate a parked ship earns is zero.
+		if fleet.destination >= 0 or fleet.system < 0:
+			continue
+		var rate := fleet.survey_rate()
+		if rate <= 0.0:
+			continue
+		var planet: PlanetState = galaxy.planet(fleet.system)
+		if planet == null or planet.surveyed:
+			continue
+		if rng.randf() >= rate:
+			continue
+		planet.surveyed = true
+		surveyed[planet.index] = true
+		newly += 1
+
+	if newly > 0:
+		galaxy.surveyed_systems[faction_id] = surveyed
+	return newly
+
+
 ## Mark systems within `reach` parsecs of `origin` as visible.
 static func _reveal_within(
 	galaxy: GalaxyState, origin: SystemState, reach: float, visible: Dictionary

@@ -4,22 +4,27 @@
 
 [resource]
 script = ExtResource("1_shd")
-id = &"scout"
-display_name = "Scout"
-role = 0
-cost_metals = 12.0
+id = &"exploration_ship"
+display_name = "Exploration Ship"
+role = 6
+cost_metals = 100.0
 cost_rare = 0.0
-cost_energy = 4.0
-hull_points = 6.0
-shield_points = 1.0
+cost_energy = 0.0
+attack = 1.0
+defense = 1.0
+hull_points = 12.0
+shield_points = 3.0
 base_speed = 5.0
 weapon_damage = 1.0
 weapon_accuracy = 0.70
 weapon_slots = 1
 shield_slots = 1
-cargo_capacity = 4.0
+cargo_capacity = 0.0
 troop_capacity = 0.0
+civilian_capacity = 0.0
 colony_kit = false
+survey_rate = 0.25
+cargo_kinds = []
 sensor_range = 7.0
 bombardment = 0.0
 upkeep = 0.5

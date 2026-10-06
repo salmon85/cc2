@@ -22,6 +22,11 @@ var map: GalaxyMap = null
 var inspector: InspectorPanel = null
 var macros: MacroPanel = null
 var fleets: FleetPanel = null
+
+## The Travel workflow. An overlay rather than a child of the fleet panel, because it has to
+## sit above the map: the player is choosing between worlds and needs to see them to choose.
+var travel: TravelModal = null
+
 var _log: RichTextLabel = null
 ## Every line the session log has shown, kept as plain strings.
 ##
@@ -43,6 +48,7 @@ func _ready() -> void:
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
 	_build_layout()
+	_build_travel_overlay()
 	# `start()` may have been called before this node entered the tree, in which case the
 	# panels it needs did not exist yet.
 	if _pending_galaxy != null:
@@ -84,10 +90,14 @@ func _build_layout() -> void:
 	var left_split := VSeparator.new()
 	left.add_child(left_split)
 
+	# The fleet column lost its registry list in Phase 8, so it now holds the fleet detail and
+	# the Travel button only. The stretch ratio is unchanged in *meaning* -- the planet readout
+	# above still gets the larger share -- but the panel below has far less to say, so it takes
+	# a smaller share of the column as well.
 	fleets = FleetPanel.new()
-	fleets.custom_minimum_size = Vector2(280, 220)
+	fleets.custom_minimum_size = Vector2(280, 140)
 	fleets.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	fleets.size_flags_stretch_ratio = 2.0
+	fleets.size_flags_stretch_ratio = 1.0
 	left.add_child(fleets)
 
 	# Centre: the map owns the remaining space.
@@ -118,6 +128,21 @@ func _build_layout() -> void:
 		"normal", CC2Theme.sunk(CC2Theme.BG_SUNK, CC2Theme.BORDER)
 	)
 	right.add_child(_log)
+
+
+## Mount the travel modal as an overlay over the whole frame.
+##
+## Centred and hidden until the player opens it. It is added *after* the layout so it draws
+## above everything, and it fills only its own content -- the map stays visible around it,
+## which is the point: the destination dropdown is a list of names, and a name the player
+## cannot see on the board is a name they have to remember.
+func _build_travel_overlay() -> void:
+	travel = TravelModal.new()
+	travel.set_anchors_preset(Control.PRESET_CENTER)
+	travel.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	travel.grow_vertical = Control.GROW_DIRECTION_BOTH
+	travel.visible = false
+	add_child(travel)
 
 
 ## Point the whole client at a galaxy. Panels are bound here and nowhere else, so the
@@ -160,6 +185,7 @@ func _attach_session() -> void:
 	macros.bind(controller)
 	fleets.bind(controller)
 	map.bind(controller)
+	travel.bind(controller)
 
 	_wire()
 	_log_line("SESSION %d OPENED - %d SYSTEMS - %d FACTIONS" % [
@@ -182,17 +208,17 @@ func _wire() -> void:
 	map.planet_picked.connect(_on_planet_picked)
 	map.end_turn_requested.connect(_on_end_turn)
 	map.interaction_refused.connect(_on_refused)
-	fleets.fleet_selected.connect(_on_fleet_selected)
-	fleets.order_mode_changed.connect(_on_order_mode_changed)
-	# The proposal round trip: the map owns it (it knows what was clicked), the panel owns
-	# the prompt and the buttons. Neither may decide alone, so the panel's buttons are
-	# forwarded to the map rather than queueing anything themselves.
+	# The proposal round trip, still live: the map knows what was clicked and the modal owns
+	# the decision. Neither may decide alone -- the modal's OK button is the only commit, and
+	# the map never queues anything itself.
 	map.order_proposed.connect(_on_order_proposed)
-	map.order_confirmed.connect(_on_order_confirmed)
 	map.order_cancelled.connect(_on_order_cancelled)
-	fleets.order_confirmed.connect(func(_i: int) -> void: map.confirm_order())
-	fleets.order_cancelled.connect(func() -> void: map.cancel_order())
+	fleets.fleet_selected.connect(_on_fleet_selected)
+	fleets.travel_requested.connect(_on_travel_requested)
+	travel.travel_confirmed.connect(_on_travel_confirmed)
+	travel.travel_cancelled.connect(_on_travel_cancelled)
 	macros.build_requested.connect(_on_build_requested)
+	macros.construction_boosted.connect(_on_construction_boosted)
 	controller.turn_resolved.connect(_on_turn_resolved)
 	controller.state_changed.connect(_refresh)
 	controller.action_rejected.connect(_on_action_rejected)
@@ -297,19 +323,58 @@ func _on_system_picked(index: int) -> void:
 ## detail the same way, while the log -- which is what a player actually reads to confirm
 ## what they just clicked -- printed the real name in plain text. Fog that a player can
 ## switch off by clicking harder is not fog.
-## A destination was proposed. Open the prompt; the order is not queued yet.
+## A destination was proposed on the map. Quote the flight and open the travel modal with
+## that world already chosen; the order is not queued until the modal's OK.
 func _on_order_proposed(index: int) -> void:
 	fleets.show_proposal(index)
-
-
-func _on_order_confirmed(index: int) -> void:
-	fleets.hide_proposal()
-	_log_line("ORDER STAGED -> %s" % controller.display_name(index))
+	if travel.open_for_selected_fleet():
+		travel.set_destination(index)
+		return
+	status_message.emit("select a fleet that is not already under way")
 
 
 func _on_order_cancelled() -> void:
 	fleets.hide_proposal()
+	if travel != null:
+		travel.close()
 	_log_line("ORDER DISCARDED")
+
+
+## Open the travel modal for the selected fleet.
+##
+## A refusal is logged rather than swallowed: the player pressed TRAVEL and something
+## happened, and "no fleet selected" or "that fleet is already under way" is the difference
+## between a button that is broken and one that is telling them why.
+func _on_travel_requested() -> void:
+	if travel.open_for_selected_fleet():
+		return
+	status_message.emit("select a fleet that is not already under way")
+	_log_line("[color=#%s]TRAVEL REFUSED: no eligible fleet selected[/color]"
+		% CC2Theme.AMBER.to_html(false))
+
+
+## The modal's OK button. This is the only route to a move order now.
+func _on_travel_confirmed(destination: int, ships: Dictionary) -> void:
+	# The map's proposal is consumed by this commit, so clear it silently: the flight is
+	# being sent, not discarded, and `order_cancelled` would say otherwise in the log.
+	map.clear_proposal()
+	fleets.hide_proposal()
+	if controller.queue_travel(destination, ships):
+		var count := 0
+		for key: Variant in ships:
+			count += int(ships[key])
+		_log_line("TRAVEL STAGED -> %s (%d ship%s)" % [
+			controller.display_name(destination), count, "" if count == 1 else "s"])
+	else:
+		_log_line("[color=#%s]TRAVEL REFUSED[/color]" % CC2Theme.ALERT.to_html(false))
+
+
+func _on_travel_cancelled() -> void:
+	_log_line("TRAVEL DISCARDED")
+
+
+func _on_construction_boosted(metals: float) -> void:
+	_log_line("CONSTRUCTION BOOSTED by %d metal" % int(metals))
 
 
 func _on_planet_picked(index: int) -> void:
@@ -328,13 +393,6 @@ func _on_fleet_selected(fleet_id: int) -> void:
 	var f := controller.fleet()
 	if f != null:
 		_log_line("FLEET %03d SELECTED" % f.id)
-
-
-func _on_order_mode_changed(on: bool) -> void:
-	map.set_order_mode(on)
-	status_message.emit(
-		"move order mode ON - click a planet" if on else "move order mode OFF"
-	)
 
 
 func _on_build_requested(building_id: StringName) -> void:

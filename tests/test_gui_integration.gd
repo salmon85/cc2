@@ -8,7 +8,10 @@ extends SceneTree
 ##   - selection flows from map click -> controller -> inspector
 ##   - a fleet move order is accepted, staged, and reaches the Phase 4 order queue
 ##   - illegal fleet orders are refused with a reason rather than silently ignored
-##   - the macro controls emit real SET_TAX / SET_RESEARCH / BUILD_STRUCTURE orders
+##   - the construction panel lists planet names, offers a clickable progress bar, and no
+##     longer carries the tax or research sliders Phase 8 removed
+##   - the travel modal lists a fleet's ships split into combat and non-combat, with
+##     `+` / `-` assignment, `All` / `None`, a cargo readout and OK / CANCEL
 ##   - an End Turn click advances the stardate by exactly 1 and runs the resolver
 ##   - several turns keep advancing by exactly 1 and the state hash stays reproducible
 ##   - the map draw layer and sub-viewport survive a full turn with no engine errors
@@ -55,7 +58,7 @@ func _initialize() -> void:
 		"instantiate", "scene_tree", "panels", "theme", "signals", "selection",
 		"map_draw", "hit_testing", "view_culling", "order_confirmation", "fleet_orders",
 		"illegal_orders",
-		"macro_tax", "macro_research",
+		"no_tax_or_research", "macro_progress_bar", "travel_modal",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
@@ -97,8 +100,9 @@ func _process(_delta: float) -> bool:
 		"order_confirmation": _step_order_confirmation()
 		"fleet_orders": _step_fleet_orders()
 		"illegal_orders": _step_illegal_orders()
-		"macro_tax": _step_macro_tax()
-		"macro_research": _step_macro_research()
+		"no_tax_or_research": _step_no_tax_or_research()
+		"macro_progress_bar": _step_macro_progress_bar()
+		"travel_modal": _step_travel_modal()
 		"macro_build": _step_macro_build()
 		"macro_map_stable": _step_macro_does_not_move_the_map()
 		"ready_button": _step_ready_button()
@@ -339,10 +343,19 @@ func _step_panels() -> void:
 			"parsed='%s'" % _client.top_bar.net_label().get_parsed_text())
 	else:
 		sup.ok(true, "net readout BBCode checks skipped (not a RichTextLabel)")
-	sup.ok(_client.macros.tax_slider() != null, "macro panel exposes the tax slider")
-	sup.eq(_client.macros.research_sliders().size(), 4, "four research allocation sliders")
+	# The tax slider and the four research sliders are gone as of Phase 8, and the panel
+	# reports the absence rather than the suite asking a getter that no longer exists.
+	sup.ok(_client.macros.tax_slider() == null, "the macro panel has no tax slider")
+	sup.eq(_client.macros.research_sliders().size(), 0,
+		"and no research allocation sliders")
 	sup.ok(_client.macros.build_selector() != null, "macro panel exposes the build selector")
 	sup.ok(_client.macros.colony_selector() != null, "macro panel exposes the colony selector")
+	sup.ok(_client.macros.build_bar() != null,
+		"macro panel exposes the construction progress bar")
+	sup.ok(_client.macros.build_mode_selector() != null,
+		"and the single-project / per-turn selector")
+	sup.ok(_client.macros.warnings_label() != null,
+		"and the colony warning readout")
 	sup.ok(_client.inspector.planet_label() != null, "inspector exposes the planet readout")
 	# The system survey panel was removed. Asserted as an absence because an accessor that
 	# quietly returned null would satisfy "the readout is non-empty" for the wrong reason.
@@ -354,9 +367,19 @@ func _step_panels() -> void:
 	# selected by clicking it, not by picking a row.
 	sup.ok(not _client.inspector.has_method("body_list"),
 		"the inspector has no body list -- bodies are picked on the map")
-	sup.ok(_client.fleets.list() != null, "fleet panel exposes the fleet list")
+	# The fleet registry and the "Stage move" toggle are both gone, replaced by the travel
+	# modal. Asserted as absences, because an accessor quietly returning null would satisfy
+	# "the detail is non-empty" for the wrong reason.
+	sup.ok(_client.fleets.list() == null, "the fleet panel has no registry list")
+	sup.ok(_client.fleets.order_button() == null, "and no order-mode button")
 	sup.ok(_client.fleets.detail() != null, "fleet panel exposes the fleet detail")
-	sup.ok(_client.fleets.order_button() != null, "fleet panel exposes the order-mode button")
+	sup.ok(_client.fleets.travel_button() != null, "and the Travel button that replaces it")
+	sup.ok(_client.travel != null, "the client owns the travel modal")
+	sup.ok(_client.travel.destination_selector() != null, "which has a destination dropdown")
+	sup.ok(_client.travel.ok_button() != null, "and an OK button")
+	sup.ok(_client.travel.cancel_button() != null, "and a CANCEL button")
+	sup.ok(_client.travel.combat_rows() != null, "and a combat roster")
+	sup.ok(_client.travel.support_rows() != null, "and a separate non-combat roster")
 	sup.ok(_client.map.sub_viewport() != null, "map owns a SubViewport")
 	sup.ok(_client.map.camera() != null, "map owns a Camera2D")
 	sup.ok(_client.map.view() != null, "map owns a draw layer")
@@ -410,8 +433,12 @@ func _step_signals() -> void:
 		"map selection reaches the client")
 	sup.ok(_client.fleets.fleet_selected.is_connected(_client._on_fleet_selected),
 		"fleet selection reaches the client")
-	sup.ok(_client.fleets.order_mode_changed.is_connected(_client._on_order_mode_changed),
-		"order-mode toggle reaches the client")
+	sup.ok(_client.fleets.travel_requested.is_connected(_client._on_travel_requested),
+		"the Travel button reaches the client")
+	sup.ok(_client.travel.travel_confirmed.is_connected(_client._on_travel_confirmed),
+		"and the modal's OK reaches the client")
+	sup.ok(_client.travel.travel_cancelled.is_connected(_client._on_travel_cancelled),
+		"and its CANCEL")
 	sup.ok(c.turn_resolved.is_connected(_client._on_turn_resolved),
 		"turn reports reach the client")
 
@@ -466,7 +493,7 @@ func _step_selection() -> void:
 	# Guard the guard: an empty readout would satisfy the check above. The surviving
 	# rows must still be there, and the shipyard percentage must still render -- so the
 	# absence of habitability is a removed row rather than a blanked panel.
-	sup.ok(detail.contains("POPULATION") and detail.contains("FARMS"),
+	sup.ok(detail.contains("POPULATION") and detail.contains("FARM"),
 		"and the rest of the readout is intact rather than blanked")
 
 
@@ -701,29 +728,24 @@ func _step_order_confirmation() -> void:
 		"but nothing is queued yet -- the click did not dispatch")
 	sup.eq(f.destination, -1,
 		"and the fleet is not yet in transit")
-	sup.ok(panel.confirm_row().visible, "the confirmation prompt is open")
-	sup.ok(panel.transit_label().visible, "and quotes the transit time")
-	sup.ok(panel.visible_text().contains("ESTIMATED TRANSIT"),
-		"the prompt shows the transit heading", "shown=%s" % panel.visible_text())
+	# Phase 8 replaced the CONFIRM / CANCEL prompt with the travel modal, so a click now
+	# opens the modal with this world already chosen rather than a second decision to make.
+	sup.ok(_client.travel.visible, "the click opened the travel modal")
+	sup.eq(_client.travel._selected_destination(), dest,
+		"with the clicked world already chosen")
 	sup.ok(panel.visible_text().contains("%d turn" % turns),
-		"quoting the number of turns the flight will take",
+		"and the fleet panel quotes the number of turns the flight will take",
 		"want %d turns; shown=%s" % [turns, panel.visible_text()])
-	# The quoted dot figure must be the pip count -- the marks on the map plus the
-	# destination -- and therefore equal the turn count. Asserting it against a separately
-	# rounded parsec distance is what let "14 dots, 2 turns" print side by side.
-	var pip_count := MovementStage.waypoints(gal, f.system, dest).size() + 1
-	sup.ok(panel.visible_text().contains("%d dots" % pip_count),
-		"and the dot distance it is counted in",
-		"want %d dots; shown=%s" % [pip_count, panel.visible_text()])
-	sup.eq(pip_count, turns,
-		"the quoted dots and the quoted turns are the same figure")
+	sup.ok(_client.travel.summary_label().text.contains("%d turn" % turns),
+		"as does the modal's own summary",
+		"shown=%s" % _client.travel.summary_label().text)
 
 	# --- cancel discards --------------------------------------------------------
 	map.cancel_order()
 	sup.eq(map.pending_destination(), -1, "cancelling clears the proposal")
 	sup.eq(c.pending_orders().size(), queued_before, "and queues nothing")
 	sup.eq(f.destination, -1, "the fleet has not moved")
-	sup.ok(not panel.confirm_row().visible, "and the prompt closes")
+	sup.ok(not _client.travel.visible, "and the modal closes")
 
 	# --- clicking elsewhere discards -------------------------------------------
 	map.click_at_galaxy(gal.planet(dest).position)
@@ -731,14 +753,16 @@ func _step_order_confirmation() -> void:
 	map.click_at_galaxy(Vector2(999999.0, -999999.0))
 	sup.eq(map.pending_destination(), -1, "clicking empty space discards it")
 	sup.eq(c.pending_orders().size(), queued_before, "without queueing anything")
+	sup.ok(not _client.travel.visible, "and closes the modal with it")
 
-	# --- confirm commits ----------------------------------------------------------
+	# --- the modal commits -------------------------------------------------------
 	map.click_at_galaxy(gal.planet(dest).position)
-	sup.ok(map.confirm_order(), "CONFIRM commits the order")
+	_client.travel.set_all(true)
+	_client.travel.ok_button().emit_signal(&"pressed")
 	sup.eq(c.pending_orders().size(), queued_before + 1, "exactly one order is queued")
 	sup.eq(f.destination, dest, "and the fleet is in transit to the proposed world")
 	sup.eq(map.pending_destination(), -1, "the proposal is consumed")
-	sup.ok(not panel.confirm_row().visible, "and the prompt closes")
+	sup.ok(not _client.travel.visible, "and the modal closes")
 
 	# --- the flight really takes that many turns ---------------------------------
 	# Stepped here rather than trusting `transit_turns`: the number on the prompt is only
@@ -856,68 +880,262 @@ func _step_illegal_orders() -> void:
 		"an all-zero research allocation is refused")
 
 
-func _step_macro_tax() -> void:
-	sup.begin("macro: tax")
+## The tax slider and the research allocation sliders are gone.
+##
+## Phase 8 removed both: research is driven by the empire's civilian population and there is
+## no budget for a player to divide, and the tax rate no longer gates anything. The absence is
+## the assertion, and it is asserted three ways -- through the accessors, by walking the panel
+## for a surviving `HSlider`, and by reading every label the panel is actually showing. A
+## getter returning null alone would pass while a stray slider sat on screen.
+func _step_no_tax_or_research() -> void:
+	sup.begin("macro: no tax slider, no research sliders")
+	if _client == null or _client.macros == null:
+		return
+	var macros := _client.macros
+
+	sup.ok(macros.tax_slider() == null, "the tax slider accessor reports none")
+	sup.ok(macros.tax_value_label() == null, "and so does the tax readout")
+	sup.eq(macros.research_sliders().size(), 0, "there are no research sliders")
+
+	var sliders := 0
+	_sliders_under(macros, sliders)
+	sup.eq(sliders, 0, "and no HSlider survives anywhere in the right panel")
+
+	var shown := macros.visible_text()
+	sup.ok(not shown.contains("IMPERIAL TAX"), "the tax heading is gone", "shown=%s" % shown)
+	sup.ok(not shown.contains("RESEARCH ALLOCATION"), "and so is the research heading")
+	sup.ok(not shown.contains("RESEARCH"), "and nothing else is labelled research either")
+
+
+## Count every `HSlider` under `node`, recursively.
+func _sliders_under(node: Node, into: int) -> void:
+	if node is HSlider:
+		into += 1
+	for child in node.get_children():
+		_sliders_under(child, into)
+
+
+## The construction progress bar: clickable, and spending metal is what clicking does.
+##
+## This is the mechanic the design document asks for by name -- "click to spend stored metal
+## directly to boost/complete progress" -- so the assertion is that a press moves the bar's
+## value and debits the colony, not merely that a control exists.
+func _step_macro_progress_bar() -> void:
+	sup.begin("macro: the construction progress bar is clickable")
 	if _client == null or _client.controller == null:
 		return
 	var c := _client.controller
-	var slider := _client.macros.tax_slider()
-	var staged_before := c.pending_orders().size()
-
-	slider.value = 0.6
-	# HSlider emits value_changed synchronously on assignment.
-	sup.near(c.player().tax_rate, 0.6, 0.001, "dragging the tax slider updates the faction")
-	sup.eq(c.pending_orders().size(), staged_before + 1, "dragging stages a SET_TAX order")
-	var orders := c.pending_orders()
-	sup.eq(orders[orders.size() - 1].type, Enums.OrderType.SET_TAX, "the staged order is SET_TAX")
-
-	# An out-of-range value must clamp rather than break the economy.
-	c.set_tax_rate(5.0)
-	sup.near(c.player().tax_rate, 1.0, 0.001, "an excessive tax rate clamps to 1.0")
-	c.set_tax_rate(-1.0)
-	sup.near(c.player().tax_rate, 0.0, 0.001, "a negative tax rate clamps to 0.0")
-
-
-func _step_macro_does_not_move_the_map() -> void:
-	sup.begin("macro: sliders leave the map alone")
-	if _client == null or _client.controller == null:
+	var colony := _first_colony()
+	sup.ok(colony != null, "the player starts with a colony to build on")
+	if colony == null:
 		return
-	var m := _client.map
-	var cam := m.camera()
-	var macros := _client.macros
+	c.select_planet(colony.index)
+	_client.select_colony(colony.index)
 
-	# The defect: dragging a slider staged an order, the staged-orders label was sized to
-	# its text with `fit_content`, so the right column got taller, the row's minimum grew,
-	# and the `SIZE_EXPAND_FILL` map beside it resized -- which re-framed the camera and
-	# moved a view the player never touched.
-	#
-	# The readout that caused it is gone (see `_step_no_staged_orders`), so what is checked
-	# now is the property that outlived it: the macro panel's minimum height does not
-	# depend on anything the player does to it, and the map is untouched throughout.
-	var cam_before := cam.position
-	var zoom_before := cam.zoom
-	var map_before := m.size
-	var height_before := macros.get_combined_minimum_size().y
+	var bar := _client.macros.build_bar()
+	sup.ok(bar != null, "the panel exposes a progress bar")
+	if bar == null:
+		return
+	sup.ok(not bar.visible, "with nothing queued there is no bar to press")
 
-	# Stage far more orders than any readout has height for. The map is sampled every step
-	# rather than only at the end: it is `SIZE_EXPAND_FILL`, so it grows the instant the
-	# column beside it does, and a check taken after the fact could miss a transient.
-	var tallest := macros.get_combined_minimum_size().y
-	for i in 24:
-		macros.tax_slider().value = 0.02 + 0.03 * i
-		tallest = maxf(tallest, macros.get_combined_minimum_size().y)
-	sup.ok(_client.controller.pending_orders().size() >= 12,
-		"the drag staged a stack of orders",
-		"%d pending" % _client.controller.pending_orders().size())
+	# Nothing queued: a press must do nothing at all, and say so.
+	var idle_metal := colony.reserve_metals
+	var empty_spend := c.boost_construction(colony.reserve_metals)
+	sup.near(empty_spend, 0.0, 0.001, "a colony with nothing queued spends nothing")
+	_client.macros._on_build_bar_input(_left_click())
+	sup.near(colony.reserve_metals, idle_metal, 0.001,
+		"and pressing the bar leaves the store alone")
 
-	sup.near(tallest, height_before, 0.5,
-		"the macro panel does not grow with the order queue (%f vs %f)" % [
-			tallest, height_before])
+	# Queue something, and the bar appears. The control only *stages* the order: it becomes
+	# a construction queue when the resolver runs, which is the same round trip every other
+	# order makes, so the test drives that step explicitly rather than resolving a whole turn
+	# to get one building into the ground.
+	var me := c.player()
+	me.metals = 100000.0
+	for id: Variant in c.defs.get("buildings"):
+		me.unlocked_buildings[StringName(str(id))] = true
+	# More than the project costs, because the order debits the colony immediately: the bar
+	# then spends what is left, and a colony the build order had emptied would have nothing
+	# left to press.
+	colony.reserve_metals = 60.0
+	var queued_before := c.pending_orders().size()
+	sup.ok(c.queue_build_structure(&"granary"), "a granary can be queued")
+	sup.eq(c.pending_orders().size(), queued_before + 1, "the build order is staged")
+	var staged: Order = c.pending_orders()[c.pending_orders().size() - 1]
+	sup.eq(staged.type, Enums.OrderType.BUILD_STRUCTURE, "and it is a BUILD_STRUCTURE order")
+	sup.ok(not bar.visible,
+		"a staged order has not yet become a construction queue")
+	TurnResolver.apply_build_structure(c.galaxy, me, staged, c.defs, c.db)
+	sup.eq(colony.building_queue.size(), 1, "the resolver queues it on the colony")
+	# The order debits the colony, which is what the bar then spends from.
+	_client.macros.refresh()
+	sup.ok(bar.visible, "a queued project shows the progress bar")
+	sup.near(bar.value, 0.0, 0.001, "at zero progress")
 
-	# And the map, which is what the player actually noticed, is untouched.
-	sup.eq(m.size, map_before, "the map did not resize when sliders were dragged")
-	sup.eq(cam.position, cam_before, "the camera did not move when sliders were dragged")
-	sup.eq(cam.zoom, zoom_before, "the camera did not re-zoom when sliders were dragged")
+	var banked := colony.reserve_metals
+	sup.ok(banked > 0.0, "the colony has metal banked to spend", "%.1f" % banked)
+	_client.macros._on_build_bar_input(_left_click())
+	_client.macros.refresh()
+	sup.near(colony.reserve_metals, 0.0, 0.001,
+		"clicking the bar spent the colony's stored metal")
+	sup.ok(bar.value > 0.0, "and the bar advanced", "value=%.3f" % bar.value)
+
+	# The button and the order are wired the same way, so a click is not a special case.
+	var boost_line := _client.log_text()
+	sup.ok(boost_line.contains("CONSTRUCTION BOOSTED"),
+		"the click is reported in the log", "tail=%s" % boost_line.strip_edges().split("\n")[-1])
+
+
+func _left_click() -> InputEventMouseButton:
+	var event := InputEventMouseButton.new()
+	event.button_index = MOUSE_BUTTON_LEFT
+	event.pressed = true
+	return event
+
+
+## The travel workflow, end to end: open, choose ships, confirm, and watch the order appear.
+##
+## The modal is the whole Phase 8 dispatch surface, so it is exercised through its own
+## controls -- the `+` buttons, `All`, `None`, OK and CANCEL -- rather than by calling the
+## controller, because the claim under test is that a player can express a partial manifest
+## with them.
+func _step_travel_modal() -> void:
+	sup.begin("travel modal")
+	if _client == null or _client.controller == null or _client.travel == null:
+		return
+	var c := _client.controller
+	var gal := c.galaxy
+
+	var mine := c.player_fleets()
+	sup.ok(not mine.is_empty(), "the player has a fleet to travel with")
+	if mine.is_empty():
+		return
+	var f: FleetState = mine[0]
+	# Start from a fleet that is not already under way.
+	f.destination = -1
+	f.travelled = 0.0
+	c.select_fleet(f.id)
+
+	sup.ok(_client.travel.open_for_selected_fleet(), "the modal opens for the selected fleet")
+	sup.ok(_client.travel.visible, "and is shown")
+	sup.ok(_client.travel.origin_label().text.contains(
+		c.display_name(f.system)), "it names the world the fleet is standing on")
+
+	# The destination must differ from the start, so the fleet's own world is not offered.
+	var offered := PackedStringArray()
+	for i in _client.travel.destination_selector().item_count:
+		offered.append(_client.travel.destination_selector().get_item_text(i))
+	sup.ok(not offered.has(c.display_name(f.system)),
+		"the origin world is not offered as a destination")
+	sup.ok(_client.travel.destination_selector().item_count > 0,
+		"and every other world is", "%d destinations" % offered.size())
+
+	# The rosters are separate: warships on one side, lift on the other.
+	var combat := _client.travel.combat_rows()
+	var support := _client.travel.support_rows()
+	sup.ok(combat != support, "the two rosters are distinct containers")
+	var combat_names := _row_labels(combat)
+	var support_names := _row_labels(support)
+	sup.ok(combat_names.size() > 0 or support_names.size() > 0,
+		"the fleet's ships are listed", "combat=%s support=%s" % [
+			", ".join(combat_names), ", ".join(support_names)])
+	for name in combat_names:
+		sup.ok(not name.contains("Colony Ship") and not name.contains("Transport"),
+			"the combat roster holds only warships", "found '%s'" % name)
+	for name in support_names:
+		sup.ok(not name.contains("Cruiser") and not name.contains("Corvette"),
+			"and the support roster holds no warships", "found '%s'" % name)
+
+	# `All` takes the whole fleet; `None` gives it all back.
+	_client.travel.set_all(true)
+	sup.ok(_client.travel.manifest().size() > 0, "All fills the manifest")
+	var total := 0
+	for key: Variant in _client.travel.manifest():
+		total += int(_client.travel.manifest()[key])
+	sup.eq(total, f.ship_count(), "All takes every ship in the fleet")
+	_client.travel.set_all(false)
+	sup.eq(_client.travel.manifest().size(), 0, "None empties it")
+
+	# `+` and `-` move one hull at a time, and stop at the ends rather than wrapping.
+	for hull_id: StringName in f.ships:
+		var plus := _client.travel.more_button(hull_id)
+		if plus == null:
+			plus = _button_named(_client.travel.support_rows(),
+				"More_%s" % String(hull_id))
+		var minus := _button_named(_client.travel.combat_rows(),
+			"Less_%s" % String(hull_id))
+		if minus == null:
+			minus = _button_named(_client.travel.support_rows(),
+				"Less_%s" % String(hull_id))
+		sup.ok(plus != null and minus != null,
+			"the %s row has + and - buttons" % hull_id)
+		if plus == null or minus == null:
+			continue
+		var held := int(f.ships[hull_id])
+		for _i in held + 2:
+			plus.emit_signal(&"pressed")
+		sup.eq(int(_client.travel.manifest().get(hull_id, 0)), held,
+			"pressing + takes the whole %s stack and no more" % hull_id)
+		for _i in held + 2:
+			minus.emit_signal(&"pressed")
+		sup.eq(int(_client.travel.manifest().get(hull_id, 0)), 0,
+			"and - gives it all back without going negative")
+
+	# A partial manifest: one ship travels, the rest stay.
+	var single: StringName = &""
+	for hull_id: StringName in f.ships:
+		single = hull_id
+		break
+	_client.travel.adjust(f, single, 1)
+	sup.eq(_client.travel.manifest().size(), 1, "one hull is selected")
+	sup.eq(int(_client.travel.manifest()[single]), 1, "exactly one of them")
+
+	var cargo := _client.travel.cargo_label(single)
+	if cargo != null:
+		sup.ok(cargo.text.contains("/"), "the cargo readout shows a load and a capacity",
+			"reads '%s'" % cargo.text)
+
+	# OK stages a TRAVEL order naming that manifest, and it reaches the queue.
+	var dest := _client.travel._selected_destination()
+	sup.ok(dest >= 0, "a destination is selected", "dest=%d" % dest)
+	var staged_before := c.pending_orders().size()
+	_client.travel.ok_button().emit_signal(&"pressed")
+	sup.eq(c.pending_orders().size(), staged_before + 1, "OK stages one order")
+	var order: Order = c.pending_orders()[c.pending_orders().size() - 1]
+	sup.eq(order.type, Enums.OrderType.TRAVEL, "and it is a TRAVEL order")
+	sup.eq(order.target_planet, dest, "naming the chosen destination")
+	sup.eq(int(order.payload.get("ships", {}).get(single, 0)), 1,
+		"carrying the chosen manifest")
+	sup.ok(not _client.travel.visible, "and the modal closes")
+
+	# CANCEL closes without staging anything.
+	_client.travel.open_for_selected_fleet()
+	var before_cancel := c.pending_orders().size()
+	_client.travel.cancel_button().emit_signal(&"pressed")
+	sup.eq(c.pending_orders().size(), before_cancel, "CANCEL stages nothing")
+	sup.ok(not _client.travel.visible, "and closes the modal")
+
+
+## Every `Label` text under `node`, one entry per row's first label.
+func _row_labels(node: Node) -> PackedStringArray:
+	var out := PackedStringArray()
+	for row in node.get_children():
+		for child in row.get_children():
+			if child is Label:
+				out.append(String((child as Label).text))
+				break
+	return out
+
+
+## A button named `wanted` anywhere under `node`, or null.
+func _button_named(node: Node, wanted: String) -> Button:
+	for child in node.get_children():
+		if child is Button and child.name == wanted:
+			return child as Button
+		var found := _button_named(child, wanted)
+		if found != null:
+			return found
+	return null
 
 
 ## The staged-orders readout is gone from the right-hand panel.
@@ -949,6 +1167,46 @@ func _step_no_staged_orders() -> void:
 		"and the colony selector is still wired up")
 
 
+## Nothing the player does to the right panel may resize the map beside it.
+##
+## The defect this guards: the staged-orders label was sized to its text, so staging an
+## order grew the column, the row's minimum grew, and the `SIZE_EXPAND_FILL` map beside it
+## resized -- re-framing a view the player never touched. That readout is gone, so what is
+## checked now is the property that outlived it.
+func _step_macro_does_not_move_the_map() -> void:
+	sup.begin("macro: the right panel leaves the map alone")
+	if _client == null or _client.map == null or _client.macros == null:
+		return
+	var m := _client.map
+	var cam := m.camera()
+	var macros := _client.macros
+
+	var cam_before := cam.position
+	var zoom_before := cam.zoom
+	var map_before := m.size
+	var height_before := macros.get_combined_minimum_size().y
+
+	# The map is sampled every step rather than only at the end: it is `SIZE_EXPAND_FILL`,
+	# so it grows the instant the column beside it does, and a check taken after the fact
+	# could miss a transient.
+	var tallest := height_before
+	for i in 24:
+		macros.build_bar().value = 0.01 * i
+		tallest = maxf(tallest, macros.get_combined_minimum_size().y)
+	for i in 24:
+		macros.build_mode_selector().select(i % 2)
+		tallest = maxf(tallest, macros.get_combined_minimum_size().y)
+
+	sup.near(tallest, height_before, 0.5,
+		"the macro panel does not grow with what the player does to it (%f vs %f)" % [
+			tallest, height_before])
+
+	# And the map, which is what the player actually noticed, is untouched.
+	sup.eq(m.size, map_before, "the map did not resize")
+	sup.eq(cam.position, cam_before, "the camera did not move")
+	sup.eq(cam.zoom, zoom_before, "the camera did not re-zoom")
+
+
 ## Every piece of user-visible text under `node`, one per line.
 ##
 ## Reading the labels a panel actually built is the only way to assert a section is gone:
@@ -959,52 +1217,12 @@ func _collect_text(node: Node, into: PackedStringArray) -> void:
 		into.append(String((node as Control).text))
 	elif node is RichTextLabel:
 		into.append(String((node as RichTextLabel).text))
+	elif node is OptionButton:
+		var option := node as OptionButton
+		for i in option.item_count:
+			into.append(option.get_item_text(i))
 	for child in node.get_children():
 		_collect_text(child, into)
-
-
-func _step_macro_research() -> void:
-	sup.begin("macro: research")
-	if _client == null or _client.controller == null:
-		return
-	var c := _client.controller
-	var sliders := _client.macros.research_sliders()
-	sup.eq(sliders.size(), 4, "four research sliders exist")
-
-	# Set a lopsided split; the controller must normalise it to a real budget.
-	for i in sliders.size():
-		sliders[i].set_value_no_signal(0.0)
-	sliders[0].value = 50.0
-	sliders[1].value = 25.0
-	sliders[2].value = 15.0
-	sliders[3].value = 10.0
-	# The last assignment drives the controller; drive it explicitly to be certain.
-	c.set_research_allocation(PackedFloat64Array([50.0, 25.0, 15.0, 10.0]))
-
-	var alloc := c.player().research_allocation
-	sup.near(alloc[0] + alloc[1] + alloc[2] + alloc[3], 1.0, 0.0001,
-		"the allocation normalises to 1.0")
-	sup.near(alloc[0], 0.5, 0.001, "the dominant field keeps its share")
-	sup.near(alloc[3], 0.1, 0.001, "the smallest field keeps its share")
-
-	# Dragging the sliders above staged a SET_RESEARCH on every drag, so check the most
-	# recent one rather than the first.
-	var orders := c.pending_orders()
-	var found := false
-	for i in range(orders.size() - 1, -1, -1):
-		if orders[i].type == Enums.OrderType.SET_RESEARCH:
-			found = true
-			var staged: PackedFloat64Array = orders[i].payload.get(
-				"allocation", PackedFloat64Array())
-			sup.near(staged[0], 0.5, 0.001,
-				"the staged SET_RESEARCH order carries the normalised split")
-			var staged_total := 0.0
-			for v in staged:
-				staged_total += v
-			sup.near(staged_total, 1.0, 0.0001,
-				"the staged allocation sums to 1.0")
-			break
-	sup.ok(found, "a SET_RESEARCH order was staged")
 
 
 func _step_macro_build() -> void:
@@ -1019,17 +1237,30 @@ func _step_macro_build() -> void:
 	c.select_planet(colony.index)
 	_client.select_colony(colony.index)
 
+	# A clean slate: an earlier scenario deliberately left a project queued on this colony
+	# and orders in the queue, and the single-project-per-turn rule and the "last staged
+	# order" assertion below both need to start from nothing.
+	colony.building_queue.clear()
+	colony.build_turns_remaining = 0
+	colony.build_metal = 0.0
+	c.pending_orders().clear()
+
 	var selector := _client.macros.build_selector()
 	sup.ok(selector.item_count > 0, "the build selector is populated",
 		"%d items" % selector.item_count)
 	if selector.item_count == 0:
 		return
 
-	# Give the player a budget so affordability is not what blocks the order.
+	# Give the player a budget so affordability is not what blocks the order. Phase 8 pays
+	# for structures out of the *colony's* stored metal rather than the imperial treasury,
+	# so both have to be funded or the order is refused for the wrong reason.
 	var me := c.player()
 	me.metals = 100000.0
 	me.rare_elements = 100000.0
 	me.energy = 100000.0
+	colony.reserve_metals = 100000.0
+	for id: Variant in c.defs.get("buildings"):
+		me.unlocked_buildings[StringName(str(id))] = true
 
 	var chosen := _first_unlocked_building(selector)
 	sup.ok(chosen != &"", "an unlocked structure is offered", "found %s" % String(chosen))
@@ -1171,7 +1402,12 @@ func _step_networked_end_turn() -> void:
 
 	# A networked turn is committed by raising READY, not by an END TURN button. The
 	# staged orders go out with the flag, so one press is the whole commit.
-	sup.ok(c.set_tax_rate(0.33), "an order is staged for the wire")
+	# Phase 8 removed the tax slider, so the order staged here is a build-mode one: it
+	# still proves the route from a control to the transport without staging something the
+	# resolver no longer reads.
+	var wired_colony := _first_colony()
+	sup.ok(c.set_build_mode(wired_colony.index, int(Enums.BuildMode.PER_TURN)),
+		"an order is staged for the wire")
 	sup.ok(c.pending_orders().size() > 0, "the order reached the queue")
 	sup.ok(c.set_ready(true), "raising Ready commits the turn")
 	sup.eq(c.galaxy.turn, before_turn, "the local stardate did not move")

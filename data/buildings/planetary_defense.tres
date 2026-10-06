@@ -1,0 +1,27 @@
+[gd_resource type="Resource" script_class="BuildingData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/building_data.gd" id="1_bd"]
+
+[resource]
+script = ExtResource("1_bd")
+id = &"planetary_defense"
+display_name = "Planetary Defense"
+kind = 4
+cost_metals = 150.0
+cost_rare = 0.0
+cost_energy = 0.0
+upkeep = 1.0
+build_turns = 3
+yield_amount = 25.0
+yield_secondary = 0.0
+yield_tertiary = 0.0
+requires_colony = true
+max_per_colony = 0
+consumes_land = true
+pop_required = 0
+pop_housed = 0
+power_required = 0.0
+food_store = 0.0
+energy_store = 0.0
+metal_per_turn = 0.0
+description = "Ground battery. Shields the surface from orbital bombardment. All of them must be destroyed before troops can land."

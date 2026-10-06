@@ -19,6 +19,15 @@ class_name ShipHullData
 @export var cost_rare: float = 0.0
 @export var cost_energy: float = 5.0
 
+## Attack, as the Phase 8 roster states it: damage this hull puts into an opposing hull per
+## exchange. `weapon_damage` is what the combat stage actually reads; `attack` is the
+## authored figure the design document gives, kept as a named field so a balance pass is an
+## edit to a `.tres` rather than a reverse-engineering exercise.
+@export var attack: float = 0.0
+
+## Defence, likewise authored. `shield_points` is the derived combat figure.
+@export var defense: float = 0.0
+
 ## Structural stats.
 @export var hull_points: float = 10.0
 @export var shield_points: float = 0.0
@@ -38,8 +47,53 @@ class_name ShipHullData
 @export var cargo_capacity: float = 0.0
 ## Ground troops this hull can land in an invasion.
 @export var troop_capacity: float = 0.0
+## Civilians this hull can carry. The Colony Ship holds 5; nothing else lifts people.
+@export var civilian_capacity: float = 0.0
 ## Colonisation kit. A colony hull either carries one or self-destructs to drop one.
 @export var colony_kit: bool = false
+
+## Chance per turn, per ship in orbit, of advancing the survey of the world it sits above.
+## Additive across a fleet: two Exploration Ships survey at 50%. Only ships with a positive
+## rate contribute, so a mixed fleet's rate is the sum of its scouts'.
+@export var survey_rate: float = 0.0
+
+## What this hull lifts, for the travel modal's cargo readout and for `TransferStage`.
+enum CargoKind {
+	NONE,      ## Carries nothing.
+	METALS,    ## Ore and ingots.
+	FOOD,      ## Rations.
+	POWER,     ## Fuel cells and reactor output.
+	TROOPS,    ## Military troops.
+	CIVILIANS, ## Settlers.
+}
+
+## Every kind this hull can carry. A list rather than a single kind because the design
+## document's Cargo Transport carries food *and* metal: one "cargo kind" per hull would force
+## the choice into the data and leave half of what the hull is described as carrying out of
+## the model. The first entry is the one the travel modal shows.
+@export var cargo_kinds: Array[int] = []
+
+
+## The kinds this hull can carry, with the troop and civilian capacities folded in.
+##
+## A single function rather than a lookup at each call site, because the failure it prevents
+## is quiet: a hull authored for metal asked to carry food would read as having no room, and
+## the cargo order would simply move nothing.
+func carries(kind: int) -> bool:
+	if cargo_kinds.has(kind):
+		return true
+	# Troops and civilians ride in bays, not in the general hold, so a hull with a bay count
+	# but no declared kind still lifts them.
+	if kind == CargoKind.TROOPS:
+		return troop_capacity > 0.0
+	if kind == CargoKind.CIVILIANS:
+		return civilian_capacity > 0.0
+	return false
+
+
+## The label the travel modal prints for this hull: its first declared kind, or nothing.
+func cargo_label() -> String:
+	return "" if cargo_kinds.is_empty() else int(cargo_kinds[0])
 
 ## Sensor range in parsecs.
 @export var sensor_range: float = 3.0
@@ -65,7 +119,7 @@ func validate() -> PackedStringArray:
 		issues.append("empty id")
 	if display_name.is_empty():
 		issues.append("empty display_name")
-	if role < 0 or role > 5:
+	if role < 0 or role > int(Enums.ShipRole.TROOP):
 		issues.append("role %d out of range" % role)
 	if hull_points <= 0.0:
 		issues.append("hull_points must be positive")
@@ -77,14 +131,20 @@ func validate() -> PackedStringArray:
 		issues.append("weapon_damage set but no weapon_slots to mount it in")
 	if cost_metals < 0.0 or cost_rare < 0.0 or cost_energy < 0.0:
 		issues.append("negative build cost")
-	if role == 0 and sensor_range < 1.0:
+	if role == int(Enums.ShipRole.SCOUT) and sensor_range < 1.0:
 		issues.append("a scout with sensor_range < 1 is useless")
-	if role == 1 and not colony_kit:
+	if role == int(Enums.ShipRole.COLONY) and not colony_kit:
 		issues.append("a colony hull needs colony_kit")
-	if role == 2 and cargo_capacity <= 0.0 and troop_capacity <= 0.0:
-		issues.append("a transport with no cargo and no troop capacity is useless")
-	if bombardment > 0.0 and role != 5:
-		issues.append("only dreadnoughts may carry a bombarder")
+	if Enums.role_is_support(role) and cargo_capacity <= 0.0 and troop_capacity <= 0.0 \
+			and civilian_capacity <= 0.0:
+		issues.append("a support hull that lifts nothing is useless")
+	for kind in cargo_kinds:
+		if kind < 0 or kind > CargoKind.CIVILIANS:
+			issues.append("cargo kind %d is out of range" % kind)
+	if survey_rate < 0.0:
+		issues.append("survey_rate is negative")
+	if survey_rate > 0.0 and role != int(Enums.ShipRole.EXPLORATION):
+		issues.append("only an exploration hull surveys")
 	return issues
 
 
@@ -107,6 +167,16 @@ static func role_speed_cap(role: int) -> float:
 		3: base = 5.0   # Corvette
 		4: base = 3.5   # Cruiser
 		5: base = 2.5   # Dreadnought
+		6: base = 10.0  # Exploration ship: fast and fragile.
+		7: base = 5.0   # Frigate
+		8: base = 4.5   # Destroyer
+		9: base = 3.5   # Battlecruiser
+		10: base = 3.0  # Battleship
+		11: base = 2.8  # Battlestar
+		12: base = 2.5  # Titan
+		13: base = 2.4  # Leviathan
+		14: base = 3.0  # Cargo transport
+		15: base = 3.0  # Troop transport
 	return base * SPEED_SCALE
 
 

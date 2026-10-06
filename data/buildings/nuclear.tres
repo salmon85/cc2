@@ -1,0 +1,27 @@
+[gd_resource type="Resource" script_class="BuildingData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/building_data.gd" id="1_bd"]
+
+[resource]
+script = ExtResource("1_bd")
+id = &"nuclear"
+display_name = "Nuclear Plant"
+kind = 11
+cost_metals = 200.0
+cost_rare = 0.0
+cost_energy = 0.0
+upkeep = 3.0
+build_turns = 4
+yield_amount = 40.0
+yield_secondary = 0.0
+yield_tertiary = 0.0
+requires_colony = true
+max_per_colony = 0
+consumes_land = false
+pop_required = 0
+pop_housed = 0
+power_required = 0.0
+food_store = 0.0
+energy_store = 0.0
+metal_per_turn = 0.0
+description = "Generates +40 power per turn."

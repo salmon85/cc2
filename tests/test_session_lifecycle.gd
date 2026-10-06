@@ -328,7 +328,9 @@ var _drop_frame: int = 0
 var _dropped_slot: int = -1
 ## Orders the survivor stages before the drop, so the resolution checks can prove that
 ## what resolved is *its* order and not the dropped player's.
-var _survivor_tax: float = 0.55
+## The construction rule the survivor orders, so the assertion below can tell which of two
+## competing orders was applied last.
+var _survivor_mode: int = int(Enums.BuildMode.PER_TURN)
 ## The resolution the survivor received, once the server answers it.
 var _survivor_resolved: bool = false
 ## Filled in by `_record_vacancy` from the lobby's own signal, so the disconnect is
@@ -516,8 +518,12 @@ func _process(_delta: float) -> bool:
 		# for -- if the disconnect happened before anyone submitted, "the turn resolved"
 		# would prove nothing.
 		if not _survivor_sent:
+			var home := -1
+			var colonies := _survivor.galaxy.colonies_of(_survivor_slot)
+			if not colonies.is_empty():
+				home = colonies[0].index
 			_t.ok(_survivor.stage_order(
-				Order.make_set_tax(_survivor_slot, _survivor_tax)),
+				Order.make_set_build_mode(_survivor_slot, home, _survivor_mode)),
 				"the surviving client stages an order")
 			_t.ok(_survivor.submit_turn(), "the surviving client submits")
 			_survivor_sent = true
@@ -598,7 +604,11 @@ func _process(_delta: float) -> bool:
 		_t.ok(_server_sync.resolve_if_ready().size() > 0, "the server resolves the turn")
 		_t.eq(_server_sync.galaxy.turn, _turn_before_drop + 1,
 			"the turn resolved without the dropped client")
-		_t.near(_server_sync.galaxy.faction(_survivor_slot).tax_rate, _survivor_tax, 0.0001,
+		var resolved := -1
+		var after := _server_sync.galaxy.colonies_of(_survivor_slot)
+		if not after.is_empty():
+			resolved = after[0].index
+		_t.eq(_server_sync.galaxy.planet(resolved).build_mode, _survivor_mode,
 			"and the surviving player's order was applied")
 
 		# The grace period expires and the AI takes the abandoned empire.

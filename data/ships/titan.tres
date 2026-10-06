@@ -1,0 +1,31 @@
+[gd_resource type="Resource" script_class="ShipHullData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/ship_hull_data.gd" id="1_shd"]
+
+[resource]
+script = ExtResource("1_shd")
+id = &"titan"
+display_name = "Titan"
+role = 12
+cost_metals = 1600.0
+cost_rare = 0.0
+cost_energy = 0.0
+attack = 18.0
+defense = 15.0
+hull_points = 150.0
+shield_points = 45.0
+base_speed = 2.5
+weapon_damage = 18.0
+weapon_accuracy = 0.88
+weapon_slots = 5
+shield_slots = 4
+cargo_capacity = 0.0
+troop_capacity = 0.0
+civilian_capacity = 0.0
+colony_kit = false
+survey_rate = 0.0
+cargo_kinds = []
+sensor_range = 4.5
+bombardment = 45.0
+upkeep = 20.0
+sprite_variant = 11

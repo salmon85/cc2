@@ -1,0 +1,31 @@
+[gd_resource type="Resource" script_class="ShipHullData" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://src/data/ship_hull_data.gd" id="1_shd"]
+
+[resource]
+script = ExtResource("1_shd")
+id = &"battleship"
+display_name = "Battleship"
+role = 10
+cost_metals = 600.0
+cost_rare = 0.0
+cost_energy = 0.0
+attack = 8.0
+defense = 7.0
+hull_points = 70.0
+shield_points = 21.0
+base_speed = 3.0
+weapon_damage = 8.0
+weapon_accuracy = 0.85
+weapon_slots = 3
+shield_slots = 2
+cargo_capacity = 0.0
+troop_capacity = 0.0
+civilian_capacity = 0.0
+colony_kit = false
+survey_rate = 0.0
+cargo_kinds = []
+sensor_range = 4.0
+bombardment = 0.0
+upkeep = 8.0
+sprite_variant = 9

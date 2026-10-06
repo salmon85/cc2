@@ -18,12 +18,11 @@ signal background_picked
 
 ## Emitted when a destination is *proposed* for the selected fleet, with its planet index.
 ##
-## A proposal is not an order: nothing is queued and the fleet does not move until the
-## player confirms. The fleet panel listens for this to open its CONFIRM / CANCEL prompt.
+## A proposal is not an order. Phase 8 made the travel modal the whole dispatch surface, so
+## a map click no longer opens a CONFIRM / CANCEL prompt of its own: it opens the modal with
+## this destination already chosen, and the modal's OK button is the only commit. Nothing is
+## queued and the fleet does not move until that happens.
 signal order_proposed(planet_index: int)
-
-## Emitted when a proposal is committed to the queue.
-signal order_confirmed(planet_index: int)
 
 ## Emitted when a proposal is discarded, by the player or by clicking elsewhere.
 signal order_cancelled
@@ -597,7 +596,13 @@ func propose_order(target_planet: int) -> bool:
 	return true
 
 
-## Commit the pending proposal. Returns false when there is nothing to commit.
+## Commit the pending proposal as a whole-fleet flight.
+##
+## A shortcut, not the main route: the travel modal is what the UI opens, because only the
+## modal can express *which* ships travel. This dispatches the entire fleet and is kept for
+## the map's own callers and the headless suite, which have no modal to open. It emits
+## `order_cancelled` rather than confirming when the controller refuses, so a caller that
+## listens for the commit does not also hear a commit that did not happen.
 func confirm_order() -> bool:
 	if _pending_destination < 0:
 		return false
@@ -605,12 +610,28 @@ func confirm_order() -> bool:
 	_pending_destination = -1
 	_view.preview_destination = -1
 	_view.queue_redraw()
-	if _controller.queue_move(target):
+	if _controller.queue_travel(target):
 		planet_picked.emit(target)
-		order_confirmed.emit(target)
 		return true
 	order_cancelled.emit()
 	return false
+
+
+## Propose `target_planet` without emitting anything, for a caller that already knows what it
+## wants the modal to show. Returns false when the proposal is not legal.
+func set_proposal(target_planet: int) -> bool:
+	return propose_order(target_planet)
+
+
+## Clear the pending proposal silently.
+##
+## Used by the travel modal, which owns the decision now: when it commits, the map's preview
+## is simply stale, and emitting `order_cancelled` as well would log a discard for a flight
+## that was actually sent.
+func clear_proposal() -> void:
+	_pending_destination = -1
+	_view.preview_destination = -1
+	_view.queue_redraw()
 
 
 ## Discard the pending proposal, leaving the fleet where it is.

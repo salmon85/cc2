@@ -1114,3 +1114,146 @@ section.
 Each fix was reverted in turn to confirm the new assertions catch it: the camera bounds
 (3 failures), the confirmation prompt (9), the uniform speed (6), and the staged-orders
 section (2).
+
+---
+
+# Phase 8: Orbital engagements, planetary defences, logistics and colony economics
+
+The design document's own headings, in the order it states them. Each section below records
+the decision, the thing that made the naive version wrong, and where it is pinned by a test.
+
+## Population is a count of people
+
+Phase 7 modelled population as a float that moved by a percentage every turn, scaled food
+production by habitability, and could express neither "one person" nor "one person starves".
+Phase 8 makes it integral: one pop eats exactly one food, a starving colony loses exactly one
+on a 50% roll, and a growing colony gains exactly one. `ColonySim` now takes the colony's
+RNG, which it did not before — these are the first genuinely random colony outcomes, and they
+have to replay identically from a save.
+
+Food overflow is the one warning the document asks for, and it arrives a turn late:
+`_bank_food` raises a flag this turn and the warning is raised from that flag at the top of
+the *next* one. A warning raised on the turn it was earned would describe a turn the player
+has already read. Power overflow is silent, asymmetrically, and the contrast is the point —
+surplus power is wasted, so the answer is to build an Energy Storage rather than to be nagged.
+
+Housing is the growth gate. City Complex (20) and a landed Colony Ship (5) are the only two
+sources, and a colony with neither cannot grow however well it is fed. `pop_required` on a
+farm and a mine is a threshold rather than a reservation: a per-structure reservation would let
+one colonist work five farms, which is precisely the double counting the removed
+per-population multiplier did.
+
+## The construction bar is metal, not turns
+
+`PlanetState.build_metal` replaces "turns remaining" as the measure of progress, and
+`ColonySim.construction_progress` reads the *fraction of the metal cost paid*. A boosted
+project has turns left on the clock and metal banked against it at the same time; the bar has
+to be honest about both, and the resolver has to agree with it. Progress is also what a click
+spends, which is why the panel and the simulation cannot drift apart.
+
+Structures are paid from the *colony's* stored metal rather than the imperial treasury. That
+is what makes the bar meaningful — the metal boosting a project and the metal a mine produces
+are the same pool — and it is why the macro panel's affordability colour reads the colony
+rather than the empire.
+
+Per-turn ship production requires the colony to be producing the hull's full metal cost
+*every turn*, measured from the structure table rather than from the stockpile. Reading the
+stockpile would let a player bank metal once, flip the mode on for a turn, queue a fleet, and
+flip it off again, which would make the mode a way of skipping the rule.
+
+## No combat in transit
+
+`MovementStage.find_engagements` excludes any fleet with a destination. That is the only
+place engagements are discovered, so enforcing it there covers the rule once rather than
+filtering in the combat stage. It matters more than it looks: with one star every fleet is
+inside sensor range of every other, so "these two fleets' paths cross" is true of almost
+every pair on the board. A stage that fought on proximity rather than position would make the
+whole map one battle by turn three.
+
+## Orbit, then guns, then boots
+
+Three steps, in order, and none of them can be reordered by a caller:
+
+1. **Space engagement** — `CombatStage.resolve_pair`, unchanged in shape.
+2. **Defence suppression** — `CombatStage.suppress_defenses`. Gated on orbital supremacy: a
+   colony whose own fleet is still in orbit is not suppressed, because a world whose sky is
+   contested cannot have its guns knocked out by ships that are still being shot at.
+3. **Ground assault** — `InvasionStage.invade`, which refuses outright while
+   `planetary_defense` remains.
+
+The ground battle became **arithmetic**. It used to be a victory roll against a defence
+score, and that was a correctness problem rather than a balance one: the assault acts on both
+the fleet's manifest and the planet's garrison, so two clients reaching the same state could
+disagree about who owned a world. Troops are now consumed until the garrison is gone and
+whoever has left over holds the surface, which makes invasion repeatable.
+
+What lands is the troops *in the holds*, not the fleet's troop capacity. Four empty Troop
+Transports have sixteen bays and are worth nothing; the same four loaded are an army.
+Reading capacity there was how an empty lift used to take a world.
+
+## Troops are a different currency
+
+A Barracks is a converter, not a producer: it turns one civilian into one troop, and the pop
+is gone. Troops eat nothing and research nothing, so the only cost is the population and the
+bays — which is what makes them a real decision rather than a fourth resource.
+
+Garrison strength is the standing garrison plus half a troop per civilian. Without the
+civilian component a colony with a million people and no Barracks would have no garrison at
+all, and one troop transport would take a world nobody had defended, which would make the
+entire population economy irrelevant to every conflict in the game.
+
+## Research is passive, and the tree is a ladder
+
+The tax slider and the four research allocation sliders are gone. Research is funded by the
+empire's civilian population and split across the four fields by what is still ahead in each,
+so a player cannot starve a field they have not noticed and cannot dump everything into one.
+
+Hull unlocks are now **population milestones** rather than tech nodes: crossing 6, 14, 26, 42,
+64 or 92 total pop adds two hulls off a fixed ladder. The tier reached is stored on the
+faction, so a colony lost and retaken does not re-unlock the whole fleet. Buildings are *not*
+gated — they need population to staff, and the population is the gate.
+
+The Generation milestone is the awkward one: a Colony Ship's first act on a fresh world is to
+fly somewhere else, which is a Content Warning in the design document's own terms. It is
+implemented as specified, so *starting a second colony is the expansion arc*, and a player who
+wants to stay home is expected to read the roster before they commit. Flagged here because
+it should be a deliberate decision rather than a discovery.
+
+## The travel modal replaced three interactions
+
+"Stage move" asked a player to arm a mode, click a planet, and then confirm. It is now one
+window: the origin is fixed by where the fleet is, the destination is a dropdown that omits
+the origin, and the manifest is a list of ships with `+` / `-` buttons, `All` / `None`, combat
+and non-combat rosters kept separate, a per-ship cargo readout, and OK / CANCEL.
+
+The map still proposes. A click draws the flight path, quotes the transit time in the fleet
+panel, and opens the modal with that world already chosen — the map never queues anything
+itself, because the modal is the only route that can express *which* ships travel.
+
+A partial manifest splits the fleet: the ships named travel as a new fleet, the rest stay
+behind as their own fleet rather than being silently abandoned in the old one.
+
+The Fleet Registry is gone. With one system and no unexplored space there was nothing for it
+to filter out, so it was a list of the player's own ships with no decision attached.
+
+## A cargo kind is a list, not a single value
+
+The first cut gave each hull one `cargo_kind`, and the design document's Cargo Transport —
+"carries Food and Metal" — immediately did not fit. One kind per hull would have forced the
+choice into the data and left half of what the hull is described as carrying out of the model.
+It is now `cargo_kinds`, a list, with the first entry as the label the modal prints.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 2371 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_turn_engine`: 647 (was 421) — the integral food/pop model, the 50% starvation and
+  growth rolls measured over 200 trials each, one-turn-late overflow warnings, the power
+  budget, the single-project and per-turn construction rules, no transit combat, defence
+  suppression's precondition, the deterministic ground battle, troop recruitment and lift,
+  cargo in both directions, and the population ladder.
+- `test_gui_integration`: 368 (was 309) — the absent tax and research controls (checked
+  through the accessors, through a tree walk for surviving `HSlider`s, and through the labels
+  the panel actually shows), the clickable construction bar, and the travel modal driven
+  through its own buttons.
+- `test_defs`: 243 (was 98) — every roster figure asserted against the specification's own
+  numbers rather than against each other.

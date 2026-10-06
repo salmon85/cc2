@@ -19,7 +19,12 @@ var travelled: float = 0.0
 ## Fleet morale, 0..1. Breaking morale forces a retreat.
 var morale: float = 1.0
 
-## Cargo manifest: `{"metals": x, "rare": x, "energy": x, "troops": x}`.
+## Cargo manifest: `{"metals": x, "food": x, "power": x, "troops": x, "civilians": x}`.
+##
+## What is *carried*, not what could be carried. A transport with four troop bays reports
+## four capacity and zero carried until something is put in it, which is what makes the
+## travel modal's `+` button able to mean "one more troop, if there is room" rather than
+## "a full transport". `TransferStage` is the only thing that writes here.
 var cargo: Dictionary = {}
 
 ## Composition keyed by `ShipHullData.id` → ship count.
@@ -142,7 +147,12 @@ func bombardment_power() -> float:
 	return total
 
 
-## Total troop lift available for an invasion.
+## Total troop lift available, in troops. Stacks additively across the fleet: four Troop
+## Transports carry sixteen.
+##
+## This is capacity, not manifest. `InvasionStage` needs the number of troops that could be
+## landed; `TransferStage` tracks how many are actually aboard in `cargo["troops"]`. Keeping
+## the two apart is what stops a fleet of empty transports from being counted as an army.
 func troop_capacity() -> float:
 	var total := 0.0
 	for key: StringName in ships:
@@ -152,7 +162,22 @@ func troop_capacity() -> float:
 	return total
 
 
-## Total cargo capacity.
+## Troops actually aboard. This is what lands in an invasion.
+func troops_carried() -> float:
+	return maxf(0.0, float(cargo.get("troops", 0.0)))
+
+
+## Civilian capacity: five per Colony Ship, nothing from anything else.
+func civilian_capacity() -> float:
+	var total := 0.0
+	for key: StringName in ships:
+		var def: Resource = _hulls.get(key, null) as Resource
+		if def != null:
+			total += float(def.get("civilian_capacity")) * int(ships[key])
+	return total
+
+
+## Total generic cargo capacity, in tonnes. Cargo Transports only.
 func cargo_capacity() -> float:
 	var total := 0.0
 	for key: StringName in ships:
@@ -162,18 +187,67 @@ func cargo_capacity() -> float:
 	return total
 
 
-## Cargo currently loaded. A negative manifest entry (corrupt save, buggy order) is
-## clamped to zero rather than being allowed to inflate the fleet's free capacity.
+## Sum of every manifest entry. Kept for the fleet detail readout, which shows total load
+## against total capacity across every kind; `TransferStage` handles kinds individually.
 func cargo_load() -> float:
 	var total := 0.0
-	for key: String in cargo:
+	for key: Variant in cargo:
 		total += maxf(0.0, float(cargo[key]))
 	return total
 
 
-## Free cargo space.
+## Free space in the largest single cargo hold the fleet has.
+##
+## Meaningless for a fleet of warships and meaningless for a mixed one, which is why the
+## travel modal asks `TransferStage.free_space(kind)` per kind instead. Retained because the
+## fleet detail readout still shows an aggregate figure.
 func free_cargo() -> float:
 	return maxf(0.0, cargo_capacity() - cargo_load())
+
+
+## Combined survey progress this fleet makes per turn, additive across members.
+##
+## Two Exploration Ships survey at 50%, per the design document. Only hulls with a positive
+## `survey_rate` contribute, so a mixed fleet's rate is the sum of its scouts' rather than
+## the count of ships times the scout's rate.
+func survey_rate() -> float:
+	var total := 0.0
+	for key: StringName in ships:
+		var def: Resource = _hulls.get(key, null) as Resource
+		if def != null:
+			total += float(def.get("survey_rate")) * int(ships[key])
+	return total
+
+
+## Whether any member of this fleet can survey.
+func has_survey_ship() -> bool:
+	return survey_rate() > 0.0
+
+
+## Whether this fleet holds any warship.
+##
+## The travel modal separates the two rosters on exactly this, and so does the combat stage:
+## a fleet of transports does not answer a fleet of battleships just because they are both
+## in the same orbit.
+func has_warship() -> bool:
+	for key: StringName in ships:
+		var def: Resource = _hulls.get(key, null) as Resource
+		if def == null:
+			continue
+		if Enums.role_is_combat(int(def.get("role"))):
+			return true
+	return false
+
+
+## Whether this fleet holds any lift: cargo, troops or a colony kit.
+func has_support() -> bool:
+	for key: StringName in ships:
+		var def: Resource = _hulls.get(key, null) as Resource
+		if def == null:
+			continue
+		if Enums.role_is_support(int(def.get("role"))):
+			return true
+	return false
 
 
 ## Add `count` ships of hull `hull_id`. Returns false for an unknown hull.
@@ -302,6 +376,14 @@ func fingerprint() -> String:
 	var parts := PackedStringArray()
 	for hull_id in hull_ids:
 		parts.append("%s=%d" % [hull_id, int(ships.get(hull_id, 0))])
-	return "%d:%d:%d:%d:%.3f:%.3f:%s:%s" % [
+	# Cargo is folded into the hash by value, sorted, for the same reason the ship list is:
+	# a fleet that loaded a different amount of food is a different fleet, and a save/load
+	# that lost the difference would be a save/load bug rather than a display one.
+	var cargo_parts := PackedStringArray()
+	for key: Variant in cargo:
+		cargo_parts.append("%s=%.3f" % [KeyText.key(key), float(cargo[key])])
+	cargo_parts.sort()
+	return "%d:%d:%d:%d:%.3f:%.3f:%s:%s:%s" % [
 		id, owner, system, destination, travelled, morale, str(parts), name,
+		str(cargo_parts),
 	]

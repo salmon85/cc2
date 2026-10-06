@@ -108,36 +108,47 @@ func _refresh_planet() -> void:
 		return
 
 	lines.append(Format.field("TYPE", String(p.type_id).capitalize()))
-	lines.append(Format.field("POPULATION", Format.fixed(p.population, 2)))
-	lines.append(Format.field("CAPACITY", Format.fixed(p.max_population(), 2)))
+	# Population is a count of people as of Phase 8, not a figure in millions, so it is
+	# printed as a whole number. `Format.fixed(x, 2)` on a count reads as a quantity it is not.
+	lines.append(Format.field("POPULATION", "%d" % int(round(p.population))))
+	lines.append(Format.field("TROOPS", str(p.troops)))
+	lines.append(Format.field("HOUSING", "%d" % int(p.housing)))
+	lines.append(Format.field("FOOD", "%d / %d" % [
+		int(p.food_stock), int(p.food_capacity)]))
 	lines.append(Format.field("FOOD BALANCE", Format.signed_colored(_food_balance(p))))
-	lines.append(Format.field("FOOD STOCK", Format.fixed(p.food_stock, 1)))
+	lines.append(Format.field("POWER", "%d / %d (+%d, -%d)" % [
+		int(p.power), int(p.power_capacity), int(p.power_generated), int(p.power_drawn)]))
+	lines.append(Format.field("METAL", Format.fixed(p.reserve_metals, 0)))
 
-	# Economic structures: the counts the spec calls out, plus the stores they feed.
+	# The Phase 8 building roster, in the order a player thinks about it.
 	lines.append("")
-	lines.append(Format.field("FARMS", str(p.count(&"farm"))))
-	lines.append(Format.field("MINES", str(p.count(&"mine"))))
-	lines.append(Format.field("FACTORIES", str(p.count(&"factory"))))
-	lines.append(Format.field("SHIELDS", str(p.count(&"shield_generator"))))
-	lines.append(Format.field("BATTERIES", str(p.count(&"missile_battery"))))
-	lines.append(Format.field("GARRISONS", str(p.count(&"garrison"))))
-	lines.append(Format.field("SHIPYARD", Format.fixed(p.shipyard_progress * 100.0, 0) + "%"))
-	lines.append(Format.field("STORES", "M %s  R %s  E %s" % [
-		Format.fixed(p.reserve_metals, 0),
-		Format.fixed(p.reserve_rare, 0),
-		Format.fixed(p.reserve_energy, 0),
-	]))
+	for id in _ROSTER:
+		lines.append(Format.field(_label_for(id), str(p.count(id))))
+	lines.append(Format.field("SPACEPORTS", str(p.count(&"space_port"))))
+	lines.append(Format.field("SHIPS", "%d building, %d queued" % [
+		int(p.shipyard_progress), p.ship_queue.size()]))
 
 	if not p.building_queue.is_empty():
 		lines.append("")
-		lines.append("[color=#%s]IN BUILD (%d turn)[/color]" % [
-			CC2Theme.AMBER.to_html(false), p.build_turns_remaining
+		lines.append("[color=#%s]IN BUILD (%d turn, %d metal banked)[/color]" % [
+			CC2Theme.AMBER.to_html(false), p.build_turns_remaining, int(p.build_metal)
 		])
 		var queued := PackedStringArray()
 		for key in p.building_queue:
 			queued.append("%s x%d" % [String(key), int(p.building_queue[key])])
 		queued.sort()
 		lines.append("  " + ", ".join(queued))
+
+	# Standing warnings. Food overflow arrives a turn late on purpose, so this block is
+	# frequently empty on the turn it was earned and populated on the one after.
+	var flags := PackedStringArray()
+	for key: Variant in p.warnings:
+		flags.append(String(key).replace("_", " ").to_upper())
+	if not flags.is_empty():
+		flags.sort()
+		lines.append("")
+		lines.append("[color=#%s]%s[/color]" % [
+			CC2Theme.AMBER.to_html(false), " | ".join(flags)])
 
 	var other := PackedStringArray()
 	for key in p.structures:
@@ -185,17 +196,38 @@ func _planet_detail_known(p: PlanetState) -> bool:
 	return false
 
 
-## Food balance per turn: production from farms and habitability, minus consumption from
-## population. Mirrors `ColonySim` closely enough to preview without running a turn, and is
-## labelled as a projection in the UI copy.
+## Food balance per turn: what the colony's staffed farms produce, minus one food per
+## civilian. Mirrors `ColonySim` closely enough to preview without running a turn.
+##
+## The habitability multiplier is gone, and deliberately. In Phase 8 a farm is "requires 1
+## pop, generates +5 food/turn" -- an absolute figure -- so scaling it by habitability made
+## the number in this panel a different quantity from the one the resolver uses.
 func _food_balance(p: PlanetState) -> float:
-	var produced := p.count(&"farm") * 2.0 * maxf(0.0, p.habitability())
-	return produced - p.population * 0.15
+	var produced := float(p.count(&"farm")) * 5.0
+	if p.count(&"colony_pad") > 0:
+		produced += 5.0
+	return produced - p.population
+
+
+## The Phase 8 structure roster, in the order the readout lists it.
+const _ROSTER: Array[StringName] = [
+	&"farm", &"mine", &"granary", &"city_complex", &"colony_pad",
+	&"energy_storage", &"solar", &"coal", &"nuclear",
+	&"barracks", &"planetary_defense",
+]
+
+## Readable label for a roster entry, without needing the definition table.
+func _label_for(id: StringName) -> String:
+	match id:
+		&"energy_storage": return "ENERGY STOR"
+		&"city_complex": return "CITIES"
+		&"planetary_defense": return "DEFENSES"
+		&"colony_pad": return "COLONY SHIP"
+	return String(id).replace("_", " ").to_upper()
 
 
 func _is_economic(id: StringName) -> bool:
-	return id in [&"farm", &"mine", &"factory", &"shield_generator",
-		&"missile_battery", &"garrison", &"shipyard"]
+	return _ROSTER.has(id)
 
 
 ## Heading caption for a selected body.

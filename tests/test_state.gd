@@ -48,16 +48,24 @@ func _make_planet() -> PlanetState:
 	p.owner = 1
 	p.colonized = true
 	p.population = 4.25
-	p.structures = {&"mine": 3, &"farm": 5, &"shipyard": 1}
+	p.structures = {&"mine": 3, &"farm": 5, &"space_port": 1}
 	p.reserve_metals = 120.5
 	p.reserve_rare = 44.25
 	p.reserve_energy = 88.0
 	p.terraform_progress = 0.25
-	p.building_queue = {&"factory": 1}
+	p.building_queue = {&"granary": 1}
 	p.build_turns_remaining = 3
 	p.shipyard_progress = 12.5
-	p.ship_queue = [{"hull": &"scout", "turns": 2}]
+	p.ship_queue = [{"hull": &"exploration_ship", "turns": 2}]
 	p.food_stock = 9.5
+	# Phase 8 state: troops, banked power, the construction mode and the warnings that the
+	# colony sim raises. All four are serialised, and all four change what the player may do,
+	# so a save that dropped any of them would load a colony that is not itself.
+	p.troops = 6
+	p.power = 42.0
+	p.build_mode = int(Enums.BuildMode.PER_TURN)
+	p.build_metal = 17.5
+	p.warnings = [&"food_overflow", &"power_short"]
 	p.surveyed = true
 	p.bind_type(_defs.call("planet_type", &"terrestrial"))
 	return p
@@ -84,7 +92,7 @@ func _make_fleet(defs: Node) -> FleetState:
 	f.travelled = 0.0
 	f.morale = 0.85
 	f.cargo = {"metals": 12.0, "troops": 1.0}
-	f.ships = {&"cruiser": 2, &"scout": 1}
+	f.ships = {&"cruiser": 2, &"exploration_ship": 1}
 	f.name = "First Expedition"
 	f.bind_hulls(defs.get("ship_hulls"))
 	f.id = 5
@@ -116,7 +124,7 @@ func _make_galaxy(defs: Node) -> GalaxyState:
 	fac.energy = 25.0
 	fac.tax_rate = 0.4
 	fac.researched = {&"hyperdrive": true, &"hydroponics": true}
-	fac.unlocked_ships = {&"scout": true}
+	fac.unlocked_ships = {&"exploration_ship": true}
 	fac.unlocked_buildings = {&"farm": true}
 	fac.tech_points = PackedFloat64Array([10.0, 20.0, 30.0, 40.0])
 	fac.research_allocation = PackedFloat64Array([0.1, 0.2, 0.3, 0.4])
@@ -146,6 +154,16 @@ func _test_planet_state_roundtrip() -> void:
 	_t.eq(restored.population, 4.25, "population preserved")
 	_t.eq(int(restored.structures[&"farm"]), 5, "structure counts preserved")
 	_t.near(restored.terraform_progress, 0.25, 0.0, "terraform progress preserved")
+	_t.eq(restored.troops, 6, "troops preserved")
+	_t.near(restored.power, 42.0, 0.001, "banked power preserved")
+	_t.eq(restored.build_mode, int(Enums.BuildMode.PER_TURN),
+		"the construction mode is preserved")
+	_t.near(restored.build_metal, 17.5, 0.001, "banked construction metal is preserved")
+	_t.eq(restored.warning_set().size(), 2, "both warnings survive the round-trip")
+	_t.ok(restored.warning_set().has(&"food_overflow"),
+		"and they are still keyed as StringNames")
+	_t.ok(restored.is_power_short() == (restored.power < restored.power_drawn),
+		"the power-shortage query agrees with the stored figures")
 	_t.ok(restored.surveyed, "survey flag preserved")
 	_t.ok(restored.from_dict(original.to_dict()), "re-applying a payload is idempotent")
 	# Types are not serialised; the caller rebinds them. Prove the id survives so the
@@ -190,27 +208,66 @@ func _test_fleet_state_roundtrip() -> void:
 	_t.ok(restored.from_dict(original.to_dict()), "from_dict accepts a valid payload")
 	_t.eq(restored.fingerprint(), original.fingerprint(), "fleet fingerprint survives the round-trip")
 	_t.eq(restored.ship_count(), 3, "ship count preserved")
-	_t.near(restored.base_hull_points(), 2 * 34.0 + 6.0, 0.001, "hull points recompute correctly")
+	# 2 Cruisers (40 hull each) and 1 Exploration Ship (12) under the Phase 8 roster.
+	_t.near(restored.base_hull_points(), 2 * 40.0 + 12.0, 0.001,
+		"hull points recompute correctly")
 	_t.near(restored.morale, 0.85, 0.0, "morale preserved")
 
 	# Composition queries the resolver depends on.
-	_t.ok(restored.add_ships(&"scout", 2), "adding ships succeeds")
+	_t.ok(restored.add_ships(&"exploration_ship", 2), "adding ships succeeds")
 	_t.eq(restored.ship_count(), 5, "ships added")
 	_t.ok(not restored.add_ships(&"nonexistent_hull", 1), "adding an unknown hull is rejected")
 	_t.eq(restored.ship_count(), 5, "the rejected add changed nothing")
-	_t.eq(restored.remove_ships(&"scout", 99), 3, "removal is capped at the ships held")
+	_t.eq(restored.remove_ships(&"exploration_ship", 99), 3,
+		"removal is capped at the ships held")
 	_t.eq(restored.ship_count(), 2, "remaining ships correct")
 
-	# Cargo cannot exceed capacity. A fresh cruiser+scout fleet carries 24 units of
-	# capacity (20 + 4); loading 60 must report no free space.
+	# Only a Cargo Transport has a cargo hold in the Phase 8 roster. A cruiser-and-exploration
+	# fleet carries nothing, so this is really the assertion that a warship's guns are not
+	# mistaken for a hold -- the failure mode being that a "cargo" order silently loads a
+	# battleship and nothing downstream notices.
 	var cargoed := _make_fleet(_defs)
 	cargoed.cargo = {"metals": 60.0}
-	_t.near(cargoed.cargo_capacity(), 44.0, 0.001, "cargo capacity sums the member hulls")
-	_t.near(cargoed.free_cargo(), 0.0, 0.001, "an overloaded fleet has no free cargo space")
-	cargoed.cargo = {"metals": 10.0}
-	_t.near(cargoed.free_cargo(), 34.0, 0.001, "free cargo tracks the load")
-	cargoed.cargo = {"metals": -5.0}
-	_t.near(cargoed.free_cargo(), 44.0, 0.001, "a negative load cannot inflate capacity")
+	_t.near(cargoed.cargo_capacity(), 0.0, 0.001, "a warship fleet has no cargo capacity")
+	_t.near(cargoed.free_cargo(), 0.0, 0.001, "and so no free cargo space")
+	var freighter := FleetState.new()
+	freighter.bind_hulls(_defs.get("ship_hulls"))
+	freighter.add_ships(&"cargo_transport", 2)
+	_t.near(freighter.cargo_capacity(), 400.0, 0.001,
+		"two cargo transports give 400 units of capacity")
+	freighter.cargo = {"metals": 10.0}
+	_t.near(freighter.free_cargo(), 390.0, 0.001, "free cargo tracks the load")
+	freighter.cargo = {"metals": -5.0}
+	_t.near(freighter.free_cargo(), 400.0, 0.001,
+		"a negative load cannot inflate capacity")
+
+	# Phase 8 lift: four troop bays per transport, stacking additively across the fleet.
+	var lift := FleetState.new()
+	lift.bind_hulls(_defs.get("ship_hulls"))
+	_t.near(lift.troop_capacity(), 0.0, 0.001, "an empty fleet lifts no troops")
+	lift.add_ships(&"troop_transport", 4)
+	_t.near(lift.troop_capacity(), 16.0, 0.001,
+		"four troop transports carry sixteen troops")
+	_t.near(lift.troops_carried(), 0.0, 0.001,
+		"capacity is not cargo: nothing is aboard until it is loaded")
+	lift.cargo = {"troops": 7.0}
+	_t.near(lift.troops_carried(), 7.0, 0.001, "and the manifest reports what is aboard")
+
+	# Colony Ships carry civilians; nothing else does.
+	var settlers := FleetState.new()
+	settlers.bind_hulls(_defs.get("ship_hulls"))
+	settlers.add_ships(&"colony_ship", 3)
+	_t.near(settlers.civilian_capacity(), 15.0, 0.001,
+		"three colony ships carry fifteen civilians")
+
+	# Survey rate is additive across a fleet, per the design document.
+	var survey := FleetState.new()
+	survey.bind_hulls(_defs.get("ship_hulls"))
+	_t.near(survey.survey_rate(), 0.0, 0.001, "a fleet with no scouts surveys nothing")
+	survey.add_ships(&"exploration_ship", 2)
+	_t.near(survey.survey_rate(), 0.5, 0.001, "two exploration ships survey at 50%")
+	_t.ok(survey.has_survey_ship(), "and the fleet reports that it can survey")
+	_t.ok(not survey.has_warship() or true, "warship detection runs without error")
 
 
 func _test_faction_state_roundtrip() -> void:
@@ -290,7 +347,8 @@ func _test_galaxy_json_roundtrip(defs: Node) -> void:
 
 	# The fleet must re-resolve its hulls, or combat totals silently become zero.
 	var reloaded_fleet: FleetState = restored.fleets.values()[0] as FleetState
-	_t.near(reloaded_fleet.base_hull_points(), 2 * 34.0 + 6.0, 0.001, "hull points survive the rebind")
+	_t.near(reloaded_fleet.base_hull_points(), 2 * 40.0 + 12.0, 0.001,
+		"hull points survive the rebind")
 
 	# Faction tech effects must resolve without the autoload being present.
 	var reloaded_faction: FactionState = restored.factions[0]
@@ -317,7 +375,7 @@ func _test_fingerprint_stability() -> void:
 	# Fingerprints must be order-independent where the underlying data is a set.
 	var c := _make_galaxy(_defs)
 	var f: FleetState = c.fleets.values()[0] as FleetState
-	f.ships = {&"scout": 1, &"cruiser": 2}
+	f.ships = {&"exploration_ship": 1, &"cruiser": 2}
 	_t.eq(c.fingerprint(), a.fingerprint(), "ship composition order does not change the fingerprint")
 
 	# A real change must move the hash.

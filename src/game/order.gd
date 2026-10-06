@@ -29,10 +29,21 @@ var target_planet: int = -1
 ##   COLONIZE       {}
 ##   BUILD_SHIP     {"hull": StringName}
 ##   BUILD_STRUCTURE{"building": StringName, "count": int}
-##   SET_TAX        {"rate": float}
-##   SET_RESEARCH   {"allocation": PackedFloat64Array}
+##   SET_TAX        {"rate": float}          -- inert as of Phase 8
+##   SET_RESEARCH   {"allocation": [...]}    -- inert as of Phase 8
 ##   CANCEL_BUILD   {}
 ##   DISBAND        {}
+##   TRAVEL         {"ships": {hull_id: count}}
+##   RECRUIT_TROOP  {}
+##   BOOST_BUILD    {"metals": float}
+##   SET_BUILD_MODE {"mode": int}
+##   LOAD_CARGO     {"kind": String, "amount": float}
+##   UNLOAD_CARGO   {"kind": String, "amount": float}
+##
+## `SET_TAX` and `SET_RESEARCH` are retained rather than removed: the tax slider and the
+## research allocation sliders are both gone from the UI, so nothing produces these any more,
+## but a client or save from before this phase still sends them. Keeping the ordinals means
+## the packet parses instead of being rejected as an unknown type.
 var payload: Dictionary = {}
 
 
@@ -116,6 +127,64 @@ static func make_disband(faction_id: int, fleet_id: int) -> Order:
 	return o
 
 
+## Send a chosen set of ships from their current world to `planet_index`.
+##
+## `ships` is a `{hull_id: count}` manifest. An empty manifest means the whole fleet, which
+## is what makes this a strict superset of `make_move_fleet` rather than a second way of
+## saying the same thing: the travel modal can express both with one order type.
+static func make_travel(
+	faction_id: int, fleet_id: int, planet_index: int, ships: Dictionary = {}
+) -> Order:
+	var o := Order.new()
+	o.type = 10  # TRAVEL
+	o.faction = faction_id
+	o.fleet = fleet_id
+	o.target_planet = planet_index
+	o.payload = {"ships": ships.duplicate(true)}
+	return o
+
+
+## Convert one civilian on `planet_index` into one troop. Requires a Barracks.
+static func make_recruit_troop(faction_id: int, planet_index: int) -> Order:
+	var o := Order.new()
+	o.type = 11  # RECRUIT_TROOP
+	o.faction = faction_id
+	o.target_planet = planet_index
+	return o
+
+
+## Spend `metals` of a colony's stored metal against the construction in progress.
+static func make_boost_build(faction_id: int, planet_index: int, metals: float) -> Order:
+	var o := Order.new()
+	o.type = 12  # BOOST_BUILD
+	o.faction = faction_id
+	o.target_planet = planet_index
+	o.payload = {"metals": metals}
+	return o
+
+
+## Choose single-project or per-turn construction on `planet_index`.
+static func make_set_build_mode(faction_id: int, planet_index: int, mode: int) -> Order:
+	var o := Order.new()
+	o.type = 13  # SET_BUILD_MODE
+	o.faction = faction_id
+	o.target_planet = planet_index
+	o.payload = {"mode": mode}
+	return o
+
+
+## Move `amount` of `kind` between a world and a fleet parked over it.
+static func make_cargo(
+	faction_id: int, fleet_id: int, kind: StringName, amount: float, loading: bool
+) -> Order:
+	var o := Order.new()
+	o.type = 14 if loading else 15  # LOAD_CARGO / UNLOAD_CARGO
+	o.faction = faction_id
+	o.fleet = fleet_id
+	o.payload = {"kind": String(kind), "amount": amount}
+	return o
+
+
 ## Human-readable label, used by the resolver's rejection log and the UI.
 func describe() -> String:
 	match type:
@@ -129,7 +198,29 @@ func describe() -> String:
 		7: return "Set research allocation"
 		8: return "Cancel construction at planet %d" % target_planet
 		9: return "Disband fleet %d" % fleet
+		10: return "Fleet %d travels to planet %d with %s" % [
+			fleet, target_planet, _manifest_text()]
+		11: return "Raise a troop at planet %d" % target_planet
+		12: return "Boost construction at planet %d with %d metal" % [
+			target_planet, int(payload.get("metals", 0.0))]
+		13: return "Set planet %d build mode to %s" % [
+			target_planet,
+			"per-turn ships" if int(payload.get("mode", 0)) == 1 else "single project"]
+		14: return "Load %s into fleet %d" % [payload.get("kind", "?"), fleet]
+		15: return "Unload %s from fleet %d" % [payload.get("kind", "?"), fleet]
 	return "Unknown order"
+
+
+## Compact rendering of a travel manifest, for the news line.
+func _manifest_text() -> String:
+	var ships: Dictionary = payload.get("ships", {}) as Dictionary
+	if ships.is_empty():
+		return "the whole fleet"
+	var ids := PackedStringArray()
+	for key: Variant in ships:
+		ids.append("%s x%d" % [String(key), int(ships[key])])
+	ids.sort()
+	return ", ".join(ids)
 
 
 func _faction_tag() -> String:
@@ -154,7 +245,7 @@ static func from_dict(data: Dictionary) -> Order:
 		push_error("[Order] payload missing 'type'")
 		return null
 	var kind := int(data.get("type", 0))
-	if kind < 0 or kind > Enums.OrderType.DISBAND:
+	if kind < 0 or kind > Enums.MAX_ORDER_TYPE:
 		# A malformed or hostile packet must not become an order that silently
 		# resolves to OrderType.NONE.
 		push_error("[Order] payload has an unknown type %d" % kind)

@@ -205,17 +205,19 @@ func _test_desync_is_detected() -> void:
 ## Two players submitting in opposite order across two runs must produce the same galaxy,
 ## or a replay of a networked game would not reproduce its own hash. The rule is only
 ## observable when order actually changes the outcome, so this drives the server with two
-## submissions that *both* target empire 0 -- `SET_TAX` is last-write-wins, so whichever
-## order is applied last decides the treasury policy. Slot order must fix that answer;
+## submissions that *both* target empire 0 -- `SET_BUILD_MODE` is last-write-wins, so whichever
+## order is applied last decides the world's construction rule. Slot order must fix that answer;
 ## arrival order would make it depend on network timing.
+##
+## `SET_BUILD_MODE` replaced `SET_TAX` as the probe here when Phase 8 removed the tax slider.
+## It is a better probe for the same reason it is a legal order at all: it writes to the
+## authoritative state, so a server that dropped it would fail this rather than silently
+## agreeing with itself.
 func _test_order_assembly_is_slot_ordered() -> void:
 	_t.begin("orders assemble in slot order")
 	var defs: Node = root.get_node_or_null(NodePath("Defs"))
 	var db: Node = root.get_node_or_null(NodePath("GameDB"))
 
-	# Empire 0's tax rate is set twice: 0.10 by slot 0, then 0.80 by slot 1. Applying in
-	# slot order always leaves 0.80; applying in arrival order leaves whichever arrived
-	# last, so the two scenarios below can only agree if the server sorted them.
 	var build := func() -> TurnSyncServer:
 		var rng := RandomNumberGenerator.new()
 		rng.seed = 555
@@ -224,15 +226,24 @@ func _test_order_assembly_is_slot_ordered() -> void:
 		server.begin(galaxy, PackedInt32Array([0, 1]))
 		return server
 
+	var first := build.call() as TurnSyncServer
+	# Empire 0's homeworld is the one world both submissions can name.
+	var home := _homeworld_of(first.galaxy, 0)
+	_t.ok(home >= 0, "empire 0 has a colony to order against")
+
 	# Delivery A: slot 0 lands first.
-	var a := build.call() as TurnSyncServer
-	_t.ok(a.stage_orders(0, [Order.make_set_tax(0, 0.10).to_dict()]), "A: slot 0 staged")
-	_t.ok(a.stage_orders(1, [Order.make_set_tax(0, 0.80).to_dict()]), "A: slot 1 staged")
+	var a := first
+	_t.ok(a.stage_orders(0, [Order.make_set_build_mode(0, home, 1).to_dict()]),
+		"A: slot 0 staged")
+	_t.ok(a.stage_orders(1, [Order.make_set_build_mode(0, home, 0).to_dict()]),
+		"A: slot 1 staged")
 
 	# Delivery B: the identical pair, opposite order.
 	var b := build.call() as TurnSyncServer
-	_t.ok(b.stage_orders(1, [Order.make_set_tax(0, 0.80).to_dict()]), "B: slot 1 staged first")
-	_t.ok(b.stage_orders(0, [Order.make_set_tax(0, 0.10).to_dict()]), "B: slot 0 staged second")
+	_t.ok(b.stage_orders(1, [Order.make_set_build_mode(0, home, 0).to_dict()]),
+		"B: slot 1 staged first")
+	_t.ok(b.stage_orders(0, [Order.make_set_build_mode(0, home, 1).to_dict()]),
+		"B: slot 0 staged second")
 	_t.ok(not b.stage_orders(7, []), "a slot the server is not waiting on is refused")
 
 	_t.ok(a.all_submitted(), "both slots have orders to resolve")
@@ -240,15 +251,27 @@ func _test_order_assembly_is_slot_ordered() -> void:
 	_t.ok(not a.resolve_if_ready().is_empty(), "the first submission resolved")
 	_t.ok(not b.resolve_if_ready().is_empty(), "the reordered submission resolved")
 
-	_t.near(a.galaxy.faction(0).tax_rate, 0.80, 0.0001,
-		"the later slot wins, so slot order decides the final rate")
-	_t.eq(b.galaxy.faction(0).tax_rate, a.galaxy.faction(0).tax_rate,
+	# Slot 1 applied last under slot ordering, so its mode survives: 0, single project.
+	_t.eq(a.galaxy.planet(home).build_mode, 0,
+		"the later slot wins, so slot order decides the final rule")
+	_t.eq(b.galaxy.planet(home).build_mode, a.galaxy.planet(home).build_mode,
 		"arrival order does not change which order was applied last")
 	_t.eq(b.galaxy.state_hash(), a.galaxy.state_hash(),
 		"arrival order does not change the resolved galaxy")
 
 	a.free()
 	b.free()
+
+
+## The lowest-indexed colony `faction_id` holds, or -1.
+##
+## Several networked scenarios need an order that both mutates authoritative state and names
+## a world the sender actually owns, because a `SET_BUILD_MODE` aimed at somebody else's
+## colony is refused by the resolver and the scenario would then be asserting parity on an
+## order nobody applied.
+func _homeworld_of(galaxy: GalaxyState, faction_id: int) -> int:
+	var colonies := galaxy.colonies_of(faction_id)
+	return colonies[0].index if not colonies.is_empty() else -1
 
 
 # --- Networked scenarios ------------------------------------------------------
@@ -778,9 +801,9 @@ func _step_turn_sync() -> void:
 		# Peer 1 stages build orders; peer 2 stages a different imperial order.
 		var client_a := harness.client_syncs[0]
 		var client_b := harness.client_syncs[1]
-		client_a.stage_order(Order.make_set_tax(client_a.slot, 0.42))
-		client_a.stage_order(Order.make_build_structure(client_a.slot, 0, &"mine"))
-		client_b.stage_order(Order.make_set_tax(client_b.slot, 0.31))
+		client_a.stage_order(Order.make_build_structure(client_a.slot, 0, &"farm"))
+		client_b.stage_order(Order.make_set_build_mode(
+			client_b.slot, _homeworld_of(client_b.galaxy, client_b.slot), 1))
 
 		_t.ok(client_a.has_staged_orders(), "peer 1 staged orders")
 		_t.ok(client_b.has_staged_orders(), "peer 2 staged orders")
@@ -865,8 +888,9 @@ func _step_disconnect() -> void:
 				harness.client_nets[i].unique_id())
 
 		# Peer 1 submits; peer 2 will vanish without submitting.
-		harness.client_syncs[0].stage_order(Order.make_set_tax(
-			harness.client_syncs[0].slot, 0.5))
+		harness.client_syncs[0].stage_order(Order.make_set_build_mode(
+			harness.client_syncs[0].slot,
+			_homeworld_of(harness.client_syncs[0].galaxy, harness.client_syncs[0].slot), 1))
 		harness.client_syncs[0].submit_turn()
 		return
 
@@ -937,9 +961,11 @@ func _start_parity() -> void:
 	var local := galaxy.duplicate_state()
 	var local_rng := RandomNumberGenerator.new()
 	local_rng.seed = local.seed_value
+	# Two orders that both mutate authoritative state, so a server that silently dropped
+	# either would produce a different hash and fail the parity check below.
 	var baseline: Array = [
-		Order.make_set_tax(0, 0.42),
-		Order.make_set_research(0, PackedFloat64Array([0.25, 0.25, 0.25, 0.25])),
+		Order.make_set_build_mode(0, _homeworld_of(local, 0), 1),
+		Order.make_recruit_troop(0, _homeworld_of(local, 0)),
 	]
 	TurnResolver.resolve_turn(local, baseline, defs, db, local_rng, 0)
 	_par_local_hash = local.state_hash()
@@ -1054,8 +1080,9 @@ func _step_handshake() -> void:
 			"the turn is still open -- nobody has submitted yet")
 
 		_hs_submitted = true
-		_t.ok(sync.stage_order(Order.make_set_tax(sync.slot, 0.42)),
-			"the client stages a tax order")
+		_t.ok(sync.stage_order(Order.make_set_build_mode(
+				sync.slot, _homeworld_of(sync.galaxy, sync.slot), 1)),
+			"the client stages a build-mode order")
 		_t.ok(sync.submit_turn(), "the client submits its turn")
 		_t.eq(sync.status_text(), TurnSyncClient.WAITING_TEXT,
 			"the client waits for the other players")
@@ -1073,7 +1100,8 @@ func _step_handshake() -> void:
 	_t.ok(not _hs_desync, "the resolution passed the hash check")
 	_t.eq(sync.galaxy.turn, 1, "the client advanced exactly one turn")
 	_t.eq(sync.awaiting, false, "the client is unlocked and free to act again")
-	_t.near(sync.galaxy.faction(0).tax_rate, 0.42, 0.0001,
+	_t.eq(sync.galaxy.planet(_homeworld_of(sync.galaxy, sync.slot)).build_mode,
+		int(Enums.BuildMode.PER_TURN),
 		"the server applied the order the client submitted")
 	_t.eq(sync.galaxy.state_hash(), harness.server_sync.galaxy.state_hash(),
 		"client and server agree on the state hash after the turn")
@@ -1092,9 +1120,10 @@ func _step_parity() -> void:
 		_par_submitted = true
 		_t.begin("network equals local")
 		_par_client.slot = _par_net.slot_of(_par_client_net.unique_id())
-		_par_client.stage_order(Order.make_set_tax(0, 0.42))
 		_par_client.stage_order(
-			Order.make_set_research(0, PackedFloat64Array([0.25, 0.25, 0.25, 0.25])))
+			Order.make_set_build_mode(0, _homeworld_of(_par_client.galaxy, 0), 1))
+		_par_client.stage_order(Order.make_recruit_troop(
+			0, _homeworld_of(_par_client.galaxy, 0)))
 		_t.ok(_par_client.submit_turn(), "the parity client submitted")
 		return
 	# Order matters: once `resolve_if_ready()` has run it clears the server's pending

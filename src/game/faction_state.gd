@@ -57,6 +57,14 @@ var colonies_taken: int = 0
 var colonies_lost: int = 0
 var colonies_founded: int = 0
 
+## Highest population milestone this empire has unlocked hulls for.
+##
+## Stored rather than recomputed from current population every turn, because a faction that
+## loses a colony and then takes another back would otherwise re-unlock its entire fleet
+## each time it crossed a threshold it had already paid for. `-1` means "nothing past the
+## starting roster", which is what generation leaves it at.
+var tech_tier: int = -1
+
 ## AI scratch space: what the faction is currently focused on. Not gameplay-affecting.
 var ai_target_system: int = -1
 var ai_mood: float = 0.5
@@ -175,6 +183,7 @@ func to_dict() -> Dictionary:
 		"colonies_taken": colonies_taken,
 		"colonies_lost": colonies_lost,
 		"colonies_founded": colonies_founded,
+		"tech_tier": tech_tier,
 		"ai_target_system": ai_target_system,
 		"ai_mood": ai_mood,
 	}
@@ -208,6 +217,10 @@ func from_dict(data: Dictionary) -> bool:
 	colonies_taken = int(data.get("colonies_taken", 0))
 	colonies_lost = int(data.get("colonies_lost", 0))
 	colonies_founded = int(data.get("colonies_founded", 0))
+	# Absent from saves written before the population ladder existed, where the whole
+	# progression was point-driven instead. -1 means "re-evaluate from scratch this turn",
+	# which is exactly right for a save that carries no record of what was unlocked.
+	tech_tier = int(data.get("tech_tier", -1))
 	ai_target_system = int(data.get("ai_target_system", -1))
 	ai_mood = float(data.get("ai_mood", 0.5))
 	research_allocation.resize(4)
@@ -245,11 +258,11 @@ static func _coerce_floats(raw: Array, defaults: Array) -> PackedFloat64Array:
 func fingerprint() -> String:
 	var systems_sorted := PackedInt32Array(systems)
 	systems_sorted.sort()
-	return "%d:%s:%d:%.4f:%s:%.3f:%.2f:%.2f:%.2f:%s:%s:%s:%s:%s" % [
+	return "%d:%s:%d:%.4f:%s:%.3f:%.2f:%.2f:%.2f:%s:%s:%s:%s:%s:%d" % [
 		id, name, kind, tax_rate, str(Array(research_allocation)), treasury,
 		metals, rare_elements, energy, _sorted_keys(researched),
 		_sorted_keys(unlocked_ships), _sorted_keys(unlocked_buildings),
-		str(systems_sorted), str(defeated),
+		str(systems_sorted), str(defeated), tech_tier,
 	]
 
 

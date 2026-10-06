@@ -71,90 +71,205 @@ func _test_planet_types(defs: Node) -> void:
 func _test_ship_hulls(defs: Node) -> void:
 	_t.begin("ship hulls")
 	var table := defs.get("ship_hulls") as Dictionary
-	_t.eq(table.size(), 6, "all six hull classes defined")
+	_t.eq(table.size(), 14, "the Phase 8 roster defines fourteen hulls")
 
 	var expected := [
-		&"scout", &"colony_ship", &"transport", &"corvette", &"cruiser", &"dreadnought",
+		&"colony_ship", &"exploration_ship", &"troop_transport", &"cargo_transport",
+		&"corvette", &"frigate", &"destroyer", &"cruiser", &"battlecruiser",
+		&"battleship", &"battlestar", &"dreadnought", &"titan", &"leviathan",
 	]
-	for i in expected.size():
-		var id: StringName = expected[i]
+	for id: StringName in expected:
 		var d := defs.call("ship_hull", id) as Resource
 		_t.ok(d != null, "hull '%s' loads" % id)
 		if d == null:
 			continue
 		_t.ok(d is ShipHullData, "'%s' is a ShipHullData" % id)
-		_t.eq(d.get("role"), i, "'%s' maps to the matching ShipRole" % id)
 		_t.ok(d.get("hull_points") > 0.0, "'%s' has hull points" % id)
 
-	# Hull strength must increase monotonically through the tech ladder, and speed
-	# must decrease. This is the balance guarantee the fleet AI relies on.
-	var prev_hull := 0.0
-	var prev_cost := 0.0
-	for id: StringName in expected:
+	# The exact figures the design document states. Asserted against literals rather than
+	# against each other: a rebalanced `.tres` that drifted from the specification would
+	# still be internally consistent, and "the costs increase" would not catch it.
+	var roster := {
+		&"colony_ship": [0.0, 0.0, 200.0],
+		&"exploration_ship": [1.0, 1.0, 100.0],
+		&"corvette": [1.0, 2.0, 75.0],
+		&"frigate": [2.0, 1.0, 100.0],
+		&"destroyer": [3.0, 2.0, 175.0],
+		&"cruiser": [5.0, 4.0, 300.0],
+		&"battlecruiser": [7.0, 4.0, 450.0],
+		&"battleship": [8.0, 7.0, 600.0],
+		&"battlestar": [10.0, 9.0, 850.0],
+		&"dreadnought": [14.0, 10.0, 1100.0],
+		&"titan": [18.0, 15.0, 1600.0],
+		&"leviathan": [25.0, 20.0, 2500.0],
+	}
+	for id: StringName in roster:
 		var d := defs.call("ship_hull", id) as Resource
-		var hull: float = d.get("hull_points")
+		if d == null:
+			continue
+		var row: Array = roster[id]
+		_t.near(d.get("attack"), float(row[0]), 0.001, "%s attack matches the spec" % id)
+		_t.near(d.get("defense"), float(row[1]), 0.001, "%s defense matches the spec" % id)
+		_t.near(d.get("cost_metals"), float(row[2]), 0.001, "%s metal cost matches the spec" % id)
+
+	# Cost must increase monotonically through the combat ladder. Defence deliberately does
+	# *not* have to: the spec gives the Corvette 2 defence and the Frigate 1, so a cheaper
+	# escort is genuinely the softer of the two, and asserting that defence rises with cost
+	# would be asserting a rule the design document contradicts. What must hold is that a
+	# ladder rung never costs less than the one below it -- the property the population
+	# ladder's ordering and the AI's build choices assume -- and that the two ends of the
+	# ladder are the ends of the roster.
+	var prev_cost := 0.0
+	var ladder: Array[StringName] = [
+		&"corvette", &"frigate", &"destroyer", &"cruiser", &"battlecruiser",
+		&"battleship", &"battlestar", &"dreadnought", &"titan", &"leviathan",
+	]
+	for id in ladder:
+		var d := defs.call("ship_hull", id) as Resource
 		var cost: float = d.get("cost_metals")
-		_t.ok(hull >= prev_hull, "'%s' is at least as tough as the hull below it" % id)
 		_t.ok(cost >= prev_cost, "'%s' costs at least as much as the hull below it" % id)
-		prev_hull = hull
 		prev_cost = cost
 
+	var strongest := 0.0
+	for id in ladder:
+		strongest = maxf(strongest, float((defs.call("ship_hull", id) as Resource).get("defense")))
+	_t.near((defs.call("ship_hull", &"leviathan") as Resource).get("defense"),
+		strongest, 0.001, "the Leviathan is the best-defended hull")
+
+	# The attack figures are strictly increasing along the ladder, which is the claim the
+	# whole roster exists to make: every rung is a real upgrade over the one below it.
+	var prev_attack := 0.0
+	for id in ladder:
+		var d := defs.call("ship_hull", id) as Resource
+		var attack: float = d.get("attack")
+		_t.ok(attack > prev_attack, "'%s' hits harder than the hull below it" % id)
+		prev_attack = attack
+
 	# Role invariants from the spec.
-	var scout := defs.call("ship_hull", &"scout") as Resource
-	_t.ok(scout.get("sensor_range") > 5.0, "scouts have the best sensors")
 	var colony := defs.call("ship_hull", &"colony_ship") as Resource
 	_t.ok(colony.get("colony_kit"), "the colony hull carries a colony kit")
+	_t.near(colony.get("civilian_capacity"), 5.0, 0.001,
+		"the colony hull carries five civilians")
+	var scout := defs.call("ship_hull", &"exploration_ship") as Resource
+	_t.near(scout.get("survey_rate"), 0.25, 0.001,
+		"an exploration hull surveys at 25% per turn")
+	_t.ok(scout.get("sensor_range") > 5.0, "exploration ships have the best sensors")
+	var trooper := defs.call("ship_hull", &"troop_transport") as Resource
+	_t.near(trooper.get("troop_capacity"), 4.0, 0.001,
+		"a troop transport carries four troops")
+	var freighter := defs.call("ship_hull", &"cargo_transport") as Resource
+	_t.ok(freighter.get("cargo_capacity") > 0.0, "a cargo transport carries cargo")
 	var dread := defs.call("ship_hull", &"dreadnought") as Resource
 	_t.ok(dread.get("bombardment") > 0.0, "dreadnoughts can bombard planets")
-	var transport := defs.call("ship_hull", &"transport") as Resource
-	_t.ok(transport.get("troop_capacity") > 0.0, "transports carry troops")
+
+	# Only an exploration hull surveys. A survey rate on a freighter would mean exploring was
+	# a cargo-hauling side effect.
+	for id: StringName in expected:
+		var d2 := defs.call("ship_hull", id) as Resource
+		if d2 == null:
+			continue
+		if float(d2.get("survey_rate")) > 0.0:
+			_t.eq(int(d2.get("role")), int(Enums.ShipRole.EXPLORATION),
+				"'%s' surveys, so it is an exploration hull" % id)
+
+	# The combat / support partition the travel modal renders. Asserted through the enum
+	# helpers the modal itself calls, so a hull that moved between the two lists is caught
+	# here rather than appearing as a transport in the combat roster.
+	_t.ok(Enums.role_is_combat(int(Enums.ShipRole.CRUISER)),
+		"a cruiser is a combat hull")
+	_t.ok(Enums.role_is_support(int(Enums.ShipRole.CARGO)),
+		"a cargo transport is a support hull")
 
 	# Scouts must out-run capital ships; the movement phase depends on it.
 	_t.ok(
-		ShipHullData.role_speed_cap(0) > ShipHullData.role_speed_cap(5),
+		ShipHullData.role_speed_cap(int(Enums.ShipRole.SCOUT))
+			> ShipHullData.role_speed_cap(int(Enums.ShipRole.DREADNOUGHT)),
 		"the scout speed cap exceeds the dreadnought's")
 
 
 func _test_buildings(defs: Node) -> void:
 	_t.begin("buildings")
 	var table := defs.get("buildings") as Dictionary
-	_t.eq(table.size(), 9, "nine structures defined")
+	_t.eq(table.size(), 12, "the Phase 8 roster defines twelve structures")
 
 	var expected := [
-		&"mine", &"farm", &"factory", &"shield_generator", &"missile_battery",
-		&"garrison", &"shipyard", &"orbital_station", &"terraformer",
+		&"farm", &"mine", &"city_complex", &"granary", &"colony_pad", &"space_port",
+		&"energy_storage", &"barracks", &"planetary_defense",
+		&"solar", &"coal", &"nuclear",
 	]
-	for i in expected.size():
-		var id: StringName = expected[i]
+	for id: StringName in expected:
 		var d := defs.call("building", id) as Resource
 		_t.ok(d != null, "building '%s' loads" % id)
 		if d == null:
 			continue
 		_t.ok(d is BuildingData, "'%s' is a BuildingData" % id)
-		_t.eq(d.get("kind"), i, "'%s' maps to the matching Kind" % id)
 		_t.ok(d.get("build_turns") >= 1, "'%s' takes at least one turn to build" % id)
-		_t.ok(d.get("cost_metals") > 0.0, "'%s' costs metals" % id)
 
-	# The terraformer is a one-per-world structure; nothing else is capped this way.
-	var terraformer := defs.call("building", &"terraformer") as Resource
-	_t.eq(terraformer.get("max_per_colony"), 1, "only one terraformer per world")
-	_t.ok(not terraformer.call("can_add", 1), "a second terraformer is refused")
-	_t.ok(terraformer.call("can_add", 0), "a first terraformer is allowed")
+	# The exact figures the design document states. Literals, not a comparison between
+	# entries: a roster that drifted from the spec while staying internally ordered would
+	# pass any monotonicity check.
+	var farm := defs.call("building", &"farm") as Resource
+	_t.near(farm.get("cost_metals"), 5.0, 0.001, "a farm costs 5 metal")
+	_t.near(farm.get("yield_amount"), 5.0, 0.001, "a farm makes 5 food per turn")
+	_t.eq(int(farm.get("pop_required")), 1, "a farm requires 1 pop")
 
-	# Every buildable structure now declares a per-colony cap, so that a colony's
-	# output is bounded and the treasury floor is reachable through overbuilding.
-	var mine := defs.call("building", &"mine") as Resource
-	var mine_cap := int(mine.get("max_per_colony"))
-	_t.ok(mine_cap > 0, "mines declare a per-colony cap", "cap=%d" % mine_cap)
-	_t.ok(mine.call("can_add", mine_cap - 1), "a mine below the cap is allowed")
-	_t.ok(not mine.call("can_add", mine_cap), "a mine at the cap is refused")
+	var mine2 := defs.call("building", &"mine") as Resource
+	_t.near(mine2.get("cost_metals"), 5.0, 0.001, "a mine costs 5 metal")
+	_t.near(mine2.get("metal_per_turn"), 5.0, 0.001, "a mine makes 5 metal per turn")
+	_t.eq(int(mine2.get("pop_required")), 1, "a mine requires 1 pop")
 
-	var uncapped := 0
-	for id in defs.buildings:
-		var def: Resource = defs.call("building", id) as Resource
-		if int(def.get("max_per_colony")) == 0:
-			uncapped += 1
-	_t.eq(uncapped, 0, "no building is left uncapped")
+	var city := defs.call("building", &"city_complex") as Resource
+	_t.near(city.get("cost_metals"), 100.0, 0.001, "a City Complex costs 100 metal")
+	_t.near(city.get("power_required"), 10.0, 0.001, "a City Complex needs 10 power")
+	_t.eq(int(city.get("pop_housed")), 20, "a City Complex houses 20 pop")
+
+	var granary := defs.call("building", &"granary") as Resource
+	_t.near(granary.get("cost_metals"), 20.0, 0.001, "a granary costs 20 metal")
+	_t.near(granary.get("food_store"), 1000.0, 0.001, "a granary stores 1000 food")
+
+	var pad := defs.call("building", &"colony_pad") as Resource
+	_t.near(pad.get("cost_metals"), 0.0, 0.001, "a landed Colony Ship is free")
+	_t.eq(int(pad.get("max_per_colony")), 1, "one Colony Ship per world")
+	_t.near(pad.get("yield_amount"), 5.0, 0.001, "a Colony Ship makes 5 food per turn")
+	_t.near(pad.get("metal_per_turn"), 5.0, 0.001, "a Colony Ship makes 5 metal per turn")
+	_t.eq(int(pad.get("pop_housed")), 5, "a Colony Ship houses 5 pop")
+
+	var port := defs.call("building", &"space_port") as Resource
+	_t.near(port.get("cost_metals"), 100.0, 0.001, "a Space Port costs 100 metal")
+
+	var storage := defs.call("building", &"energy_storage") as Resource
+	_t.near(storage.get("cost_metals"), 50.0, 0.001, "Energy Storage costs 50 metal")
+	_t.near(storage.get("energy_store"), 1000.0, 0.001, "Energy Storage holds 1000 energy")
+
+	var barracks := defs.call("building", &"barracks") as Resource
+	_t.near(barracks.get("cost_metals"), 100.0, 0.001, "Barracks cost 100 metal")
+
+	# Power stations, exactly as specified.
+	var stations := {&"solar": [10.0, 1.0], &"coal": [50.0, 8.0], &"nuclear": [200.0, 40.0]}
+	for id: StringName in stations:
+		var d := defs.call("building", id) as Resource
+		var row: Array = stations[id]
+		_t.near(d.get("cost_metals"), float(row[0]), 0.001, "%s costs the spec's metal" % id)
+		_t.near(d.get("yield_amount"), float(row[1]), 0.001, "%s makes the spec's power" % id)
+		_t.eq(int(d.get("kind")), int(BuildingData.Kind.POWER), "%s is a power station" % id)
+
+	# Power draw is a property of the kind, not a per-structure guess: only a City Complex
+	# draws power as of this roster, and that is what makes "running out of power blocks new
+	# structures" a checkable claim rather than a per-file decision.
+	var drawing: Array[StringName] = []
+	for id: StringName in table:
+		var d2 := defs.call("building", id) as Resource
+		if d2.draws_power():
+			drawing.append(id)
+	_t.eq(drawing.size(), 1, "exactly one structure in the roster draws power")
+	if drawing.size() == 1:
+		_t.eq(drawing[0], &"city_complex", "and it is the City Complex")
+
+	# The landed Colony Ship is the only structure a colony cannot build for itself, so it is
+	# the only one with a hard cap of one.
+	_t.ok(not pad.call("can_add", 1), "a second Colony Ship is refused")
+	_t.ok(pad.call("can_add", 0), "a first Colony Ship is allowed")
+	_t.ok(port.call("can_add", 99), "Space Ports are not capped per colony")
 
 
 func _test_tech_tree(defs: Node) -> void:

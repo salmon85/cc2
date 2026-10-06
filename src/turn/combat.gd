@@ -260,6 +260,71 @@ static func resolve_pair(
 		engagement.attacker_losses, engagement.defender_losses]
 
 
+## Step 2 of the orbital sequence: knock the planetary batteries down.
+##
+## Runs for every world a hostile fleet now holds the sky over. The precondition is orbital
+## supremacy, and it is checked here rather than assumed: a planet with a defending fleet
+## still in orbit is *not* suppressed, because a colony whose sky is contested cannot have
+## its guns destroyed by ships that are still being shot at.
+##
+## Firepower is the total bombardment the winning fleets bring to bear, scaled by the
+## attacker's research bonus, divided among the planets they are actually over — a fleet
+## parked over one world does not flatten batteries on the far side of the map.
+##
+## Returns news lines, one per world whose batteries were touched.
+static func suppress_defenses(
+	galaxy: GalaxyState, rng: RandomNumberGenerator, db: Node, defs: Node
+) -> PackedStringArray:
+	var lines := PackedStringArray()
+	var buildings := defs.get("buildings") as Dictionary
+
+	var indices := PackedInt32Array()
+	for p in galaxy.planets:
+		indices.append(p.index)
+	indices.sort()
+
+	for planet_index in indices:
+		var planet: PlanetState = galaxy.planet(planet_index)
+		if planet == null or not planet.colonized:
+			continue
+		if InvasionStage.planetary_defenses(planet) <= 0:
+			continue
+
+		# Orbital supremacy, checked rather than assumed: a fleet belonging to the colony's
+		# owner, still parked in its orbit, is shooting back. A colony whose sky is contested
+		# is not suppressed no matter how much firepower is aimed at it.
+		var defended := false
+		var attackers: Array[FleetState] = []
+		var firepower := 0.0
+		for f in MovementStage.fleets_in_system(galaxy, planet_index, -1):
+			if f.owner == planet.owner:
+				defended = true
+				continue
+			attackers.append(f)
+			var faction: FactionState = galaxy.faction(f.owner)
+			var bonus := 1.0
+			if faction != null:
+				bonus += faction.tech_effect(&"bombardment_bonus")
+			firepower += f.bombardment_power() * bonus
+		if attackers.is_empty() or defended:
+			continue
+
+		var attacker: FactionState = galaxy.faction(attackers[0].owner)
+		var defender: FactionState = galaxy.faction(planet.owner)
+		if attacker == null:
+			continue
+		var destroyed := InvasionStage.suppress_defenses(
+			planet, buildings, firepower, rng)
+		if destroyed > 0:
+			var left := InvasionStage.planetary_defenses(planet)
+			lines.append(
+				"%s suppressed the planetary defenses of planet %d (%d destroyed, %d left)" % [
+					attacker.name, planet_index, destroyed, left])
+		if defender != null and InvasionStage.planetary_defenses(planet) == 0:
+			lines.append("Planet %d is defenceless: its batteries are gone." % planet_index)
+	return lines
+
+
 ## Break contact: the fleet stops contesting the system and loses its move.
 static func _retreat(fleet: FleetState) -> void:
 	fleet.morale = minf(fleet.morale, GameDB.FLEET_MORALE_BREAK_THRESHOLD)

@@ -385,6 +385,11 @@ func queue_move(target_planet: int) -> bool:
 
 ## Queue a structure for the selected colony. `building_id` must be a known building the
 ## faction has unlocked and the colony is allowed to add.
+##
+## The construction cost is paid from the *colony's* stored metal rather than the imperial
+## treasury. That is what makes the clickable progress bar meaningful: the metal boosting a
+## project and the metal a mine produces are the same pool, so a colony that has mined hard
+## can finish a City Complex now instead of in three turns.
 func queue_build_structure(building_id: StringName) -> bool:
 	var planet := _selected_owned_planet()
 	if planet == null:
@@ -393,7 +398,7 @@ func queue_build_structure(building_id: StringName) -> bool:
 	if me == null:
 		return false
 	if not me.unlocked_buildings.has(building_id):
-		action_rejected.emit("you have not researched that structure")
+		action_rejected.emit("you cannot build that structure yet")
 		return false
 	if defs == null:
 		action_rejected.emit("definitions are not loaded")
@@ -405,22 +410,38 @@ func queue_build_structure(building_id: StringName) -> bool:
 	if not def.can_add(planet.count(building_id)):
 		action_rejected.emit("this colony is already at its limit")
 		return false
-	if not can_afford(def):
-		action_rejected.emit("insufficient materials")
+	if planet.reserve_metals < float(def.get("cost_metals")):
+		action_rejected.emit("this colony does not have enough stored metal")
+		return false
+	# Power is the only resource that can block a build rather than merely price it, and it
+	# blocks *new* structures only. `can_supply_power` is the same test the resolver applies,
+	# so the button and the order cannot disagree.
+	if def.draws_power():
+		var needed := float(def.get("power_required"))
+		if not planet.can_supply_power(needed):
+			action_rejected.emit("this colony cannot supply the power that structure needs")
+			return false
+	# Exactly one building per turn per planet.
+	if not planet.building_queue.is_empty():
+		action_rejected.emit("this colony is already building something")
 		return false
 
 	var order := Order.make_build_structure(player_id, planet.index, building_id, 1)
 	if queue.submit(order):
-		# Debit now so the slider/selector shows the true remaining budget; the
+		# Debit immediately so the colony's readout shows the true remaining store; the
 		# resolver will not charge again.
-		_charge(def)
+		planet.reserve_metals -= float(def.get("cost_metals"))
 		state_changed.emit()
 		return true
 	action_rejected.emit("the order was refused")
 	return false
 
 
-## Queue a ship for the selected colony's shipyard.
+## Queue a hull for the selected colony's Space Port.
+##
+## Delegates the legality question to `TurnResolver.can_build_ship` rather than restating
+## it. The rules are the Space Port requirement, the `PER_TURN` production floor and the
+## power check, and a second copy of them in the client is a second copy that can drift.
 func queue_build_ship(hull_id: StringName) -> bool:
 	var planet := _selected_owned_planet()
 	if planet == null:
@@ -429,10 +450,7 @@ func queue_build_ship(hull_id: StringName) -> bool:
 	if me == null:
 		return false
 	if not me.unlocked_ships.has(hull_id):
-		action_rejected.emit("you have not researched that hull")
-		return false
-	if planet.shipyard_progress < 1.0:
-		action_rejected.emit("this colony has no operational shipyard")
+		action_rejected.emit("that hull is not in your fleet roster yet")
 		return false
 	if defs == null:
 		action_rejected.emit("definitions are not loaded")
@@ -441,20 +459,133 @@ func queue_build_ship(hull_id: StringName) -> bool:
 	if hull == null:
 		action_rejected.emit("unknown hull")
 		return false
-	if not can_afford_hull(hull):
-		action_rejected.emit("insufficient materials")
+	if planet.count(&"space_port") <= 0:
+		action_rejected.emit("this colony has no Space Port")
+		return false
+	if not TurnResolver.can_build_ship(planet, hull, me, db):
+		action_rejected.emit("this colony cannot start that hull")
 		return false
 
 	var order := Order.make_build_ship(player_id, planet.index, hull_id)
 	if queue.submit(order):
-		_charge_hull(hull)
 		state_changed.emit()
 		return true
 	action_rejected.emit("the order was refused")
 	return false
 
 
+## Convert one civilian on the selected colony into one troop.
+##
+## Costs a pop and needs a Barracks, and it is the only route to troops: the barracks is not
+## a production building that yields troops, it is a converter. That is what the design
+## document specifies, and it is what makes population a military resource as well as an
+## economic one.
+func queue_recruit_troop() -> bool:
+	var planet := _selected_owned_planet()
+	if planet == null:
+		return false
+	if planet.count(&"barracks") <= 0:
+		action_rejected.emit("this colony has no Barracks")
+		return false
+	if planet.population < 1.0:
+		action_rejected.emit("no civilians left to convert")
+		return false
+	if queue.submit(Order.make_recruit_troop(player_id, planet.index)):
+		state_changed.emit()
+		return true
+	action_rejected.emit("the order was refused")
+	return false
+
+
+## Spend `metals` of the selected colony's stored metal against its construction.
+##
+## The clickable progress bar's whole mechanic. Bounded by what the colony actually holds, so
+## pressing the bar with a small store still does the useful thing rather than being refused.
+func boost_construction(metals: float) -> float:
+	var planet := _selected_owned_planet()
+	if planet == null:
+		return 0.0
+	if planet.building_queue.is_empty():
+		action_rejected.emit("nothing is under construction")
+		return 0.0
+	var spent := ColonySim.boost_construction(planet, metals)
+	if spent <= 0.0:
+		action_rejected.emit("no stored metal to spend")
+		return 0.0
+	state_changed.emit()
+	return spent
+
+
+## Choose single-project or per-turn ship production on the selected colony.
+func set_build_mode(planet_index: int, mode: int) -> bool:
+	var planet: PlanetState = null
+	if galaxy != null:
+		planet = galaxy.planet(planet_index) as PlanetState
+	if planet == null or planet.owner != player_id:
+		action_rejected.emit("select one of your colonies first")
+		return false
+	planet.build_mode = mode
+	if queue.submit(Order.make_set_build_mode(player_id, planet_index, mode)):
+		state_changed.emit()
+		return true
+	return false
+
+
+## Load `amount` of `kind` from the selected fleet's world into its holds.
+func load_cargo(kind: StringName, amount: float) -> float:
+	var f := fleet()
+	if f == null:
+		action_rejected.emit("select a fleet first")
+		return 0.0
+	var planet := _fleet_planet()
+	if planet == null:
+		return 0.0
+	var moved := TransferStage.load(planet, f, kind, amount)
+	if moved <= 0.0:
+		action_rejected.emit("nothing to load")
+		return 0.0
+	state_changed.emit()
+	return moved
+
+
+## Unload `amount` of `kind` from the selected fleet onto the world it is over.
+func unload_cargo(kind: StringName, amount: float) -> float:
+	var f := fleet()
+	if f == null:
+		action_rejected.emit("select a fleet first")
+		return 0.0
+	var planet := _fleet_planet()
+	if planet == null:
+		return 0.0
+	var moved := TransferStage.unload(planet, f, kind, amount)
+	if moved <= 0.0:
+		action_rejected.emit("nothing to unload")
+		return 0.0
+	state_changed.emit()
+	return moved
+
+
+## The world the selected fleet is parked over, or null.
+##
+## Cargo moves between a fleet and the surface, so it needs the world and not the fleet. A
+## fleet under way has no world to move cargo with, which is the same reason it cannot survey.
+func _fleet_planet() -> PlanetState:
+	var f := fleet()
+	if f == null or galaxy == null or f.destination >= 0 or f.system < 0:
+		action_rejected.emit("that fleet is not parked over a world")
+		return null
+	var planet: PlanetState = galaxy.planet(f.system)
+	if planet == null or planet.owner != player_id or not planet.colonized:
+		action_rejected.emit("that fleet is not over one of your colonies")
+		return null
+	return planet
+
+
 ## Set the imperial tax rate, 0..1.
+##
+## Retained for wire compatibility only. Phase 8 removed the tax slider and the tax UI, and
+## `TurnResolver` ignores the resulting order, so this now stages an order that does
+## nothing. Old tests and old clients call it; nothing in the game does.
 func set_tax_rate(rate: float) -> bool:
 	var me := player()
 	if me == null:
@@ -466,8 +597,10 @@ func set_tax_rate(rate: float) -> bool:
 	return false
 
 
-## Set the research split. The four weights are normalised before being submitted so the
-## sliders can be dragged independently and still describe a real budget.
+## Set the research split.
+##
+## Inert as of Phase 8, for the same reason as `set_tax_rate`: research is population-driven
+## and the allocation sliders are gone. Kept so an old client does not fail to parse.
 func set_research_allocation(weights: PackedFloat64Array) -> bool:
 	var me := player()
 	if me == null:
@@ -482,11 +615,44 @@ func set_research_allocation(weights: PackedFloat64Array) -> bool:
 	for w in weights:
 		normalised.append(maxf(0.0, w) / total)
 	if queue.submit(Order.make_set_research(player_id, normalised)):
-		# Mirror onto the faction immediately so the sliders read back correctly.
 		for i in 4:
 			me.research_allocation[i] = normalised[i]
 		state_changed.emit()
 		return true
+	return false
+
+
+## Send a chosen set of ships from their world to `target_planet`.
+##
+## `ships` is a `{hull_id: count}` manifest; an empty one means the whole fleet. This is what
+## the travel modal's OK button submits, and it is a `TRAVEL` order rather than a `MOVE_FLEET`
+## one so that the partial-manifest case travels on the wire as what it is.
+func queue_travel(target_planet: int, ships: Dictionary = {}) -> bool:
+	var f := fleet()
+	if f == null:
+		action_rejected.emit("select a fleet first")
+		return false
+	if galaxy == null or galaxy.planet(target_planet) == null:
+		action_rejected.emit("no such destination")
+		return false
+	if not f.active:
+		action_rejected.emit("that fleet has been destroyed")
+		return false
+	if f.destination >= 0:
+		action_rejected.emit("that fleet is already in transit")
+		return false
+	if target_planet == f.system:
+		action_rejected.emit("that fleet is already there")
+		return false
+
+	var order := Order.make_travel(player_id, f.id, target_planet, ships)
+	if queue.submit(order):
+		# Mirror onto the live galaxy so the map draws the transit line immediately rather
+		# than only after the turn resolves.
+		MovementStage.issue_move(galaxy, f.id, player_id, target_planet)
+		state_changed.emit()
+		return true
+	action_rejected.emit("the order was refused")
 	return false
 
 
@@ -632,23 +798,12 @@ func _selected_owned_planet() -> PlanetState:
 	return planet
 
 
-## Whether the faction can currently pay for a structure definition.
-func can_afford(def: Resource) -> bool:
-	var me := player()
-	if me == null:
-		return false
-	return me.metals >= def.cost_metals \
-		and me.rare_elements >= def.cost_rare \
-		and me.energy >= def.cost_energy
-
-
-func _charge(def: Resource) -> void:
-	var me := player()
-	if me == null:
-		return
-	_charge_amounts(def.cost_metals, def.cost_rare, def.cost_energy)
-
-
+## Whether the faction's imperial stores could pay for a hull, ignoring where it would be
+## built.
+##
+## Retained for the AI and for callers that only want the "is this hull affordable at all"
+## question. The build path does *not* use it: Phase 8 builds out of a colony's own stored
+## metal, and an empire with a full treasury and an empty colony cannot lay a keel.
 func can_afford_hull(hull: Resource) -> bool:
 	var me := player()
 	if me == null:
@@ -656,21 +811,3 @@ func can_afford_hull(hull: Resource) -> bool:
 	return me.metals >= hull.cost_metals \
 		and me.rare_elements >= hull.cost_rare \
 		and me.energy >= hull.cost_energy
-
-
-func _charge_hull(hull: Resource) -> void:
-	var me := player()
-	if me == null:
-		return
-	_charge_amounts(hull.cost_metals, hull.cost_rare, hull.cost_energy)
-
-
-## Debit a cost and clamp. The clamp keeps a floating-point overshoot from leaving the
-## treasury at -0.0000001, which the HUD would otherwise render as a negative balance.
-func _charge_amounts(metals: float, rare: float, energy: float) -> void:
-	var me := player()
-	if me == null:
-		return
-	me.metals = maxf(0.0, me.metals - metals)
-	me.rare_elements = maxf(0.0, me.rare_elements - rare)
-	me.energy = maxf(0.0, me.energy - energy)

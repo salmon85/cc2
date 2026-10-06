@@ -1,35 +1,41 @@
 extends PanelContainer
 class_name MacroPanel
-## Empire-level controls: imperial tax, research allocation, and the construction queue.
+## Empire-level controls: the colony and structure selectors, the construction progress bar,
+## and the colony warnings readout.
 ##
-## Every control writes through `SessionController`, which turns it into a real
-## `SET_TAX` / `SET_RESEARCH` / `BUILD_STRUCTURE` order. Nothing here edits the galaxy
-## directly, so what the sliders show is exactly what the Phase 4 resolver will execute.
+## Two things are gone as of Phase 8. The imperial tax slider is gone because the income it
+## controlled no longer exists. The four research allocation sliders are gone because research
+## is passive: the empire's civilian population drives it and there is nothing to allocate.
+## Both are retained here as accessors returning null so a caller that still asks gets a
+## definite answer rather than a crash, and the GUI suite asserts on those nulls -- the
+## absence is the thing under test, so it is asserted as an absence.
 
 ## Emitted when the player stages a structure, with the building id.
 signal build_requested(building_id: StringName)
 
+## Emitted when the player clicks the construction progress bar.
+signal construction_boosted(metals: float)
+
 var _controller: SessionController = null
-
-var _tax_slider: HSlider = null
-var _tax_value: Label = null
-var _tax_income: Label = null
-
-var _research_sliders: Array[HSlider] = []
-var _research_values: Array[Label] = []
 
 var _build_selector: OptionButton = null
 var _build_info: Label = null
 var _colony_selector: OptionButton = null
 
-const RESEARCH_NAMES: Array[String] = ["ENG", "PROP", "BIOL", "PSYC"]
-const MAX_RESEARCH := 100
+## The interactive construction progress bar. Clicking it spends stored metal against the
+## project in progress, which is the mechanic the design document asks for.
+var _build_bar: ProgressBar = null
+var _build_mode_selector: OptionButton = null
 
-## Building ids in build-queue order, grouped the way a player thinks about them rather
-## than alphabetically: extraction first, then industry, then defence, then support.
+## Standing warnings for the selected colony, rendered as an amber block.
+var _warnings: Label = null
+
+## Building ids in build-queue order, grouped the way a player thinks about them: extraction
+## first, then housing and storage, then power, then industry, then defence and lift.
 const BUILD_ORDER: Array[StringName] = [
-	&"farm", &"mine", &"factory", &"garrison", &"shield_generator",
-	&"missile_battery", &"shipyard", &"orbital_station", &"terraformer",
+	&"farm", &"mine", &"granary", &"city_complex", &"colony_pad",
+	&"energy_storage", &"solar", &"coal", &"nuclear",
+	&"space_port", &"barracks", &"planetary_defense",
 ]
 
 ## Set while rebuilding the selector so its `item_selected` does not stage a phantom order.
@@ -48,34 +54,7 @@ func _build() -> void:
 	col.add_theme_constant_override("separation", 6)
 	add_child(col)
 
-	_build_tax(col)
-	col.add_child(_separator())
-	_build_research(col)
-	col.add_child(_separator())
 	_build_construction(col)
-
-	# The "STAGED ORDERS" readout used to sit here, in a scrolling label that filled the
-	# slack below. It is gone: it was the only control in the UI whose height was driven
-	# by its own contents, so staging an order made this panel taller, which grew the
-	# `SIZE_EXPAND_FILL` galaxy map beside it and re-framed a view the player never
-	# touched. The slack now goes to the sections above, so what is left fills the column
-	# instead of a list of orders the player can already read in the session log.
-	_build_fleet_order_note(col)
-
-
-## Takes the space the staged-orders readout used to occupy.
-##
-## Construction is the section that had the least room for its own controls, and it is the
-## one a player reads most often once they are managing an empire rather than exploring --
-## so the freed space is given to it rather than left as a gap.
-func _build_fleet_order_note(col: Control) -> void:
-	var spacer := Control.new()
-	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	spacer.custom_minimum_size = Vector2(0, 12)
-	col.add_child(spacer)
-
-	_build_info.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_build_info.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 
 
 func _heading(text: String) -> Label:
@@ -86,74 +65,14 @@ func _heading(text: String) -> Label:
 	return l
 
 
-func _separator() -> HSeparator:
-	return HSeparator.new()
-
-
-func _build_tax(col: Control) -> void:
-	col.add_child(_heading("IMPERIAL TAX"))
-	_tax_slider = HSlider.new()
-	_tax_slider.min_value = 0.0
-	_tax_slider.max_value = 1.0
-	_tax_slider.step = 0.01
-	_tax_slider.value = 0.35
-	_tax_slider.custom_minimum_size = Vector2(0, 18)
-	_tax_slider.focus_mode = Control.FOCUS_NONE
-	_tax_slider.value_changed.connect(_on_tax_changed)
-	col.add_child(_tax_slider)
-
-	_tax_value = Label.new()
-	_tax_value.add_theme_color_override("font_color", CC2Theme.PHOSPHOR)
-	_tax_value.add_theme_font_size_override("font_size", CC2Theme.FONT_BODY)
-	col.add_child(_tax_value)
-
-	_tax_income = Label.new()
-	_tax_income.add_theme_color_override("font_color", CC2Theme.WHITE_DIM)
-	_tax_income.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
-	col.add_child(_tax_income)
-
-
-## Four independent 0-100 sliders, normalised into a budget when committed. They read as
-## relative weights rather than percentages summing to 100, which matches how a player
-## thinks about "half my research into engineering".
-func _build_research(col: Control) -> void:
-	col.add_child(_heading("RESEARCH ALLOCATION"))
-	for i in RESEARCH_NAMES.size():
-		var row := HBoxContainer.new()
-		row.add_theme_constant_override("separation", 6)
-		col.add_child(row)
-
-		var name_label := Label.new()
-		name_label.text = RESEARCH_NAMES[i]
-		name_label.custom_minimum_size = Vector2(38, 0)
-		name_label.add_theme_color_override("font_color", CC2Theme.WHITE_DIM)
-		name_label.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
-		row.add_child(name_label)
-
-		var slider := HSlider.new()
-		slider.min_value = 0.0
-		slider.max_value = float(MAX_RESEARCH)
-		slider.step = 1.0
-		slider.value = 25.0
-		slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-		slider.custom_minimum_size = Vector2(0, 18)
-		slider.focus_mode = Control.FOCUS_NONE
-		slider.value_changed.connect(_on_research_changed)
-		row.add_child(slider)
-		_research_sliders.append(slider)
-
-		var value_label := Label.new()
-		value_label.custom_minimum_size = Vector2(52, 0)
-		value_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
-		value_label.add_theme_color_override("font_color", CC2Theme.PHOSPHOR)
-		value_label.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
-		row.add_child(value_label)
-		_research_values.append(value_label)
-
-
 func _build_construction(col: Control) -> void:
 	col.add_child(_heading("CONSTRUCTION"))
 
+	# The colony dropdown lists *planet names*, not "P03 Terrestrial". This is the Phase 8
+	# change: the name is what the player recognises everywhere else -- on the map, in the
+	# inspector, in the log -- so the one control that picks a target for their spending was
+	# the only place it did not use it. `display_name` rather than `p.name` directly, so the
+	# fog rule still applies and a dropdown can never become a name leak.
 	_colony_selector = OptionButton.new()
 	_colony_selector.tooltip_text = "Colony to build in"
 	_colony_selector.focus_mode = Control.FOCUS_NONE
@@ -166,12 +85,50 @@ func _build_construction(col: Control) -> void:
 	_build_selector.item_selected.connect(_on_build_selected)
 	col.add_child(_build_selector)
 
+	# One project per turn, or as many ships per turn as the colony's metal output can carry.
+	_build_mode_selector = OptionButton.new()
+	_build_mode_selector.tooltip_text = "How this colony spends its construction allowance"
+	_build_mode_selector.focus_mode = Control.FOCUS_NONE
+	_build_mode_selector.add_item("ONE PROJECT", Enums.BuildMode.SINGLE)
+	_build_mode_selector.add_item("SHIPS PER TURN", Enums.BuildMode.PER_TURN)
+	_build_mode_selector.item_selected.connect(_on_build_mode_selected)
+	col.add_child(_build_mode_selector)
+
 	_build_info = Label.new()
 	_build_info.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_build_info.custom_minimum_size = Vector2(0, 34)
 	_build_info.add_theme_color_override("font_color", CC2Theme.WHITE_DIM)
 	_build_info.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
 	col.add_child(_build_info)
+
+	# The interactive progress bar. A `ProgressBar` is not clickable on its own, so the
+	# click handler is attached through `gui_input` rather than a `pressed` signal that does
+	# not exist for this class.
+	_build_bar = ProgressBar.new()
+	_build_bar.tooltip_text = "Click to spend stored metal and finish this now"
+	_build_bar.custom_minimum_size = Vector2(0, 16)
+	_build_bar.show_percentage = false
+	_build_bar.max_value = 1.0
+	_build_bar.step = 0.0
+	_build_bar.focus_mode = Control.FOCUS_NONE
+	_build_bar.gui_input.connect(_on_build_bar_input)
+	col.add_child(_build_bar)
+
+	_warnings = Label.new()
+	_warnings.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_warnings.add_theme_color_override("font_color", CC2Theme.AMBER)
+	_warnings.add_theme_font_size_override("font_size", CC2Theme.FONT_SMALL)
+	col.add_child(_warnings)
+
+	# The slack goes to the construction section rather than to a staged-orders readout: a
+	# panel whose height is driven by its own contents resizes the map beside it, which is
+	# a bug this panel had once and now must not have again.
+	var spacer := Control.new()
+	spacer.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	spacer.custom_minimum_size = Vector2(0, 12)
+	col.add_child(spacer)
+	_build_info.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_build_info.vertical_alignment = VERTICAL_ALIGNMENT_TOP
 
 
 # --- Binding ---------------------------------------------------------------
@@ -188,53 +145,26 @@ func bind(controller: SessionController) -> void:
 func refresh() -> void:
 	if _controller == null or _controller.galaxy == null:
 		return
-	var me := _controller.player()
-	if me == null:
+	if _controller.player() == null:
 		return
-
-	# Tax: write the slider from state, not the other way round, so a turn that changes
-	# the rate cannot leave the slider showing a stale value.
-	if not is_equal_approx(_tax_slider.value, me.tax_rate):
-		_tax_slider.set_block_signals(true)
-		_tax_slider.value = me.tax_rate
-		_tax_slider.set_block_signals(false)
-	_tax_value.text = Format.percent(me.tax_rate)
-	_tax_income.text = "Net/turn %s   Production %s   Upkeep %s" % [
-		Format.signed(me.last_net),
-		Format.fixed(me.last_production, 0),
-		Format.fixed(me.last_expenses, 0),
-	]
-
-	_refresh_research(me)
 	_refresh_colonies()
 	_refresh_buildings()
-
-
-func _refresh_research(me: FactionState) -> void:
-	var total := me.total_tech_points()
-	for i in _research_sliders.size():
-		var pct := me.research_allocation[i] * 100.0
-		var slider := _research_sliders[i]
-		if not is_equal_approx(slider.value, pct):
-			slider.set_block_signals(true)
-			slider.value = pct
-			slider.set_block_signals(false)
-		_research_values[i].text = "%d%% (%.0f)" % [int(round(pct)), me.tech_points[i]]
+	_refresh_build_info()
+	_refresh_progress()
+	_refresh_warnings()
 
 
 func _refresh_colonies() -> void:
 	var colonies := _controller.player_colonies()
-	var texts := PackedStringArray()
-	for p in colonies:
-		texts.append("P%02d %s" % [p.index, String(p.type_id).capitalize()])
-
 	_rebuilding = true
 	# Keep the player's colony choice across refreshes; rebuilding the list every turn
 	# would otherwise reset the build target to the first colony.
 	var want := _controller.selected_planet
 	_colony_selector.clear()
-	for t in texts:
-		_colony_selector.add_item(t)
+	for p in colonies:
+		# The planet's real name, gated through the controller's fog rule.
+		_colony_selector.add_item(_controller.display_name(p.index))
+		_colony_selector.set_item_metadata(_colony_selector.item_count - 1, p.index)
 	var idx := 0
 	for i in colonies.size():
 		if colonies[i].index == want:
@@ -245,9 +175,7 @@ func _refresh_colonies() -> void:
 		# `select()` only moves the highlight; it never tells anyone. Deliberately *not*
 		# pushing that choice into the controller here: this runs on every `state_changed`,
 		# so any write would immediately re-enter `refresh` and stomp whatever the player
-		# just selected on the map or in the inspector. The selection is established at the
-		# points where the player actually chose something — `_on_colony_selected` and
-		# `_adopt_selected_colony` before a build is staged.
+		# just selected on the map or in the inspector.
 	_colony_selector.disabled = _colony_selector.item_count == 0
 	_rebuilding = false
 
@@ -273,7 +201,6 @@ func _refresh_buildings() -> void:
 	if _build_selector.item_count > 0:
 		_build_selector.select(idx)
 	_rebuilding = false
-	_refresh_build_info()
 
 
 func _refresh_build_info() -> void:
@@ -281,7 +208,7 @@ func _refresh_build_info() -> void:
 		return
 	var id := _selected_build_id()
 	if id == &"":
-		_build_info.text = "No structures available. Research more technology."
+		_build_info.text = "No structures available."
 		return
 	var def: Resource = null
 	if _controller != null and _controller.defs != null:
@@ -292,46 +219,115 @@ func _refresh_build_info() -> void:
 	var planet := _selected_colony()
 	var held := planet.count(id) if planet != null else 0
 	var cap := "unlimited" if def.max_per_colony <= 0 else str(def.max_per_colony)
-	_build_info.text = "%s  |  %d turn(s)  |  cost M%d R%d E%d  |  upkeep %d  |  %s/%s" % [
-		def.description, def.build_turns,
-		int(def.cost_metals), int(def.cost_rare), int(def.cost_energy),
+	_build_info.text = "%s\ncost M%d | %d turn(s) | upkeep %d | %s/%s" % [
+		def.description, int(def.cost_metals), def.build_turns,
 		int(def.upkeep), str(held), cap,
 	]
+	# Coloured by what the *colony* can pay. Phase 8 builds out of the colony's stored metal,
+	# so an imperial balance that is comfortable and a local pile that is empty are the same
+	# situation to the player looking at this readout -- and only one of them stops the build.
+	var affordable := planet != null \
+		and planet.reserve_metals >= float(def.get("cost_metals"))
 	_build_info.add_theme_color_override(
-		"font_color", CC2Theme.ALERT if (planet == null or not _controller.can_afford(def))
-		else CC2Theme.WHITE_DIM
+		"font_color", CC2Theme.ALERT if not affordable else CC2Theme.WHITE_DIM
 	)
+
+
+## Draw the construction bar: completion fraction, and whether there is anything to boost.
+func _refresh_progress() -> void:
+	if _build_bar == null:
+		return
+	var planet := _selected_colony()
+	var buildings: Dictionary = {}
+	if _controller != null and _controller.defs != null:
+		buildings = _controller.defs.get("buildings") as Dictionary
+	var fraction := ColonySim.construction_progress(planet, buildings)
+	_build_bar.value = fraction
+	_build_bar.visible = planet != null and not planet.building_queue.is_empty()
+	if _build_bar.visible:
+		_build_bar.tooltip_text = "%d%% complete - click to spend stored metal (M%d banked)" % [
+			int(round(fraction * 100.0)), int(planet.reserve_metals)]
+	else:
+		_build_bar.tooltip_text = ""
+
+	var mode: int = planet.build_mode if planet != null else int(Enums.BuildMode.SINGLE)
+	if _build_mode_selector != null:
+		var want := 1 if mode == Enums.BuildMode.PER_TURN else 0
+		if _build_mode_selector.selected != want:
+			_rebuilding = true
+			_build_mode_selector.select(want)
+			_rebuilding = false
+
+
+## Render the selected colony's standing warnings.
+##
+## Food overflow is the one warning the design document asks for, and it arrives a turn late
+## on purpose. Power overflow deliberately does *not* warn: surplus power is lost silently,
+## so a world with too many reactors is not nagged, only quietly wasted.
+func _refresh_warnings() -> void:
+	if _warnings == null:
+		return
+	var planet := _selected_colony()
+	if planet == null or planet.warnings.is_empty():
+		_warnings.text = ""
+		return
+	var lines := PackedStringArray()
+	for key: Variant in planet.warnings:
+		lines.append(_warning_text(StringName(str(key))))
+	lines.sort()
+	_warnings.text = "\n".join(lines)
+
+
+static func _warning_text(key: StringName) -> String:
+	match key:
+		&"food_overflow": return "FOOD OVERFLOW: stores full, surplus lost"
+		&"starving": return "STARVING: reserves empty"
+		&"power_short": return "POWER SHORT: new power structures blocked"
+	return String(key).capitalize()
 
 
 # --- Control handlers ------------------------------------------------------
 
-func _on_tax_changed(value: float) -> void:
+func _on_build_bar_input(event: InputEvent) -> void:
 	if _controller == null:
 		return
-	_controller.set_tax_rate(value)
-	_tax_value.text = Format.percent(value)
-
-
-func _on_research_changed(_value: float) -> void:
-	if _controller == null:
+	var pressed := event is InputEventMouseButton \
+		and (event as InputEventMouseButton).pressed \
+		and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT
+	if not pressed:
 		return
-	var weights := PackedFloat64Array()
-	for s in _research_sliders:
-		weights.append(s.value)
-	_controller.set_research_allocation(weights)
-	# Re-read so the labels show the normalised split that was actually submitted.
-	var me := _controller.player()
-	if me != null:
-		_refresh_research(me)
+	var planet := _selected_colony()
+	if planet == null or planet.building_queue.is_empty():
+		return
+	# Spend everything the colony has banked. One press finishes a project the colony can
+	# afford outright, which is the interaction the design document describes: "click to
+	# spend stored metal directly to boost/complete progress".
+	var spent := _controller.boost_construction(planet.reserve_metals)
+	if spent > 0.0:
+		construction_boosted.emit(spent)
 
 
+## Select the colony the dropdown names.
+##
+## Read from the item's *metadata*, not from its position. The list is rebuilt on every
+## refresh and the two agree today, but the dropdown now carries names that the fog rule can
+## replace with a placeholder -- so two entries can read identically -- and a control that
+## identified its target by list position would quietly select the wrong world the moment
+## that happened.
 func _on_colony_selected(index: int) -> void:
 	if _rebuilding or _controller == null:
 		return
-	var colonies := _controller.player_colonies()
-	if index < 0 or index >= colonies.size():
+	var planet_index := _colony_at(index)
+	if planet_index < 0:
 		return
-	_controller.select_planet(colonies[index].index)
+	_controller.select_planet(planet_index)
+
+
+func _colony_at(index: int) -> int:
+	if _colony_selector == null or index < 0 or index >= _colony_selector.item_count:
+		return -1
+	var meta: Variant = _colony_selector.get_item_metadata(index)
+	return int(meta) if meta != null else -1
 
 
 func _on_build_selected(_index: int) -> void:
@@ -342,28 +338,34 @@ func _on_build_selected(_index: int) -> void:
 	if id == &"":
 		return
 	# Touching the structure dropdown must not be rejected just because the controller's
-	# selection is something else — a system the player clicked, or an uncolonised body.
-	# The colony named by the selector above is the intended target, so make it so before
-	# the order is submitted.
+	# selection is something else. The colony named by the selector above is the intended
+	# target, so make it so before the order is submitted.
 	_adopt_selected_colony()
 	# Selecting a structure is a *request*, not an order: the player still has to press
 	# the build button, so browsing the menu cannot spend the treasury. A refusal here is
-	# not an error — the controller has already reported why on `action_rejected`.
+	# not an error -- the controller has already reported why on `action_rejected`.
 	_controller.queue_build_structure(id)
 	build_requested.emit(id)
+
+
+func _on_build_mode_selected(index: int) -> void:
+	if _rebuilding or _controller == null:
+		return
+	var planet := _selected_colony()
+	if planet == null:
+		return
+	var mode := Enums.BuildMode.PER_TURN if index == 1 else Enums.BuildMode.SINGLE
+	_controller.set_build_mode(planet.index, mode)
 
 
 ## Point the controller at the colony highlighted in the colony selector, unless the
 ## player has already selected exactly that body.
 func _adopt_selected_colony() -> void:
-	var sel := _colony_selector.selected
-	if sel < 0:
+	var planet_index := _colony_at(_colony_selector.selected)
+	if planet_index < 0:
 		return
-	var colonies := _controller.player_colonies()
-	if sel >= colonies.size():
-		return
-	if colonies[sel].index != _controller.selected_planet:
-		_controller.select_planet(colonies[sel].index)
+	if planet_index != _controller.selected_planet:
+		_controller.select_planet(planet_index)
 
 
 func _selected_build_id() -> StringName:
@@ -381,16 +383,19 @@ func _selected_colony() -> PlanetState:
 
 # --- Accessors used by the root and the GUI test ---------------------------
 
+## The imperial tax slider. Removed in Phase 8; retained so a caller gets a definite null.
 func tax_slider() -> HSlider:
-	return _tax_slider
+	return null
 
 
+## The imperial tax readout. Removed in Phase 8, for the same reason.
 func tax_value_label() -> Label:
-	return _tax_value
+	return null
 
 
+## The research allocation sliders. Removed in Phase 8; returns an empty array.
 func research_sliders() -> Array[HSlider]:
-	return _research_sliders
+	return [] as Array[HSlider]
 
 
 func build_selector() -> OptionButton:
@@ -399,6 +404,21 @@ func build_selector() -> OptionButton:
 
 func colony_selector() -> OptionButton:
 	return _colony_selector
+
+
+## The construction progress bar. Clicking it spends stored metal.
+func build_bar() -> ProgressBar:
+	return _build_bar
+
+
+## The single-project / per-turn selector.
+func build_mode_selector() -> OptionButton:
+	return _build_mode_selector
+
+
+## The colony warning readout.
+func warnings_label() -> Label:
+	return _warnings
 
 
 ## The staged-orders readout, now always null.
@@ -422,10 +442,31 @@ func select_build(building_id: StringName) -> bool:
 	return true
 
 
+## Every string this panel is currently showing, in one place.
+##
+## Used by the GUI suite to assert that no removed heading survives anywhere in the tree --
+## searching the source for a string would pass while the label was still on screen.
+func visible_text() -> String:
+	var parts := PackedStringArray()
+	for node in [colony_selector(), build_selector(), build_mode_selector()]:
+		var button: OptionButton = node as OptionButton
+		if button == null:
+			continue
+		for i in button.item_count:
+			parts.append(button.get_item_text(i))
+	if build_bar() != null and build_bar().visible:
+		parts.append(build_bar().tooltip_text)
+	if build_info() != null:
+		parts.append(build_info().text)
+	if warnings_label() != null:
+		parts.append(warnings_label().text)
+	return "\n".join(parts)
+
+
 ## Position of a structure in the selector, or -1.
 ##
 ## `OptionButton` exposes `get_item_metadata` but has no `find_metadata`, so the lookup is
-## a scan. The item count is nine, so this is cheaper than maintaining a side map that
+## a scan. The item count is a dozen, so this is cheaper than maintaining a side map that
 ## could drift out of step when the unlocked set changes between turns.
 func _index_of_build(building_id: StringName) -> int:
 	if building_id == &"" or _build_selector == null:
