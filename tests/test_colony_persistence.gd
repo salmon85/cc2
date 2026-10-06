@@ -48,6 +48,7 @@ var _colony: PlanetState = null
 ## What the player did, recorded locally so the server's result can be compared against it.
 var _expected_workers: int = -1
 var _expected_metals: float = 0.0
+var _pre_scrap_metals: float = 0.0
 ## The reference captured before the turn, so identity can be asserted rather than assumed.
 var _homeworld: int = -1
 
@@ -204,6 +205,7 @@ func _seat_and_act() -> void:
 	_t.ok(_controller.unassign_worker(&"mine"), "pulling the mine worker is accepted")
 	_t.eq(ColonySim.workers_on(_colony, &"mine"), 0, "and the mine has nobody on it")
 
+	_pre_scrap_metals = _colony.reserve_metals
 	_t.ok(_controller.scrap(&"mine") > 0.0, "scrapping the mine refunds metal")
 	_t.eq(int(_colony.structures.get(&"mine", 0)), 0, "and the mine is gone")
 
@@ -269,9 +271,19 @@ func _assert_survival() -> void:
 
 	# The refund and the boost both moved real metal, and both are the kind of figure a
 	# player checks the moment they press the button.
-	_t.ok(replica.reserve_metals > _expected_metals,
-		"the scrap refund and the metal moved into the project both survived",
-		"server %.2f vs client's %.2f" % [replica.reserve_metals, _expected_metals])
+	#
+	# Compared against the client's own post-action balance, which is now a well-defined
+	# comparison: construction used to spend a slice of storage per turn on the server that
+	# the client's mirror had not, so the two sides could never agree and a strict inequality
+	# was the only assertion available -- one that silently encoded the old funding model.
+	# Now that a project is paid for out of income, the round trip has to return exactly the
+	# figure the player left behind.
+	_t.near(replica.reserve_metals, _expected_metals, 0.01,
+		"the scrap refund and the boosted metal both survived the round trip")
+	_t.ok(replica.reserve_metals != _pre_scrap_metals,
+		"and the balance is not simply the one the turn started from")
+	_t.near(_controller.galaxy.planet(_homeworld).reserve_metals, replica.reserve_metals, 0.01,
+		"and the client and the authority agree on the balance to the cent")
 	_t.ok(replica.build_metal > 0.0 or replica.build_turns_remaining <= 0,
 		"the construction project still carries the metal that was put into it",
 		"paid %.2f, %d turns left" % [replica.build_metal, replica.build_turns_remaining])

@@ -44,7 +44,7 @@ func _initialize() -> void:
 	_test_structure_capacity_contributions()
 	_test_metal_boost()
 	_test_refund_metal()
-	_test_construction_spends_stored_metal()
+	_test_construction_funded_by_income()
 	_test_no_upfront_metal_gate()
 	_test_ship_construction()
 	_test_orbital_fleets()
@@ -1109,29 +1109,13 @@ func _test_storage_capacity() -> void:
 
 	# Build one to completion, the way the resolver would.
 	var granary := _defs_building(&"granary") as Resource
-	colony.building_queue[&"granary"] = 1
-	colony.build_turns_remaining = int(granary.get("build_turns"))
-	colony.build_total_turns = int(granary.get("build_turns"))
-	colony.build_metal = 0.0
-	var turns_to_build := colony.build_total_turns
-	for _i in turns_to_build:
-		_staff_all(colony)
-		ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(2 + _i))
-		if colony.count(&"granary") > 0:
-			break
+	_pay_and_land(g, colony, faction, &"granary", 2)
 	sup.eq(colony.count(&"granary"), 1, "the granary is built")
 	sup.near(colony.food_capacity, base_food + 1000.0, 0.001,
 		"and raises max food storage by 1000 in the same turn")
 
 	# A second one adds another 1000, not another 1000 total.
-	colony.building_queue[&"granary"] = 1
-	colony.build_turns_remaining = int(granary.get("build_turns"))
-	colony.build_total_turns = int(granary.get("build_turns"))
-	for _i in colony.build_total_turns:
-		_staff_all(colony)
-		ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(20 + _i))
-		if colony.count(&"granary") > 1:
-			break
+	_pay_and_land(g, colony, faction, &"granary", 20)
 	sup.eq(colony.count(&"granary"), 2, "a second granary is built")
 	sup.near(colony.food_capacity, base_food + 2000.0, 0.001,
 		"and capacity is cumulative: +1000 per granary")
@@ -1158,14 +1142,7 @@ func _test_storage_capacity() -> void:
 		sup.eq(housing_probe.population, held, "and cannot grow")
 
 		var city := _defs_building(&"city_complex") as Resource
-		housing_probe.building_queue[&"city_complex"] = 1
-		housing_probe.build_turns_remaining = int(city.get("build_turns"))
-		housing_probe.build_total_turns = int(city.get("build_turns"))
-		for _i in housing_probe.build_total_turns:
-			_staff_all(housing_probe)
-			ColonySim.simulate_colony(g, housing_probe, faction, _defs, _db, _rng(50 + _i))
-			if housing_probe.count(&"city_complex") > 0:
-				break
+		_pay_and_land(g, housing_probe, faction, &"city_complex", 50)
 		sup.eq(housing_probe.count(&"city_complex"), 1, "the City Complex is built")
 		sup.near(housing_probe.housing, float(_db.get("BASE_HOUSING")) + 20.0, 0.001,
 			"and raises housing by 20 in the same turn")
@@ -1186,14 +1163,7 @@ func _test_storage_capacity() -> void:
 		sup.near(powered.power_capacity, base_power, 0.001,
 			"a bare colony banks only its base cells")
 		var storage := _defs_building(&"energy_storage") as Resource
-		powered.building_queue[&"energy_storage"] = 1
-		powered.build_turns_remaining = int(storage.get("build_turns"))
-		powered.build_total_turns = int(storage.get("build_turns"))
-		for _i in powered.build_total_turns:
-			_staff_all(powered)
-			ColonySim.simulate_colony(g, powered, faction, _defs, _db, _rng(70 + _i))
-			if powered.count(&"energy_storage") > 0:
-				break
+		_pay_and_land(g, powered, faction, &"energy_storage", 70)
 		sup.eq(powered.count(&"energy_storage"), 1, "the Energy Storage is built")
 		sup.near(powered.power_capacity, base_power + 1000.0, 0.001,
 			"and raises max power storage by 1000 in the same turn")
@@ -1289,13 +1259,14 @@ func _test_metal_boost() -> void:
 		"a wire order asking for the whole stockpile moves at most what is owed",
 		"moved %.1f of an owed %.1f" % [wire_gain, cost * 0.5])
 
-	# --- no refund -------------------------------------------------------------
-	# The whole point: metal handed over is gone. A boost that was refunded on completion
-	# would make the modal a way to *gain* metal, and a colony could bank a structure and
-	# profit from it.
-	# Mine income is the confound: the colony earns while it builds. Set to a known value and
-	# compare against that plus exactly what the mines produce, so a refund of any size would
-	# show up as a surplus rather than hiding inside the mining.
+	# --- a boosted project is not a way to gain metal ---------------------------
+	# Boosted metal is gone, permanently: the modal is a payment, not an investment. What
+	# *has* changed is that income funds a project instead of the stockpile, so the honest
+	# claim is narrower than it was -- "no refund" now means the colony ends up with its
+	# mines' output and nothing more, rather than being credited its own money back.
+	#
+	# The boost ceiling is what still rules out overpaying in the first place, so there is no
+	# surplus to launder: paying the full cost puts the pool at exactly the cost.
 	colony.reserve_metals = 100.0
 	var mined_per_turn := ColonySim._metal_output(colony, buildings)
 	var store_before := colony.reserve_metals
@@ -1320,18 +1291,25 @@ func _test_metal_boost() -> void:
 	var mines := ColonySim._metal_output(colony, buildings)
 	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(3))
+	# The ceiling caps the boost at what the project owes, so the pool is already full when
+	# the turn resolves and the mines' output has nowhere to be spent on it. It stays in
+	# storage -- which is the claim: nothing is credited back on top of what was paid.
 	sup.near(colony.reserve_metals, overpay_store - cost + mines, 0.001,
-		"a colony that overpays is not credited any of the difference back")
+		"a colony that overpays is credited none of the difference back")
 	sup.eq(colony.count(&"granary"), 2, "and the structure still lands")
 
-	# --- progress is cost, not turns --------------------------------------------
-	# A three-turn project reads a third complete after one turn, whatever it costs. The old
-	# flat "+1 metal a turn" made a 100-metal structure advance 1% per turn, so the bar told
-	# a player essentially nothing.
+	# --- progress is income, at the rate the mines earn -------------------------
+	# The bar advances by what the colony earns each turn, so four worked mines (20 a turn)
+	# put 20 into a 100-metal City Complex every turn and land it on the fifth.
+	#
+	# This is the behaviour that replaced "a third per turn whatever it costs": the figure on
+	# the bar is now a quantity of metal that exists rather than a schedule the colony is
+	# silently paying for out of its bank.
 	var timed := _habitable_colony(g)
 	sup.ok(timed != null, "a world exists for the progress-curve test")
 	if timed != null:
 		var city := _defs_building(&"city_complex") as Resource
+		var city_cost := float(city.get("cost_metals"))
 		_set_structures(timed, {&"mine": 4})
 		timed.population = 4.0
 		timed.food_stock = 500.0
@@ -1339,15 +1317,22 @@ func _test_metal_boost() -> void:
 		timed.build_turns_remaining = int(city.get("build_turns"))
 		timed.build_total_turns = int(city.get("build_turns"))
 		timed.build_metal = 0.0
-		sup.eq(timed.build_total_turns, 3, "a City Complex takes three turns")
-		for turn in 3:
+		sup.eq(timed.build_total_turns, 3, "a City Complex is declared as a three-turn build")
+		var income := ColonySim._metal_output(timed, buildings)
+		var bank := timed.reserve_metals
+		for turn in 6:
+			if not timed.building_queue.is_empty():
+				bank = timed.reserve_metals
 			_staff_all(timed)
 			ColonySim.simulate_colony(g, timed, faction, _defs, _db, _rng(200 + turn))
-			if turn < 2:
-				sup.near(ColonySim.construction_progress(timed, buildings),
-					float(turn + 1) / 3.0, 0.02,
-					"turn %d of 3 reads about a third" % (turn + 1))
-		sup.eq(timed.count(&"city_complex"), 1, "and it lands on the third turn")
+			if timed.building_queue.is_empty():
+				break
+			sup.near(timed.reserve_metals, bank, 0.001,
+				"turn %d leaves the stockpile untouched" % (turn + 1))
+			sup.near(ColonySim.construction_progress(timed, buildings),
+				minf(income * float(turn + 1), city_cost) / city_cost, 0.02,
+				"and the bar advances by exactly one turn of income")
+		sup.eq(timed.count(&"city_complex"), 1, "and it lands once the income has paid for it")
 
 
 # --- Phase 8 corrections: metal allocation, hulls, orbits, visuals ---------
@@ -1405,6 +1390,29 @@ func _test_structure_capacity_contributions() -> void:
 		"and one city complex adds its 20 on top of the baseline five")
 
 
+## Queue a structure, pay for it outright, and resolve one turn so it lands.
+##
+## Construction is funded from the colony's income, so a probe with no mines would otherwise
+## never finish anything -- which is correct behaviour and no reason for a *capacity* test to
+## wait on it. Paying by hand lands the structure in a single turn and leaves the question the
+## probe is actually about -- what a Granary is worth -- to be answered on its own.
+func _pay_and_land(
+	galaxy: GalaxyState, colony: PlanetState, faction: FactionState, id: StringName, seed_value: int
+) -> void:
+	var def := _defs_building(id) as Resource
+	if def == null:
+		return
+	colony.building_queue[id] = 1
+	colony.build_turns_remaining = int(def.get("build_turns"))
+	colony.build_total_turns = int(def.get("build_turns"))
+	colony.build_metal = 0.0
+	colony.reserve_metals = maxf(colony.reserve_metals, 10000.0)
+	ColonySim.boost_construction(
+		colony, float(def.get("cost_metals")), _defs.get("buildings") as Dictionary)
+	_staff_all(colony)
+	ColonySim.simulate_colony(galaxy, colony, faction, _defs, _db, _rng(seed_value))
+
+
 ## Taking assigned metal back out returns it to storage, and bottoms out at zero assigned.
 func _test_refund_metal() -> void:
 	sup.begin("refunding construction metal")
@@ -1456,8 +1464,8 @@ func _test_refund_metal() -> void:
 
 
 ## Construction pays for itself out of the colony's own storage, a slice a turn.
-func _test_construction_spends_stored_metal() -> void:
-	sup.begin("construction spends stored metal")
+func _test_construction_funded_by_income() -> void:
+	sup.begin("construction is funded by income, not the stockpile")
 	var g := _galaxy(6161)
 	var colony := _habitable_colony(g)
 	if colony == null:
@@ -1466,6 +1474,7 @@ func _test_construction_spends_stored_metal() -> void:
 	var buildings: Dictionary = _defs.get("buildings") as Dictionary
 	var city := _defs_building(&"city_complex") as Resource
 	var cost := float(city.get("cost_metals"))
+	var faction: FactionState = g.faction(0)
 	_set_structures(colony, {&"mine": 4})
 	colony.population = 4.0
 	colony.food_stock = 900.0
@@ -1475,57 +1484,106 @@ func _test_construction_spends_stored_metal() -> void:
 	colony.build_turns_remaining = int(city.get("build_turns"))
 	colony.build_metal = 0.0
 
-	# The metal has to actually *leave* storage. It used to be pure accounting: the pool grew
-	# by a slice each turn while the stockpile was never touched, which made the pool a
-	# number about the project rather than a quantity of metal -- and made "take the metal
-	# back out" meaningless, because there had never been any in it.
+	# The stockpile must not move at all.
+	#
+	# This is the behaviour that replaced a flat `cost / build_turns` debit: the metal a
+	# project consumes is the metal the mines earned that same turn, so the two cancel and
+	# `reserve_metals` ends the turn where it started. A colony could previously watch its
+	# bank drain for a project it could comfortably afford and had no way to tell funding from
+	# theft -- the bar said "33%" and the balance said otherwise.
 	var mined := ColonySim._metal_output(colony, buildings)
 	var store_before := colony.reserve_metals
 	_staff_all(colony)
-	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(2))
-	var slice := cost / float(city.get("build_turns"))
-	sup.near(colony.reserve_metals, store_before + mined - slice, 0.001,
-		"the turn's metal income minus the project's share is what is left in storage")
-	sup.near(colony.build_metal, slice, 0.001,
-		"and the project's share is banked against the project")
+	ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(2))
+	sup.near(colony.reserve_metals, store_before, 0.001,
+		"a turn of building leaves the stockpile exactly where it started (got %.1f, expected %.1f)" % [
+			colony.reserve_metals, store_before])
+	sup.near(colony.build_metal, mined, 0.001,
+		"and the turn's whole income is credited to the project")
+	sup.near(ColonySim.construction_progress(colony, buildings), mined / cost, 0.02,
+		"so the bar advances by one turn of income")
 
-	# A colony that cannot cover the whole share contributes what it has and takes longer,
-	# rather than being refused or silently finishing anyway.
+	# The bank is only spent when the player asks for it, through the progress bar.
+	var before_boost := colony.reserve_metals
+	var boost := ColonySim.boost_construction(colony, 40.0, buildings)
+	sup.near(boost, 40.0, 0.001, "a boost moves what the player asked for")
+	sup.near(colony.reserve_metals, before_boost - 40.0, 0.001,
+		"and debits storage by exactly that much -- this is the explicit opt-in")
+	sup.near(colony.build_metal, mined + 40.0, 0.001,
+		"the boosted metal joins the project's pool")
+
+	# A colony with no mines has no income, so it builds nothing on its own. That is the
+	# honest consequence of having no revenue rather than a hidden tax, and it is why the
+	# boost exists.
 	#
 	# Each case gets its own galaxy: `_habitable_colony` always settles the most habitable
-	# unclaimed world, so two calls against one galaxy hand back the *same* planet and the
-	# second case silently overwrites the first one's state.
+	# unclaimed world, so two calls against one galaxy hand back the *same* planet.
 	var broke := _habitable_colony(_galaxy(6162))
 	if broke != null:
 		_set_structures(broke, {})
 		broke.population = 1.0
 		broke.food_stock = 900.0
-		broke.reserve_metals = 5.0
+		broke.reserve_metals = 500.0
 		broke.building_queue[&"city_complex"] = 1
 		broke.build_total_turns = int(city.get("build_turns"))
 		broke.build_turns_remaining = int(city.get("build_turns"))
 		broke.build_metal = 0.0
-		for _turn in 3:
-			ColonySim.simulate_colony(_galaxy(6162), broke, g.faction(0), _defs, _db, _rng(3))
-		sup.near(broke.build_metal, 5.0, 0.001,
-			"a colony with nothing to spend puts its whole stockpile in and no more")
-		sup.eq(broke.count(&"city_complex"), 0, "and the project is still going")
+		var idle_before := broke.reserve_metals
+		for _turn in 5:
+			ColonySim.simulate_colony(_galaxy(6162), broke, faction, _defs, _db, _rng(3))
+		sup.near(broke.build_metal, 0.0, 0.001,
+			"a colony with no mines contributes nothing to its project")
+		sup.near(broke.reserve_metals, idle_before, 0.001,
+			"and its stockpile is left completely alone")
+		sup.eq(broke.count(&"city_complex"), 0, "so the project has not started")
 
-	# And a colony with a full pile finishes on schedule.
+	# A rich colony is no faster than a poor one, which is the whole content of the rule.
 	var rich := _habitable_colony(_galaxy(6163))
 	if rich != null:
-		_set_structures(rich, {})
-		rich.population = 1.0
+		_set_structures(rich, {&"mine": 4})
+		rich.population = 4.0
 		rich.food_stock = 900.0
 		rich.reserve_metals = 5000.0
 		rich.building_queue[&"city_complex"] = 1
 		rich.build_total_turns = int(city.get("build_turns"))
 		rich.build_turns_remaining = int(city.get("build_turns"))
 		rich.build_metal = 0.0
-		for turn in int(city.get("build_turns")):
-			ColonySim.simulate_colony(_galaxy(6163), rich, g.faction(0), _defs, _db, _rng(4 + turn))
+		_staff_all(rich)
+		var rich_bank := rich.reserve_metals
+		for _turn in 12:
+			if rich.building_queue.is_empty():
+				break
+			ColonySim.simulate_colony(_galaxy(6163), rich, faction, _defs, _db, _rng(4))
+			sup.near(rich.reserve_metals, rich_bank, 0.001,
+				"a colony with five thousand in the bank is not raided either")
 		sup.eq(rich.count(&"city_complex"), 1,
-			"a colony that can pay its share builds it in the declared number of turns")
+			"and the project still lands, on income rather than on the balance")
+
+	# Completing with income to spare hands the surplus back rather than destroying it.
+	var over := _habitable_colony(_galaxy(6164))
+	if over != null:
+		_set_structures(over, {&"mine": 8})
+		over.population = 8.0
+		over.food_stock = 900.0
+		over.reserve_metals = 50.0
+		_staff_all(over)
+		var granary := _defs_building(&"granary") as Resource
+		var granary_cost := float(granary.get("cost_metals"))
+		var income := ColonySim._metal_output(over, buildings)
+		# A granary cheap enough that one turn of eight mines overshoots it.
+		sup.ok(income > granary_cost,
+			"the fixture over-earns on the finishing turn",
+			"income %.1f against a cost of %.1f" % [income, granary_cost])
+		over.building_queue[&"granary"] = 1
+		over.build_total_turns = int(granary.get("build_turns"))
+		over.build_turns_remaining = int(granary.get("build_turns"))
+		over.build_metal = 0.0
+		var over_before := over.reserve_metals
+		_staff_all(over)
+		ColonySim.simulate_colony(_galaxy(6164), over, faction, _defs, _db, _rng(7))
+		sup.eq(over.count(&"granary"), 1, "and the granary lands")
+		sup.near(over.reserve_metals, over_before + income - granary_cost, 0.001,
+			"with the overshoot returned to storage instead of vanishing into the pool")
 
 
 ## Queueing a project asks nothing about the colony's balance.
@@ -1595,7 +1653,7 @@ func _test_ship_construction() -> void:
 		"a hull declares its own build turns (it read a property the class did not have, "
 		+ "so every hull used to finish on its first turn whatever it cost)")
 
-	_set_structures(colony, {&"space_port": 1})
+	_set_structures(colony, {&"space_port": 1, &"mine": 4})
 	colony.population = 4.0
 	colony.food_stock = 900.0
 	colony.reserve_metals = 5000.0
@@ -1611,26 +1669,37 @@ func _test_ship_construction() -> void:
 	sup.near(ColonySim.project_cost(colony, {}, hulls), cost, 0.001,
 		"priced from the hull definition, like a structure")
 
-	# Progress is metal, paid out of the colony's store.
+	# Progress is metal, and it is the metal the mines earn.
 	#
 	# Rewound first: `resolve_turn` above runs the colony phase as well as the order phase, so
-	# by the time it returned the hull had already taken its first turn's share. Measuring a
+	# by the time it returned the hull had already taken its first turn's income. Measuring a
 	# *second* share here would describe a yard that has been running twice as long as the
 	# number under it claims.
 	ColonySim.set_project_paid(colony, 0.0)
 	colony.reserve_metals = 5000.0
 	var store_before := colony.reserve_metals
+	var income := ColonySim._metal_output(colony, _defs.get("buildings") as Dictionary)
 	_staff_all(colony)
 	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(8))
-	sup.near(ColonySim.project_paid(colony), cost / float(turns), 0.001,
-		"the first turn pays the hull's first share")
-	sup.ok(colony.reserve_metals < store_before,
-		"and the metal came out of storage rather than being conjured")
+	sup.near(ColonySim.project_paid(colony), income, 0.001,
+		"the first turn puts one turn's income into the hull")
+	sup.near(colony.reserve_metals, store_before, 0.001,
+		"and the metal did not come out of storage")
 
-	for turn in range(1, turns):
+	# Run it in. Longer than the declared turn count is fine and expected: the hull is paid
+	# for by what the colony earns, so the yard takes as many turns as that needs.
+	var guard := 0
+	while not colony.ship_queue.is_empty() and guard < 40:
 		_staff_all(colony)
-		ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(9 + turn))
+		ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(9 + guard))
+		guard += 1
 	sup.eq(colony.ship_queue.size(), 0, "the yard is empty once the hull is paid for")
+	# Run it in. Longer than the declared turn count is fine and expected: the hull is paid
+	# for by what the colony earns, so the yard takes as many turns as that needs. The turn
+	# above already paid one share, hence the extra one in the arithmetic.
+	sup.ok((guard + 1) * income >= cost,
+		"having taken at least as many turns as the income required",
+		"%d turns at %.1f against a cost of %.1f" % [guard + 1, income, cost])
 	sup.near(ColonySim.construction_progress(colony, {} as Dictionary), 0.0, 0.001,
 		"and there is no project left to report progress for")
 
@@ -1648,8 +1717,10 @@ func _test_orbital_fleets() -> void:
 	if corvette == null:
 		sup.ok(false, "the corvette has a definition")
 		return
-	_set_structures(colony, {&"space_port": 1})
-	colony.population = 4.0
+	# Mines as well as a port: a hull is paid for out of income, so a yard with nothing
+	# earning behind it would simply never deliver anything.
+	_set_structures(colony, {&"space_port": 1, &"mine": 6})
+	colony.population = 6.0
 	colony.food_stock = 900.0
 	colony.reserve_metals = 5000.0
 
@@ -1666,7 +1737,7 @@ func _test_orbital_fleets() -> void:
 		# loop is only draining whatever is left -- the point of the assertion is that the
 		# hull ends up *somewhere*, not how many turns it took.
 		var guard := 0
-		while not colony.ship_queue.is_empty() and guard < 20:
+		while not colony.ship_queue.is_empty() and guard < 40:
 			_staff_all(colony)
 			ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(11 + guard))
 			guard += 1
@@ -3341,12 +3412,16 @@ func _test_scrapping() -> void:
 	var hulls: Dictionary = _defs.get("ship_hulls") as Dictionary
 	var corvette := _defs.call("ship_hull", &"corvette") as Resource
 	if corvette != null:
-		_set_structures(colony, {&"space_port": 1})
+		# Mines as well as a port: the yard is paid out of income, so without them the hull
+		# never completes and there is nothing in orbit to scrap.
+		_set_structures(colony, {&"space_port": 1, &"mine": 6})
+		colony.population = 6.0
+		colony.food_stock = 900.0
 		TurnResolver.resolve_turn(g, [
 			Order.make_build_ship(0, colony.index, &"corvette")
 		], _defs, _db, _rng(52), 0)
 		var guard := 0
-		while not colony.ship_queue.is_empty() and guard < 20:
+		while not colony.ship_queue.is_empty() and guard < 40:
 			ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(53 + guard))
 			guard += 1
 		var orbiter := g.orbital_fleet(colony.index, 0)

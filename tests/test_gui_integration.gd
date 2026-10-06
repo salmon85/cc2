@@ -3744,17 +3744,28 @@ func _step_panel_economy_rows() -> void:
 	sup.ok(not rows.contains("FOOD BALANCE"),
 		"the separate Food Balance line is gone")
 
-	# Power is current/max with generation minus draw as a single net.
+	# Power is two rows: what is banked, and what the grid does with a turn's surplus.
+	#
+	# They are different quantities and printing them as one -- `POWER 0/10 (+70)` -- made a
+	# colony generating seventy look like it had none. The battery really is empty, because
+	# the bank holds ten and the rest is discarded by design; Energy Storage is the answer to
+	# that, and a player could not see which question the row was answering.
 	var power_line := _row_for(rows, "POWER")
 	sup.ok(power_line.contains("/"), "Power is on one line with its capacity",
 		"reads '%s'" % power_line)
 	sup.ok(not power_line.contains("-0"),
 		"and never prints a signed zero", "reads '%s'" % power_line)
+	sup.ok(not power_line.contains("+") and not power_line.contains("-"),
+		"the banked row carries no signed figure, because that is the other row's job",
+		"reads '%s'" % power_line)
+	var surplus_line := _row_for(rows, "SURPLUS")
+	sup.ok(surplus_line != "", "and there is a separate Surplus row",
+		"rows=%s" % rows.replace("\n", " | "))
 	# One signed figure, not the pair `(+40, -10)`. The bbcode is stripped first because the
 	# colour tag between the bracket and the sign is not part of the number.
-	var plain := _strip_bbcode(power_line)
+	var plain := _strip_bbcode(surplus_line)
 	sup.ok(plain.count("+") + plain.count("-") == 1,
-		"the net is a single signed figure, not generation and draw side by side",
+		"the surplus is a single signed figure, not generation and draw side by side",
 		"reads '%s'" % plain)
 
 	# Population is total (working/jobless).
@@ -3762,7 +3773,7 @@ func _step_panel_economy_rows() -> void:
 	sup.ok(pop_line.contains("8 ("), "Population reads total (working/jobless)",
 		"reads '%s'" % pop_line)
 
-	# And the net really is generation minus consumption, with no minus zero.
+	# And the surplus really is generation minus consumption, with no minus zero.
 	#
 	# Stated as structures rather than as figures assigned onto the planet. The panel
 	# recomputes generation and draw from the roster before printing -- that is the fix for a
@@ -3772,23 +3783,28 @@ func _step_panel_economy_rows() -> void:
 		&"nuclear": 1, &"city_complex": 1}
 	colony.power = 10.0
 	_client.inspector.refresh()
-	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("+30"),
+	sup.ok(_row_for(_client.inspector.planet_label().text, "SURPLUS").contains("+30"),
 		"a Nuclear plant's +40 against a City Complex's 10 reads +30",
-		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
+		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "SURPLUS"))
+	# The point of the split, stated as its own assertion: a colony in large surplus can have
+	# an empty battery, and the panel must say so rather than implying the power is missing.
+	sup.eq(int(colony.power), 10, "the fixture's battery holds the base ten")
+	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("10/10"),
+		"and the banked row says so next to a +30 surplus")
 	colony.structures = {&"farm": 2, &"mine": 2, &"granary": 1}
 	colony.power = 0.0
 	_client.inspector.refresh()
-	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("+0"),
+	sup.ok(_row_for(_client.inspector.planet_label().text, "SURPLUS").contains("+0"),
 		"and a grid drawing nothing reads +0, not -0",
-		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
+		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "SURPLUS"))
 
 	# A real deficit keeps its sign: two City Complexes draw 20 and nothing generates.
 	colony.structures = {&"farm": 2, &"mine": 2, &"granary": 1, &"city_complex": 2}
 	colony.power = 0.0
 	_client.inspector.refresh()
-	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("-20"),
+	sup.ok(_row_for(_client.inspector.planet_label().text, "SURPLUS").contains("-20"),
 		"while a genuine shortfall still reads negative",
-		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
+		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "SURPLUS"))
 	colony.structures = {&"farm": 2, &"mine": 2, &"granary": 1}
 
 

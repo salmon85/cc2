@@ -450,7 +450,12 @@ static func simulate_colony(
 		report.starving = true
 
 	# --- Construction ----------------------------------------------------------
-	_advance_construction(galaxy, planet, faction, buildings, hulls, db)
+	# Funded from the income credited above, not from the balance it is already part of. The
+	# `income` argument is `report.metals_mined`, and mining has already run: whatever the
+	# project takes this turn, the colony earned it this turn, so the stockpile is unchanged
+	# by the act of building. `boost_construction` is the explicit opt-in for spending stock.
+	_advance_construction(
+		galaxy, planet, faction, buildings, hulls, db, report.metals_mined)
 
 	return report
 
@@ -910,21 +915,41 @@ static func would_be_staffed(planet: PlanetState, building_id: StringName) -> bo
 ## mines over the turns that follow.
 static func _advance_construction(
 	galaxy: GalaxyState, planet: PlanetState, faction: FactionState,
-	buildings: Dictionary, hulls: Dictionary, db: Node
+	buildings: Dictionary, hulls: Dictionary, db: Node, income: float
 ) -> void:
 	if not planet.building_queue.is_empty():
-		_advance_structure(planet, buildings, db)
+		_advance_structure(planet, buildings, db, income)
 		return
 	if planet.count(&"space_port") <= 0:
 		return
 	if planet.ship_queue.is_empty():
 		return
-	_advance_ship(galaxy, planet, faction, hulls)
+	_advance_ship(galaxy, planet, faction, hulls, income)
 
 
 ## One turn of the structure under construction.
+##
+## Funded from this turn's production, not from the stockpile.
+##
+## The slice credited here is the metal the mines actually earned *this* turn, moved out of
+## the balance that same mining step has just credited. Because the two are the same metal, the
+## transfer is a wash and `reserve_metals` ends the turn exactly where it started: a colony
+## building out of its income pays for the project out of its income, and the stockpile is not
+## raided to do it. This used to draw a flat `cost / build_turns` from storage instead, so a
+## 100-metal City Complex cost 33 a turn whatever the colony earned, and a rich colony watching
+## its bank drain while a project it could easily afford sat at "33%" for three turns had no
+## way to tell funding from theft.
+##
+## What is left for storage to do is what the player asks for explicitly: `boost_construction`
+## moves metal in when a project needs finishing faster, and that is the only path by which
+## the bank funds a project. A colony whose mines earn nothing therefore builds nothing until
+## it boosts, which is the honest consequence of having no income rather than a hidden tax.
+##
+## Completion is decided by the accumulated pool rather than by a turn count, so a slow colony
+## takes longer and a fast one finishes sooner. The turn counter is still decremented because
+## the bar reads it.
 static func _advance_structure(
-	planet: PlanetState, buildings: Dictionary, db: Node
+	planet: PlanetState, buildings: Dictionary, db: Node, income: float
 ) -> void:
 	var cost := queued_cost(planet, buildings)
 	if cost <= 0.0:
@@ -935,23 +960,36 @@ static func _advance_structure(
 		planet.build_total_turns = 0
 		planet.build_metal = 0.0
 		return
-	var total_turns := maxi(1, planet.build_total_turns)
-	planet.build_metal += _draw_metal(planet, cost / float(total_turns), cost)
+	# Only what is still owed, and only what was earned. Clamped twice so neither the pool nor
+	# the bank can be driven past the project's price by a rich turn.
+	_contribute(planet, minf(income, maxf(0.0, cost - planet.build_metal)))
 	planet.build_turns_remaining -= 1
-	# Completion is decided by the pool, not by the clock, and the pool is *accumulated*.
-	# Metal the player pushed in through the dialog lives in the same figure as metal the
-	# mines produced, so it survives every subsequent turn: nothing here resets it, and the
-	# share drawn this turn is added to it rather than replacing it. That is what makes a
-	# boost a payment towards the project rather than a nudge that evaporates on the next
-	# turn. A colony that pays the whole cost by hand finishes immediately rather than having
-	# to earn the same metal a second time before the structure lands.
 	if planet.build_metal >= cost - 0.001:
 		finish_construction(planet, buildings, db)
 
 
+## Move `amount` of metal already sitting in `reserve_metals` into the structure project's
+## pool, and return how much actually moved.
+##
+## Bounded by what the colony holds, because the caller is offering income that has just been
+## credited to the bank. The caller must therefore run *after* mining; see `_advance_structure`.
+static func _contribute(planet: PlanetState, amount: float) -> float:
+	var moved := clampf(amount, 0.0, maxf(0.0, planet.reserve_metals))
+	if moved <= 0.0:
+		return 0.0
+	planet.reserve_metals -= moved
+	planet.build_metal += moved
+	return moved
+
+
 ## One turn of the hull at the head of the shipyard queue.
+##
+## Funded from this turn's production, exactly as a structure is: the metal credited here is
+## the metal the mines earned this turn, so the stockpile neither grows nor shrinks because a
+## hull is in the yard. `boost_construction` remains the only way storage pays for a ship.
 static func _advance_ship(
-	galaxy: GalaxyState, planet: PlanetState, faction: FactionState, hulls: Dictionary
+	galaxy: GalaxyState, planet: PlanetState, faction: FactionState, hulls: Dictionary,
+	income: float
 ) -> void:
 	var job := queued_ship_job(planet)
 	if job.is_empty():
@@ -962,13 +1000,23 @@ static func _advance_ship(
 		planet.ship_queue.pop_front()
 		return
 	var cost := float(hull.get("cost_metals"))
-	var total_turns := maxi(1, int(job.get("turns", 1)))
-	job["metal"] = float(job.get("metal", 0.0)) + _draw_metal(planet, cost / float(total_turns), cost)
-	# Same rule as the structure queue: metal already assigned is not owed again. The hull
+	var paid := float(job.get("metal", 0.0))
+	# Only what is still owed, and only what was earned this turn.
+	var share := clampf(minf(income, maxf(0.0, cost - paid)), 0.0, planet.reserve_metals)
+	if share > 0.0:
+		planet.reserve_metals -= share
+		paid += share
+	job["metal"] = paid
+	# Same rule as the structure queue: metal already assigned is not owed again, and the hull
 	# gets it back through the same `boost_construction` path, so a ship paid for by hand and
 	# a ship paid for by the mines both advance the same bar.
-	if float(job.get("metal", 0.0)) >= cost - 0.001:
-		planet.shipyard_progress = float(job.get("metal", 0.0))
+	if paid >= cost - 0.001:
+		# The last turn's income can carry the hull past its price. The overshoot is metal the
+		# colony earned and the yard has no use for, so it goes back to storage rather than
+		# being silently destroyed: the pool is cleared either way, so without this a colony
+		# that over-earns on the finishing turn quietly loses the difference.
+		planet.reserve_metals += maxf(0.0, paid - cost)
+		planet.shipyard_progress = cost
 		planet.ship_queue.pop_front()
 		# The hull exists in orbit the moment it is paid for. It used to leave the yard and
 		# vanish: `ship_queue.pop_front()` was the end of the line, so a ship the player had
@@ -976,22 +1024,7 @@ static func _advance_ship(
 		# ever put it in a fleet.
 		deliver_ships(galaxy, planet, faction, hull_id, 1, hulls)
 	else:
-		planet.shipyard_progress = float(job.get("metal", 0.0))
-
-
-## Move up to `slice` metal out of storage toward the current project, never more than `cost`
-## in total. Returns what actually moved.
-##
-## Only the *debit* happens here; the caller credits the project pool, because the two halves
-## are written to different fields for a structure and for a hull and only the caller knows
-## which. Crediting both was how a three-turn project reached two thirds on its first turn.
-static func _draw_metal(planet: PlanetState, slice: float, cost: float) -> float:
-	var owed := maxf(0.0, cost - project_paid(planet))
-	var moved := clampf(minf(slice, planet.reserve_metals), 0.0, owed)
-	if moved <= 0.0:
-		return 0.0
-	planet.reserve_metals -= moved
-	return moved
+		planet.shipyard_progress = paid
 
 
 ## Put a finished hull into the orbital fleet over `planet`, creating that fleet if the colony
@@ -1184,15 +1217,26 @@ static func refund_construction(planet: PlanetState, amount: float) -> float:
 ## colony spent — whether earned turn by turn or pushed in by hand — is consumed by the
 ## structure it built. Overflow from a late boost is simply lost, because the alternative is a
 ## button that pays the player for overpaying.
+## Land everything in the queue and clear the project.
+##
+## The pool is funded by this turn's income, which is credited to the stockpile first and then
+## transferred in, so a colony that over-earns on the finishing turn can finish the project
+## with metal to spare. That surplus is returned here rather than destroyed: it is metal the
+## colony earned and the finished project has no further claim on. The pool is zeroed either
+## way, because keeping the overshoot against a project that no longer exists is money owed
+## against nothing.
 static func finish_construction(
 	planet: PlanetState, buildings: Dictionary, db: Node
 ) -> void:
+	# Priced before the queue is cleared, since clearing is what erases the definition lookup.
+	var cost := queued_cost(planet, buildings)
 	for building_id: StringName in planet.building_queue:
 		var count := int(planet.building_queue[building_id])
 		planet.structures[building_id] = int(planet.structures.get(building_id, 0)) + count
 	planet.building_queue.clear()
 	planet.build_turns_remaining = 0
 	planet.build_total_turns = 0
+	planet.reserve_metals += maxf(0.0, planet.build_metal - cost)
 	planet.build_metal = 0.0
 	# Recount immediately: the structures that just landed change capacity, housing and the
 	# power budget, and everything after this point in the turn should see the new numbers

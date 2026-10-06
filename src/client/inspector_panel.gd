@@ -164,14 +164,21 @@ func _refresh_planet() -> void:
 	lines.append(Format.field("FOOD", "%d/%d (%s)" % [
 		int(p.food_stock), int(p.get_max_food()), Format.signed_colored(_food_balance(p))]))
 
-	# Power: current over max, with generation minus draw in brackets.
+	# Power: two different quantities, named as such.
 	#
-	# It was `POWER 270/1000 (+40, -10)`, which is two signed numbers the reader has to combine
-	# before they mean anything, and it carried a literal `-0` whenever a structure drew
-	# nothing -- the format printed the sign of zero as a minus sign. One net figure, computed
-	# the way a player would: a Nuclear plant at +40 against a City Complex at 10 is +30.
-	lines.append(Format.field("POWER", "%d/%d (%s)" % [
-		int(p.power), int(p.get_max_power()), Format.signed_colored(_power_balance(p))]))
+	# `POWER 0/10 (+70)` is one line carrying two unrelated numbers, and a reader has no way to
+	# tell that the `0` is not a bug. It is the battery, and the battery really is empty: the
+	# colony generates 70 and consumes 10, but the bank holds ten and the surplus is discarded
+	# by design -- the whole point of Energy Storage being a structure worth building. The
+	# bracket is the *grid*, generation minus consumption, and is not the battery at all.
+	#
+	# Labelling them removes the false impression that a colony generating +70 is somehow
+	# sitting on no power. SURPLUS is what the grid does each turn and is the figure a player
+	# is short of nothing by; BANKED is what is actually stored and is the figure a shortage
+	# would be measured against.
+	lines.append(Format.field("POWER", "%d/%d" % [
+		int(p.power), int(p.get_max_power())]))
+	lines.append(Format.field("SURPLUS", "%s" % Format.signed_colored(_power_balance(p))))
 
 	# The Phase 8 building roster, in the order a player thinks about it. `space_port` is in
 	# `_ROSTER` and so is in `_is_economic`: it used to be printed on its own line here *and*
