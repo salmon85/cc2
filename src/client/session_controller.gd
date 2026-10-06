@@ -501,23 +501,22 @@ func queue_build_ship(hull_id: StringName) -> bool:
 ## arrival, leaving the housing, food, metal and power a landed colony ship provides. Returns
 ## false and explains when the fleet has no kit, is under way, or the world already has one.
 func land_colony_ship() -> bool:
-	var f := fleet()
+	# The carrier over the selected world, not `fleet()`. See `colony_ship_carrier`.
+	var f := colony_ship_carrier()
 	if f == null:
-		action_rejected.emit("select a fleet first")
+		action_rejected.emit("no Colony Ship in orbit over this world")
 		return false
-	if f.destination >= 0:
-		action_rejected.emit("that fleet is under way")
+	if galaxy == null:
+		action_rejected.emit("no game in progress")
 		return false
-	var planet: PlanetState = null
-	if galaxy != null:
-		planet = galaxy.planet(f.system) as PlanetState
+	var planet: PlanetState = galaxy.planet(f.system) as PlanetState
 	if planet == null:
 		action_rejected.emit("that fleet is not parked over a world")
 		return false
 	var faction := player()
 	if faction == null:
 		return false
-	if not InvasionStage.land_colony_ship(galaxy, f, planet, faction):
+	if not InvasionStage.land_colony_ship(galaxy, f, planet, faction, defs, db):
 		if not f.has_colony_ship():
 			action_rejected.emit("that fleet carries no Colony Ship")
 		elif planet.colonized:
@@ -537,17 +536,38 @@ func land_colony_ship() -> bool:
 	# The landing is the structure's first turn of existence, so its capacities and its
 	# staffing are settled now rather than at the top of the next colony pass.
 	_recount_and_announce(planet)
+	# The world the player was looking at is now their colony, so the selector has to catch
+	# up: without this the build menu would still be offering the previous target.
+	select_planet(planet.index)
 	state_changed.emit()
 	return true
 
 
-## Whether the selected fleet could land its Colony Ship right now.
+## The player's own Colony Ship parked over the selected world, or null.
+##
+## Found by *world*, not by selection. The button this feeds is pressed after the player has
+## clicked a planet, and a click on the map selects a world rather than a fleet -- so asking
+## "which fleet is selected" answered a question the player never asked, and the control was
+## absent for exactly the flow it exists to serve. A player holding the one Colony Ship their
+## empire had would look at an empty world, see no button, and conclude the game had lost it.
+func colony_ship_carrier() -> FleetState:
+	if galaxy == null or selected_planet < 0:
+		return null
+	var orbiter := galaxy.orbital_fleet(selected_planet, player_id) as FleetState
+	if orbiter == null or orbiter.destination >= 0 or not orbiter.active:
+		return null
+	if not orbiter.has_colony_ship():
+		return null
+	return orbiter
+
+
+## Whether the selected world could be settled right now.
 ##
 ## A question rather than an action, so the fleet panel's button can be disabled with a reason
 ## instead of offering something that is guaranteed to be refused.
 func can_land_colony_ship() -> bool:
-	var f := fleet()
-	if f == null or galaxy == null or f.destination >= 0 or f.system < 0:
+	var f := colony_ship_carrier()
+	if f == null:
 		return false
 	return InvasionStage.can_land_colony_ship(f, galaxy.planet(f.system))
 

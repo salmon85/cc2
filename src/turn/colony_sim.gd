@@ -327,6 +327,52 @@ static func release_random_worker(planet: PlanetState, rng: RandomNumberGenerato
 ## Simulate one colony. Mutates `planet` and returns its report.
 ##
 ## `faction` supplies tech bonuses; `defs` is the registry; `db` holds the tuning constants.
+## Give a freshly settled world the kit a Colony Ship brings.
+##
+## One function, two callers: the generator's founding colony and `InvasionStage`'s landing.
+## They used to be written twice, and the two copies had already drifted -- a landed Colony
+## Ship set the structure and the ownership and stopped there, so a world settled on turn 40
+## opened with no colonists, no pantry and no metal, while the empire's first world opened
+## with all three. The kit is what a Colony Ship *is*; a colony that arrives without it has
+## been stripped of the thing the player spent a ship to bring.
+##
+## Stockpiles are floored rather than overwritten, for the reason the generator gives: a
+## colony already holding more than the baseline keeps the better of the two.
+static func equip_founding_colony(
+	planet: PlanetState, faction_id: int, buildings: Dictionary, db: Node
+) -> void:
+	if planet == null:
+		return
+	planet.owner = faction_id
+	planet.colonized = true
+	planet.surveyed = true
+	# Only the landed Colony Ship. Farms and mines are built, not granted -- a colony that
+	# opens with its labour already posted teaches the player the panel is a readout rather
+	# than a decision.
+	planet.structures[&"colony_ship_building"] = 1
+	planet.worker_assignment.clear()
+	# Without a `GameDB` there is no baseline to apply, but the world is still settled and
+	# still holds a Colony Ship: the ownership and the structure above are the part that
+	# cannot be skipped, and a caller that has no registry should get a bare world rather
+	# than a refusal.
+	if db == null:
+		return
+	planet.population = float(db.get("START_POPULATION"))
+	# Stockpiles are floored rather than overwritten, for the reason the generator gives: a
+	# colony already holding more than the baseline keeps the better of the two.
+	planet.food_stock = maxf(planet.food_stock, float(db.get("STARTING_FOOD")))
+	planet.reserve_metals = maxf(planet.reserve_metals, float(db.get("STARTING_METALS")))
+	planet.power = maxf(planet.power, float(db.get("STARTING_POWER")))
+	# Settled now, so a player who opens the panel on turn one is shown a colony that exists.
+	recount_capacity(planet, buildings, db)
+
+
+## Whether `planet` still needs a Colony Ship settled on it.
+static func needs_founding_kit(planet: PlanetState) -> bool:
+	return planet != null and not planet.colonized \
+		and int(planet.structures.get(&"colony_ship_building", 0)) <= 0
+
+
 static func simulate_colony(
 	galaxy: GalaxyState,
 	planet: PlanetState,

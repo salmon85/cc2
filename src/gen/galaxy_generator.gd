@@ -542,34 +542,13 @@ static func _founding_colony(
 	p.owner = f.id
 	p.colonized = true
 	p.surveyed = true
-	p.population = float(db.get("START_POPULATION"))
-
-	# Only the landed Colony Ship. Farms and mines are built, not granted.
-	#
-	# The two farms and one mine that used to be written here were not a starting *condition*
-	# so much as a substitute for the player making one: the colonies came pre-staffed and
-	# nobody ever pressed `+`. That is a decision dressed as a default, and it hid the whole
-	# mechanic -- a colony that opens with its labour already posted teaches the player that
-	# the panel is a readout rather than a decision.
-	#
-	# Three colonists on a bare world is still playable: the Colony Ship's own pantry carries
-	# them, `STARTING_FOOD` banks three turns of slack, and the first farm is affordable out
-	# of `STARTING_METALS`. What the colony does not do is produce anything until somebody
-	# posts somebody to something.
-	p.structures[&"colony_ship_building"] = 1
-	p.worker_assignment.clear()
-
-	# Stockpiles floored rather than left to `seed_reserves`. The orbit penalty scales a
-	# homeworld's reserves by as little as 0.45, so a starting colony on a cold outer ring
-	# could open with less metal than the brief calls a baseline -- and a colony that opens
-	# unable to build its first farm is a colony that opens losing.
-	p.food_stock = maxf(p.food_stock, float(db.get("STARTING_FOOD")))
-	p.reserve_metals = maxf(p.reserve_metals, float(db.get("STARTING_METALS")))
-	p.power = maxf(p.power, float(db.get("STARTING_POWER")))
-
-	# The colony's own capacities are settled now, rather than at the top of the first turn.
-	# A player who opens the panel on turn one has to be shown a colony that exists.
-	ColonySim.recount_capacity(p, defs.get("buildings") as Dictionary, db)
+	# The kit is `ColonySim`'s, not this function's: an empire's first world and a world a
+	# Colony Ship lands on turn 40 must open in the same condition, and two hand-written
+	# copies of "what a Colony Ship brings" had already drifted apart. Farms and mines are
+	# built rather than granted -- a colony that opens with its labour already posted teaches
+	# the player that the panel is a readout rather than a decision -- so both copies leave
+	# the worker assignment empty and the player makes the first posting themselves.
+	ColonySim.equip_founding_colony(p, f.id, defs.get("buildings") as Dictionary, db)
 
 
 ## A new empire starts with nothing in orbit.

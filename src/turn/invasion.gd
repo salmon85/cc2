@@ -245,7 +245,8 @@ static func _transfer_colony(
 ## cap is 1), it is already a colony, or the fleet carries no Colony Ship. The caller reports
 ## which.
 static func land_colony_ship(
-	galaxy: GalaxyState, fleet: FleetState, planet: PlanetState, faction: FactionState
+	galaxy: GalaxyState, fleet: FleetState, planet: PlanetState, faction: FactionState,
+	defs: Node = null, db: Node = null
 ) -> bool:
 	if planet == null or fleet == null or faction == null:
 		return false
@@ -258,6 +259,18 @@ static func land_colony_ship(
 	if planet.colonized:
 		return false
 
+	# Anyone in the hold comes ashore with the ship.
+	#
+	# Read before the hull leaves and before the fleet may be removed, because both can take
+	# the cargo manifest with them. A Colony Ship carrying two hundred settlers and being
+	# spent on an empty rock used to throw them away: they were in `cargo`, nothing ever read
+	# it on a landing, and the new colony opened with three people and no way to explain the
+	# rest. Civs are colonists, so they become population.
+	var civs := 0.0
+	if fleet.cargo.has(&"civilians"):
+		civs = maxf(0.0, float(fleet.cargo.get(&"civilians", 0.0)))
+		fleet.cargo[&"civilians"] = 0.0
+
 	if fleet.remove_ships(&"colony_ship", 1) <= 0:
 		return false
 	# A fleet that existed only to carry the kit has served its purpose. Left standing it is
@@ -267,10 +280,14 @@ static func land_colony_ship(
 	if fleet.ship_count() <= 0:
 		fleet.active = false
 		galaxy.remove_fleet(fleet.id)
-	planet.structures[&"colony_ship_building"] = 1
-	planet.owner = faction.id
-	planet.colonized = true
-	planet.surveyed = true
+
+	# The structure, the ownership and everything the ship brings. `equip_founding_colony` is
+	# the same call the generator makes for an empire's first world, so a colony founded on
+	# turn 40 and one founded on turn 0 open in the same condition.
+	ColonySim.equip_founding_colony(
+		planet, faction.id, defs.get("buildings") as Dictionary if defs != null else {}, db)
+	if civs > 0.0:
+		planet.population += civs
 	faction.colonies_founded += 1
 	return true
 

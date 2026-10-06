@@ -100,17 +100,6 @@ func _build() -> void:
 	_cargo_button.pressed.connect(_on_cargo_pressed)
 	col.add_child(_cargo_button)
 
-	# The Colony Ship is the one structure a colony cannot build: it flies here and is spent.
-	# The button is enabled only when the fleet actually carries one over an unclaimed world,
-	# because "no kit aboard" and "already settled" are two different reasons a press would
-	# be refused and a player deserves to see which before pressing.
-	_land_button = Button.new()
-	_land_button.text = "Land Colony Ship"
-	_land_button.tooltip_text = "Consume this fleet's Colony Ship to settle the world below"
-	_land_button.focus_mode = Control.FOCUS_NONE
-	_land_button.pressed.connect(_on_land_pressed)
-	col.add_child(_land_button)
-
 	_hint = Label.new()
 	_hint.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	_hint.add_theme_color_override("font_color", CC2Theme.WHITE_DIM)
@@ -123,6 +112,22 @@ func _build() -> void:
 	_detail.scroll_active = false
 	_detail.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	col.add_child(_detail)
+
+	# The Colony Ship is the one structure a colony cannot build: it flies here and is spent.
+	# The button is enabled only when the selected world really has one overhead, because
+	# "no kit aboard" and "already settled" are two different reasons a press would be refused
+	# and a player deserves to see which before pressing.
+	#
+	# Last in the column, after the expanding detail block, so it sits at the foot of the
+	# panel. It used to sit with Travel and the cargo control near the top, where it read as
+	# one more way to move ships -- and it is the one button in this panel that settles a
+	# world, which is a different kind of act entirely.
+	_land_button = Button.new()
+	_land_button.text = "Land Colony Ship"
+	_land_button.tooltip_text = "Spend this world's Colony Ship to settle it, bringing its colonists ashore"
+	_land_button.focus_mode = Control.FOCUS_NONE
+	_land_button.pressed.connect(_on_land_pressed)
+	col.add_child(_land_button)
 
 
 func bind(controller: SessionController) -> void:
@@ -171,10 +176,13 @@ func _refresh_paths_button() -> void:
 func _refresh_land_button() -> void:
 	if _land_button == null:
 		return
+	# Visibility, not a disabled button, for the reason the cargo control gives: "you have
+	# no Colony Ship over this world" is a different thing to be told than "you pressed a
+	# button and nothing happened". The tooltip is set once at build time and not rewritten
+	# here, so the two cannot disagree.
 	var landable := _controller.can_land_colony_ship()
 	_land_button.visible = landable
 	_land_button.disabled = not landable
-	_land_button.tooltip_text = "Consume this fleet's Colony Ship to settle the world below"
 
 
 ## Show the cargo control only when there is something in orbit that can actually be loaded.

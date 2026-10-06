@@ -53,6 +53,7 @@ func _initialize() -> void:
 	_test_cargo_at_planet()
 	_test_growth_curve()
 	_test_planet_visuals()
+	_test_landing_brings_the_kit_and_the_civs()
 	_test_landed_colony_ship_entity()
 	_test_capacity_sync()
 	_test_worker_assignment()
@@ -3286,6 +3287,87 @@ static func _warns(planet: PlanetState, key: StringName) -> bool:
 ##
 ## The ship leaves the fleet, the structure carries the kit's numbers, and a fleet that
 ## existed only to carry it stops existing. Each of those was separately observable.
+## A Colony Ship lands as a colony, not as an empty rock with a building on it.
+##
+## It used to set the structure and the ownership and stop there, so a world settled on turn
+## 40 opened with no colonists, no pantry and no metal -- while the empire's *first* world,
+## written separately in the generator, opened with all three. Two hand-written copies of
+## "what a Colony Ship brings" had drifted, and the player spent a ship to bring a kit that
+## was then thrown away.
+##
+## Anyone in the hold comes ashore too. Civs lived in `cargo`, no landing path read it, and
+## they were silently discarded -- two hundred settlers paid for, none delivered.
+func _test_landing_brings_the_kit_and_the_civs() -> void:
+	sup.begin("a landing brings the kit and the civilians")
+	var g := _galaxy(31338)
+	var world := _unowned_planet(g)
+	sup.ok(world >= 0, "an unclaimed world exists to settle")
+	if world < 0:
+		return
+	var planet: PlanetState = g.planet(world)
+	var faction: FactionState = g.faction(0)
+
+	# What the generator hands an empire's first world, read from the same place.
+	var defs: Node = _defs
+	var db: Node = _db
+	var buildings: Dictionary = defs.get("buildings") as Dictionary
+	var kit_pop := float(db.get("START_POPULATION"))
+	var kit_food := float(db.get("STARTING_FOOD"))
+	var kit_metal := float(db.get("STARTING_METALS"))
+	var kit_power := float(db.get("STARTING_POWER"))
+	var colony_ship := _defs_building(&"colony_ship_building") as Resource
+	sup.ok(colony_ship != null, "the Colony Ship has a definition of its own as a building")
+	if colony_ship == null:
+		return
+	# The kit's housing, pantry and battery are the `BASE_*` constants rather than fields on
+	# the building -- the generator folds the landed ship's contribution into the base so a
+	# colony that scrapped it still reads as a colony. The building itself is the part that
+	# feeds and mines.
+	sup.ok(float(colony_ship.get("yield_amount")) > 0.0,
+		"and it feeds the colony on its own", "yield=%.1f" % float(colony_ship.get("yield_amount")))
+	sup.near(float(colony_ship.get("pop_housed")), 0.0, 0.001,
+		"its housing is the base constant rather than a field of its own")
+
+	# A ship with a hold full of settlers, and no warships, so the fleet is spent entirely.
+	var fleet := _place_fleet(g, 0, world, {&"colony_ship": 1})
+	fleet.cargo[&"civilians"] = 6.0
+	sup.ok(InvasionStage.land_colony_ship(g, fleet, planet, faction, defs, db), "it lands")
+
+	sup.ok(planet.colonized, "the world is settled")
+	sup.eq(planet.owner, faction.id, "and owned")
+	sup.ok(planet.surveyed, "and known to its new owner")
+	sup.eq(int(planet.structures.get(&"colony_ship_building", 0)), 1,
+		"carrying the structure the ship leaves behind")
+	sup.eq(g.fleet(fleet.id) == null, true,
+		"and the fleet that existed only to carry it is gone")
+
+	# The kit, matching the generator's founding colony figure for figure.
+	sup.near(planet.population, kit_pop + 6.0, 0.001,
+		"the colony opens with the kit's colonists plus everyone in the hold")
+	sup.ok(planet.food_stock >= kit_food, "with the kit's pantry", "%.1f" % planet.food_stock)
+	sup.ok(planet.reserve_metals >= kit_metal,
+		"and enough metal for its first farm", "%.1f" % planet.reserve_metals)
+	sup.ok(planet.power >= kit_power, "and a working battery", "%.1f" % planet.power)
+	sup.eq(planet.worker_assignment.size(), 0,
+		"and nobody posted, so the first posting is the player's decision")
+	# Capacities settled on the turn of the landing, so the panel can show a real colony.
+	sup.near(float(planet.get_max_housing()), float(db.get("BASE_HOUSING")), 0.001,
+		"capacities are settled immediately rather than next turn")
+
+	# And the generator's own founding colony really is the same shape, which is the whole
+	# reason both go through `equip_founding_colony`.
+	var fresh := _galaxy(31339)
+	var home: PlanetState = fresh.colonies_of(0)[0]
+	sup.near(home.population, kit_pop, 0.001,
+		"a generated first world has the same colonists as a landed one")
+	sup.ok(home.reserve_metals >= kit_metal, "and the same metal")
+	sup.ok(home.food_stock >= kit_food, "and the same pantry")
+
+	# The hold is emptied by the landing, so the settlers are not counted twice.
+	sup.near(float(fleet.cargo.get(&"civilians", 0.0)), 0.0, 0.001,
+		"and the hold is empty afterwards")
+
+
 func _test_landed_colony_ship_entity() -> void:
 	sup.begin("landed colony ship is a building, not a ship")
 	var g := _galaxy(31337)

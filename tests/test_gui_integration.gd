@@ -1206,7 +1206,19 @@ func _step_build_button_and_ship_list() -> void:
 	colony.build_metal = 0.0
 
 
-## The landing button appears only for a fleet that can actually settle the world below it.
+## Clicking a world with a Colony Ship over it offers the landing, and landing it works.
+##
+## Three things this covers that the previous step did not.
+##
+## The button is found by *world*, not by fleet selection. Clicking a planet on the map
+## selects a planet, so the old "which fleet is selected" test answered a question the player
+## never asked and the control was absent for exactly the flow it exists to serve.
+##
+## The world arrives as a colony, not as an empty rock with a building on it: the same kit the
+## generator hands an empire's first world.
+##
+## Anyone in the hold comes ashore. Civs were in `cargo`, nothing read it on a landing, and
+## they were discarded.
 func _step_landing_button() -> void:
 	sup.begin("fleet: the Colony Ship landing button")
 	if _client == null or _client.controller == null:
@@ -1215,8 +1227,17 @@ func _step_landing_button() -> void:
 	sup.ok(_client.fleets.land_button() != null, "the panel exposes a landing button")
 	if _client.fleets.land_button() == null:
 		return
+	var button := _client.fleets.land_button()
+	sup.eq(button.text, "Land Colony Ship", "and it says what it does")
 
-	# A world nobody owns, and a fleet parked over it carrying a kit.
+	# At the foot of the panel, after the expanding detail block rather than beside Travel.
+	var siblings := button.get_parent().get_children()
+	sup.ok(not siblings.is_empty() and siblings[siblings.size() - 1] == button,
+		"the landing button is the last control in the panel",
+		"last=%s" % str(siblings[siblings.size() - 1] if not siblings.is_empty() else "<none>"))
+
+	# A world nobody owns, and a fleet parked over it carrying a kit and a hold full of
+	# settlers.
 	var target := -1
 	for p in c.galaxy.planets:
 		if p.owner < 0 and not p.colonized and p.index != c.selected_planet:
@@ -1229,36 +1250,86 @@ func _step_landing_button() -> void:
 	sup.ok(carrier != null, "a fleet with a kit is parked over it")
 	if carrier == null:
 		return
-	c.select_fleet(carrier.id)
-	sup.ok(c.can_land_colony_ship(), "so a landing is legal")
-	sup.ok(_client.fleets.land_button().visible,
-		"and the button is shown")
-	sup.ok(not _client.fleets.land_button().disabled, "and enabled")
+	var settlers := 7.0
+	carrier.cargo[&"civilians"] = settlers
 
-	# Pressing it settles the world and spends the ship.
+	# The player's gesture is a click on the world. Nothing selects the fleet.
+	c.selected_fleet = -1
+	c.select_planet(target)
+	_client.fleets.refresh()
+	sup.ok(c.colony_ship_carrier() == carrier,
+		"the Colony Ship over the clicked world is found without selecting a fleet")
+	sup.ok(c.can_land_colony_ship(), "so a landing is legal")
+	sup.ok(button.visible, "and the button is shown")
+	sup.ok(not button.disabled, "and enabled")
+
+	# Pressing it settles the world, spends the ship, and brings the kit.
 	var before_ships := carrier.ship_count()
-	_client.fleets.land_button().emit_signal(&"pressed")
-	sup.ok(c.galaxy.planet(target).colonized, "the world is settled")
-	sup.eq(c.galaxy.planet(target).owner, 0, "and owned by the player")
-	sup.eq(c.galaxy.planet(target).count(&"colony_ship_building"), 1,
+	button.emit_signal("pressed")
+	var settled := c.galaxy.planet(target)
+	sup.ok(settled.colonized, "the world is settled")
+	sup.eq(settled.owner, 0, "and owned by the player")
+	sup.eq(settled.count(&"colony_ship_building"), 1,
 		"with the structure a landed Colony Ship leaves")
 	sup.eq(carrier.ship_count(), before_ships - 1, "and the ship itself is consumed")
 	sup.ok(_client.log_text().contains("COLONY SHIP LANDED"),
 		"the landing is reported in the log")
 
+	# The kit: what an empire's first world opens with, not a bare rock.
+	sup.eq(int(settled.population), int(settled.population),
+		"the colony has a population")
+	sup.ok(settled.population >= settlers,
+		"and everyone in the hold came ashore rather than being discarded",
+		"pop=%.0f settlers=%.0f" % [settled.population, settlers])
+	sup.near(float(carrier.cargo.get(&"civilians", 0.0)), 0.0, 0.001,
+		"leaving the hold empty")
+	sup.ok(settled.food_stock >= float(_db.get("STARTING_FOOD")),
+		"and it opens with a pantry", "food=%.1f" % settled.food_stock)
+	sup.ok(settled.reserve_metals >= float(_db.get("STARTING_METALS")),
+		"and enough metal to build its first farm", "metal=%.1f" % settled.reserve_metals)
+	sup.ok(settled.power >= float(_db.get("STARTING_POWER")),
+		"and a working battery", "power=%.1f" % settled.power)
+	sup.eq(settled.worker_assignment.size(), 0,
+		"and nobody posted, so the first posting is the player's decision")
+	# Capacities settled on the turn of the landing, not the next one.
+	_client.inspector.refresh()
+	sup.eq(int(settled.get_max_housing()), int(_db.get("BASE_HOUSING")),
+		"its capacities are settled immediately")
+
 	# The cap holds, so the button goes away again.
 	sup.ok(not c.can_land_colony_ship(),
 		"a second landing on the same world is no longer legal")
-	sup.ok(not _client.fleets.land_button().visible,
+	sup.ok(not button.visible,
 		"and the button is hidden rather than offering a refusal")
 
-	# A fleet with no kit never shows it at all.
-	var escort := _gen_fleet(0, target, {&"corvette": 2})
-	if escort != null:
-		c.select_fleet(escort.id)
-		sup.ok(not c.can_land_colony_ship(), "a fleet with no Colony Ship cannot land")
-		sup.ok(not _client.fleets.land_button().visible,
-			"and shows no landing button")
+	# A fleet with no kit is not a carrier, on a world that *could* otherwise be settled --
+	# so the refusal is about the missing ship rather than about the world being taken.
+	#
+	# The escort is removed again before the step ends. Left parked it changes what the later
+	# travel step finds when it asks for a world with nothing in orbit, and the failure would
+	# land there rather than here, a long way from the cause.
+	var bare := -1
+	for p in c.galaxy.planets:
+		if p.owner < 0 and not p.colonized and p.index != target:
+			bare = p.index
+			break
+	if bare >= 0:
+		var escort := _gen_fleet(0, bare, {&"corvette": 2})
+		if escort != null:
+			c.select_planet(bare)
+			_client.fleets.refresh()
+			sup.ok(c.colony_ship_carrier() == null,
+				"a fleet with no Colony Ship is not a carrier")
+			sup.ok(not c.can_land_colony_ship(),
+				"and an unclaimed world with only an escort cannot be settled")
+			sup.ok(not button.visible, "so no landing button is offered")
+			c.galaxy.remove_fleet(escort.id)
+
+	# And a world with nothing in orbit at all.
+	c.select_planet(bare if bare >= 0 else target)
+	_client.fleets.refresh()
+	sup.ok(c.colony_ship_carrier() == null, "an empty orbit has no carrier either")
+	sup.ok(not button.visible, "and an empty world offers nothing to land")
 
 	c.selected_fleet = -1
 	_client.fleets.refresh()
