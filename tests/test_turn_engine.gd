@@ -41,8 +41,16 @@ func _initialize() -> void:
 	_test_space_port_hulls()
 	_test_colony_ship_landing()
 	_test_storage_capacity()
+	_test_structure_capacity_contributions()
 	_test_metal_boost()
+	_test_refund_metal()
+	_test_construction_spends_stored_metal()
+	_test_no_upfront_metal_gate()
+	_test_ship_construction()
+	_test_orbital_fleets()
+	_test_cargo_at_planet()
 	_test_growth_curve()
+	_test_planet_visuals()
 	_test_troops_and_cargo()
 	_test_survey()
 	_test_research()
@@ -1303,6 +1311,526 @@ func _test_metal_boost() -> void:
 					float(turn + 1) / 3.0, 0.02,
 					"turn %d of 3 reads about a third" % (turn + 1))
 		sup.eq(timed.count(&"city_complex"), 1, "and it lands on the third turn")
+
+
+# --- Phase 8 corrections: metal allocation, hulls, orbits, visuals ---------
+
+## Each built granary, energy store and city complex adds its own stated capacity.
+##
+## Asserted per *copy* rather than as a total. "A colony with three granaries has 3100 food" is
+## a statement that can be satisfied by a colony with one granary, a base cap of 3100 and no
+## contribution at all; the claim under test is that each structure is worth what it says, so
+## the probe adds one structure at a time and reads the difference.
+func _test_structure_capacity_contributions() -> void:
+	sup.begin("per-structure capacity contributions")
+	var g := _galaxy(31337)
+	var colony := _habitable_colony(g)
+	sup.ok(colony != null, "a world exists for the capacity probe")
+	if colony == null:
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+
+	var base := ColonySim.capacity_for(colony, buildings, _db)
+	sup.near(float(base.get("food", 0.0)), float(_db.get("BASE_FOOD_STORAGE")), 0.001,
+		"a colony with no granaries stores exactly the base food capacity")
+	sup.near(float(base.get("power", 0.0)), float(_db.get("BASE_POWER_STORAGE")), 0.001,
+		"and exactly the base power capacity")
+	sup.near(float(base.get("housing", 0.0)), 0.0, 0.001,
+		"and houses nobody, because a landed colony ship is the only baseline housing")
+
+	# One at a time, each measured as the delta it is responsible for.
+	var cases: Array = [
+		[&"granary", "food", 1000.0, "a granary adds 1000 food"],
+		[&"energy_storage", "power", 1000.0, "an energy storage adds 1000 power"],
+		[&"city_complex", "housing", 20.0, "a city complex houses 20"],
+	]
+	for case: Variant in cases:
+		var id := StringName(str(case[0]))
+		var key := String(str(case[1]))
+		var expected := float(case[2])
+		var label := String(case[3])
+		colony.structures = {id: 1}
+		var one := ColonySim.capacity_for(colony, buildings, _db)
+		colony.structures = {id: 3}
+		var three := ColonySim.capacity_for(colony, buildings, _db)
+		var per_copy := (float(three.get(key, 0.0)) - float(one.get(key, 0.0))) / 2.0
+		sup.near(per_copy, expected, 0.001, "%s, and every copy is worth the same" % label)
+
+	# And the total is the base plus the copies, which is the arithmetic the two probes imply.
+	colony.structures = {&"granary": 2, &"energy_storage": 3, &"city_complex": 1}
+	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(1))
+	sup.near(colony.food_capacity, float(_db.get("BASE_FOOD_STORAGE")) + 2000.0, 0.001,
+		"two granaries put 2000 food above the base on the planet itself")
+	sup.near(colony.power_capacity, float(_db.get("BASE_POWER_STORAGE")) + 3000.0, 0.001,
+		"three energy stores put 3000 power above the base")
+	sup.near(colony.housing, 20.0, 0.001, "and one city complex houses 20")
+
+
+## Taking assigned metal back out returns it to storage, and bottoms out at zero assigned.
+func _test_refund_metal() -> void:
+	sup.begin("refunding construction metal")
+	var g := _galaxy(5150)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the refund probe")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var granary := _defs_building(&"granary") as Resource
+	var cost := float(granary.get("cost_metals"))
+
+	colony.building_queue[&"granary"] = 1
+	colony.build_total_turns = int(granary.get("build_turns"))
+	colony.build_turns_remaining = int(granary.get("build_turns"))
+	colony.build_metal = 0.0
+	colony.reserve_metals = 400.0
+
+	# Nothing assigned, nothing to take back.
+	sup.near(ColonySim.refund_construction(colony, 100.0), 0.0, 0.001,
+		"a project with nothing assigned refunds nothing")
+	sup.near(colony.reserve_metals, 400.0, 0.001, "and storage is untouched")
+
+	# Assign, then take half of it back.
+	ColonySim.boost_construction(colony, cost * 0.5, buildings)
+	var after_assign := colony.reserve_metals
+	var given := ColonySim.refund_construction(colony, cost * 0.25)
+	sup.near(given, cost * 0.25, 0.001, "a partial refund returns exactly what was asked for")
+	sup.near(colony.reserve_metals, after_assign + cost * 0.25, 0.001,
+		"and the metal lands back in storage")
+	sup.near(colony.build_metal, cost * 0.25, 0.001,
+		"so the bar drops back by the same amount")
+
+	# Asking for more than is banked takes only what is banked, and the pool reaches zero.
+	var left := ColonySim.refund_construction(colony, 9999.0)
+	sup.near(left, cost * 0.25, 0.001, "an oversized refund is clamped to what is assigned")
+	sup.near(ColonySim.project_paid(colony), 0.0, 0.001,
+		"and 'take it all out' really does reach zero assigned")
+	sup.near(ColonySim.refund_construction(colony, 1.0), 0.0, 0.001,
+		"and there is nothing left to take")
+
+	# The two directions together are a round trip, not a mint: assign and refund the same
+	# amount and the colony is exactly where it started.
+	var before_round_trip := colony.reserve_metals
+	ColonySim.boost_construction(colony, 30.0, buildings)
+	ColonySim.refund_construction(colony, 30.0)
+	sup.near(colony.reserve_metals, before_round_trip, 0.001,
+		"assigning and refunding the same metal is a round trip, not a profit")
+
+
+## Construction pays for itself out of the colony's own storage, a slice a turn.
+func _test_construction_spends_stored_metal() -> void:
+	sup.begin("construction spends stored metal")
+	var g := _galaxy(6161)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the metal-spend probe")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var city := _defs_building(&"city_complex") as Resource
+	var cost := float(city.get("cost_metals"))
+	colony.structures = {&"mine": 4}
+	colony.population = 4.0
+	colony.food_stock = 900.0
+	colony.reserve_metals = 1000.0
+	colony.building_queue[&"city_complex"] = 1
+	colony.build_total_turns = int(city.get("build_turns"))
+	colony.build_turns_remaining = int(city.get("build_turns"))
+	colony.build_metal = 0.0
+
+	# The metal has to actually *leave* storage. It used to be pure accounting: the pool grew
+	# by a slice each turn while the stockpile was never touched, which made the pool a
+	# number about the project rather than a quantity of metal -- and made "take the metal
+	# back out" meaningless, because there had never been any in it.
+	var mined := ColonySim._metal_output(colony, buildings)
+	var store_before := colony.reserve_metals
+	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(2))
+	var slice := cost / float(city.get("build_turns"))
+	sup.near(colony.reserve_metals, store_before + mined - slice, 0.001,
+		"the turn's metal income minus the project's share is what is left in storage")
+	sup.near(colony.build_metal, slice, 0.001,
+		"and the project's share is banked against the project")
+
+	# A colony that cannot cover the whole share contributes what it has and takes longer,
+	# rather than being refused or silently finishing anyway.
+	#
+	# Each case gets its own galaxy: `_habitable_colony` always settles the most habitable
+	# unclaimed world, so two calls against one galaxy hand back the *same* planet and the
+	# second case silently overwrites the first one's state.
+	var broke := _habitable_colony(_galaxy(6162))
+	if broke != null:
+		broke.structures = {}
+		broke.population = 1.0
+		broke.food_stock = 900.0
+		broke.reserve_metals = 5.0
+		broke.building_queue[&"city_complex"] = 1
+		broke.build_total_turns = int(city.get("build_turns"))
+		broke.build_turns_remaining = int(city.get("build_turns"))
+		broke.build_metal = 0.0
+		for _turn in 3:
+			ColonySim.simulate_colony(_galaxy(6162), broke, g.faction(0), _defs, _db, _rng(3))
+		sup.near(broke.build_metal, 5.0, 0.001,
+			"a colony with nothing to spend puts its whole stockpile in and no more")
+		sup.eq(broke.count(&"city_complex"), 0, "and the project is still going")
+
+	# And a colony with a full pile finishes on schedule.
+	var rich := _habitable_colony(_galaxy(6163))
+	if rich != null:
+		rich.structures = {}
+		rich.population = 1.0
+		rich.food_stock = 900.0
+		rich.reserve_metals = 5000.0
+		rich.building_queue[&"city_complex"] = 1
+		rich.build_total_turns = int(city.get("build_turns"))
+		rich.build_turns_remaining = int(city.get("build_turns"))
+		rich.build_metal = 0.0
+		for turn in int(city.get("build_turns")):
+			ColonySim.simulate_colony(_galaxy(6163), rich, g.faction(0), _defs, _db, _rng(4 + turn))
+		sup.eq(rich.count(&"city_complex"), 1,
+			"a colony that can pay its share builds it in the declared number of turns")
+
+
+## Queueing a project asks nothing about the colony's balance.
+func _test_no_upfront_metal_gate() -> void:
+	sup.begin("no upfront metal gate")
+	var g := _galaxy(7171)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the queueing probe")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var city := _defs_building(&"city_complex") as Resource
+	var faction: FactionState = g.faction(0)
+	faction.unlocked_buildings[&"city_complex"] = true
+
+	# An empty bank used to make a 100-metal structure unstartable, which is precisely the
+	# colony whose mines are about to produce the metal. Nothing is charged up front either.
+	# Power is supplied deliberately: a City Complex draws 10, and power is the one gate that
+	# is still meant to block a build rather than price it -- the negative case is below.
+	colony.reserve_metals = 0.0
+	colony.power = 500.0
+	colony.power_generated = 0.0
+	colony.power_drawn = 0.0
+	colony.building_queue.clear()
+	TurnResolver.resolve_turn(g, [
+		Order.make_build_structure(0, colony.index, &"city_complex", 1)
+	], _defs, _db, _rng(5), 0)
+	sup.eq(int(colony.building_queue.get(&"city_complex", 0)), 1,
+		"a colony with an empty bank can still queue a structure")
+	sup.near(colony.reserve_metals, 0.0, 0.001,
+		"and queueing it costs nothing at the moment of queueing")
+	sup.eq(ColonySim.project_kind(colony), ColonySim.ProjectKind.STRUCTURE,
+		"and the build slot reports a structure")
+	sup.near(ColonySim.project_cost(colony, buildings), float(city.get("cost_metals")), 0.001,
+		"whose cost is the full metal price")
+
+	# Power is still a genuine gate: it blocks the structure rather than pricing it.
+	var hungry := _habitable_colony(g)
+	if hungry != null:
+		hungry.power = 0.0
+		hungry.power_generated = 0.0
+		hungry.power_drawn = 100.0
+		hungry.building_queue.clear()
+		TurnResolver.resolve_turn(g, [
+			Order.make_build_structure(0, hungry.index, &"city_complex", 1)
+		], _defs, _db, _rng(6), 0)
+		sup.ok(hungry.building_queue.is_empty(),
+			"a colony that cannot feed the structure still cannot start it")
+
+
+## Hulls are built on metal, on a schedule, and are handed to an orbital fleet when paid for.
+func _test_ship_construction() -> void:
+	sup.begin("ship construction")
+	var g := _galaxy(8181)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the shipyard probe")
+		return
+	var hulls: Dictionary = _defs.get("ship_hulls") as Dictionary
+	var corvette := _defs.call("ship_hull", &"corvette") as Resource
+	sup.ok(corvette != null, "the corvette has a definition")
+	if corvette == null:
+		return
+	var cost := float(corvette.get("cost_metals"))
+	var turns := int(corvette.get("build_turns"))
+	sup.ok(turns >= 1,
+		"a hull declares its own build turns (it read a property the class did not have, "
+		+ "so every hull used to finish on its first turn whatever it cost)")
+
+	colony.structures = {&"space_port": 1}
+	colony.population = 4.0
+	colony.food_stock = 900.0
+	colony.reserve_metals = 5000.0
+	colony.ship_queue.clear()
+	TurnResolver.resolve_turn(g, [
+		Order.make_build_ship(0, colony.index, &"corvette")
+	], _defs, _db, _rng(7), 0)
+	sup.eq(colony.ship_queue.size(), 1, "the hull is laid on the keel")
+	sup.eq(int(colony.ship_queue[0].get("turns", 0)), turns,
+		"and the queue records the hull's own build turns")
+	sup.eq(ColonySim.project_kind(colony), ColonySim.ProjectKind.SHIP,
+		"and the build slot reports a ship")
+	sup.near(ColonySim.project_cost(colony, {}, hulls), cost, 0.001,
+		"priced from the hull definition, like a structure")
+
+	# Progress is metal, paid out of the colony's store.
+	#
+	# Rewound first: `resolve_turn` above runs the colony phase as well as the order phase, so
+	# by the time it returned the hull had already taken its first turn's share. Measuring a
+	# *second* share here would describe a yard that has been running twice as long as the
+	# number under it claims.
+	ColonySim.set_project_paid(colony, 0.0)
+	colony.reserve_metals = 5000.0
+	var store_before := colony.reserve_metals
+	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(8))
+	sup.near(ColonySim.project_paid(colony), cost / float(turns), 0.001,
+		"the first turn pays the hull's first share")
+	sup.ok(colony.reserve_metals < store_before,
+		"and the metal came out of storage rather than being conjured")
+
+	for turn in range(1, turns):
+		ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(9 + turn))
+	sup.eq(colony.ship_queue.size(), 0, "the yard is empty once the hull is paid for")
+	sup.near(ColonySim.construction_progress(colony, {} as Dictionary), 0.0, 0.001,
+		"and there is no project left to report progress for")
+
+
+## A finished hull becomes a real fleet over the world that built it.
+func _test_orbital_fleets() -> void:
+	sup.begin("orbital fleets")
+	var g := _galaxy(9191)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the orbital-fleet probe")
+		return
+	var hulls: Dictionary = _defs.get("ship_hulls") as Dictionary
+	var corvette := _defs.call("ship_hull", &"corvette") as Resource
+	if corvette == null:
+		sup.ok(false, "the corvette has a definition")
+		return
+	colony.structures = {&"space_port": 1}
+	colony.population = 4.0
+	colony.food_stock = 900.0
+	colony.reserve_metals = 5000.0
+
+	sup.ok(g.orbital_fleet(colony.index, 0) == null,
+		"a colony with no port has no orbital fleet")
+
+	var faction: FactionState = g.faction(0)
+	for hull_number in 3:
+		colony.reserve_metals = 5000.0
+		TurnResolver.resolve_turn(g, [
+			Order.make_build_ship(0, colony.index, &"corvette")
+		], _defs, _db, _rng(10 + hull_number), 0)
+		# Run the yard to empty. `resolve_turn` has already taken one turn's share, so this
+		# loop is only draining whatever is left -- the point of the assertion is that the
+		# hull ends up *somewhere*, not how many turns it took.
+		var guard := 0
+		while not colony.ship_queue.is_empty() and guard < 20:
+			ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(11 + guard))
+			guard += 1
+
+	# The whole point: the ships exist, in one fleet, over the world that built them, and can
+	# be found by the same query the travel flow uses. Before this, `ship_queue.pop_front()`
+	# was the end of the line and every hull a colony paid for simply stopped existing.
+	var orbiter := g.orbital_fleet(colony.index, 0)
+	sup.ok(orbiter != null, "the colony has an orbital fleet")
+	if orbiter == null:
+		return
+	sup.eq(int(orbiter.ships.get(&"corvette", 0)), 3,
+		"holding all three hulls it was built")
+	sup.eq(orbiter.system, colony.index, "parked over the world that built them")
+	sup.eq(g.fleets_in_orbit_at(colony.index, 0).size(), 1,
+		"and it is the one fleet in that orbit, not one per hull")
+	sup.ok(orbiter.hulls().has(&"corvette"),
+		"with its hull definitions bound, so its cargo and speed read correctly")
+
+	# The union query the manifest modal uses.
+	var union := {}
+	for f in g.fleets_in_orbit_at(colony.index, 0):
+		for hull_id: StringName in f.ships:
+			union[hull_id] = int(union.get(hull_id, 0)) + int(f.ships[hull_id])
+	sup.eq(int(union.get(&"corvette", 0)), 3, "and the orbit reports three hulls in total")
+
+	# A second hull joins the existing fleet rather than creating a rival one.
+	colony.reserve_metals = 5000.0
+	TurnResolver.resolve_turn(g, [
+		Order.make_build_ship(0, colony.index, &"corvette")
+	], _defs, _db, _rng(40), 0)
+	var guard2 := 0
+	while not colony.ship_queue.is_empty() and guard2 < 20:
+		ColonySim.simulate_colony(g, colony, faction, _defs, _db, _rng(41 + guard2))
+		guard2 += 1
+	sup.eq(int(g.orbital_fleet(colony.index, 0).ships.get(&"corvette", 0)), 4,
+		"a later hull joins the same fleet")
+	sup.eq(g.fleets_in_orbit_at(colony.index, 0).size(), 1,
+		"which is still one fleet in the orbit")
+
+
+## Loading and unloading through the planet-facing API respects both caps.
+func _test_cargo_at_planet() -> void:
+	sup.begin("cargo at a planet")
+	var g := _galaxy(10101)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the cargo probe")
+		return
+	var c := SessionController.new()
+	c.attach(g, 0)
+	var hulls: Dictionary = _defs.get("ship_hulls") as Dictionary
+	var fleet := FleetState.new()
+	fleet.bind_hulls(hulls)
+	fleet.owner = 0
+	fleet.system = colony.index
+	fleet.add_ships(&"cargo_transport", 1)
+	g.add_fleet(fleet)
+	var hold: Resource = hulls.get(&"cargo_transport", null) as Resource
+	sup.ok(hold != null, "the cargo transport has a definition")
+	if hold == null:
+		return
+	var capacity := float(hold.get("cargo_capacity"))
+
+	colony.reserve_metals = 1000.0
+	colony.food_stock = 500.0
+	# Storage caps are derived from the structures and cached on the planet by the colony
+	# sim, so a colony that has never been simulated has a capacity of zero -- and food
+	# unloaded into zero capacity is correctly refused, which would make this test pass for
+	# the wrong reason.
+	colony.structures = {&"granary": 2}
+	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(30))
+	colony.reserve_metals = 1000.0
+	colony.food_stock = 500.0
+	c.select_planet(colony.index)
+
+	sup.ok(c.has_transports_at(colony.index),
+		"a cargo transport in orbit makes the Load/Unload control worth showing")
+	sup.ok(not c.has_transports_at(_unowned_planet(g)),
+		"and a world with nothing in orbit does not")
+
+	# Load as much as the hold takes, and no more.
+	var moved := c.transfer_at_planet(colony.index, &"cargo_transport",
+		TransferStage.KIND_METALS, 9999.0, true)
+	sup.near(moved, capacity, 0.001,
+		"loading is capped by the hold's capacity, not by what the colony has")
+	sup.near(TransferStage.carried(fleet, TransferStage.KIND_METALS), capacity, 0.001,
+		"and the hold reports full")
+	sup.near(colony.reserve_metals, 1000.0 - capacity, 0.001,
+		"with exactly that metal off the colony")
+
+	# Loading again cannot overfill it.
+	var over := c.transfer_at_planet(colony.index, &"cargo_transport",
+		TransferStage.KIND_METALS, 500.0, true)
+	sup.near(over, 0.0, 0.001, "a full hold takes nothing more")
+
+	# Unload into a colony with nowhere to put food: clamped by the storage cap.
+	var food_moved := c.transfer_at_planet(colony.index, &"cargo_transport",
+		TransferStage.KIND_FOOD, 10.0, true)
+	sup.near(food_moved, 10.0, 0.001, "food goes in up to what the hold takes")
+	var landed := c.transfer_at_planet(colony.index, &"cargo_transport",
+		TransferStage.KIND_FOOD, 9999.0, false)
+	sup.near(landed, 10.0, 0.001, "and comes back out entirely when it all fits")
+	sup.ok(colony.food_stock <= colony.food_capacity + 0.001,
+		"a colony never ends up over its food capacity")
+
+	# A hull that does not lift a kind is refused rather than silently moving nothing.
+	var in_orbit := c.hulls_in_orbit_at(colony.index)
+	sup.eq(int(in_orbit.get(&"cargo_transport", 0)), 1,
+		"the orbit reports the transport by hull")
+	sup.near(c.transfer_at_planet(colony.index, &"corvette",
+		TransferStage.KIND_TROOPS, 4.0, true), 0.0, 0.001,
+		"naming a hull that is not there moves nothing")
+
+
+## The procedural appearance of a world: five looks, deterministic, and correctly keyed.
+func _test_planet_visuals() -> void:
+	sup.begin("procedural planet visuals")
+	var g := _galaxy(11111)
+	sup.ok(g.planets.size() > 0, "the galaxy has worlds to look at")
+
+	# Every generated body carries a variant inside the declared range, and the board
+	# actually uses more than one -- a rolled-but-constant field would satisfy a range check.
+	var seen: Dictionary = {}
+	for p in g.planets:
+		sup.ok(p.visual_variant >= 0 and p.visual_variant < GameDB.PLANET_VISUAL_VARIANTS,
+			"planet %d's variant is inside the declared range (got %d)" % [
+				p.index, p.visual_variant])
+		seen[p.visual_variant] = true
+	sup.ok(seen.size() > 1,
+		"the board uses more than one surface variant, not a constant")
+
+	# The five cosmetic classes the brief names.
+	var expected: Array = [
+		[&"terrestrial", PlanetVisuals.Look.TEMPERATE, "Temperate"],
+		[&"desert", PlanetVisuals.Look.DESERT, "Desert"],
+		[&"ice", PlanetVisuals.Look.ICE, "Snow/Ice"],
+		[&"ocean", PlanetVisuals.Look.WATER, "Water"],
+		[&"jungle", PlanetVisuals.Look.JUNGLE, "Jungle"],
+	]
+	for case: Variant in expected:
+		var type_id := StringName(str(case[0]))
+		var look := int(case[1])
+		var name := String(case[2])
+		sup.eq(PlanetVisuals.look_for(type_id), look,
+			"a %s World is drawn as one" % name)
+		sup.eq(PlanetVisuals.look_name(look), "%s World" % name,
+			"and says so by name")
+		sup.eq(PlanetVisuals.palette(type_id).size(), 3,
+			"%s has a three-step palette" % name)
+
+	# An unknown type falls back rather than erroring: a body whose definition failed to load
+	# still has to render.
+	sup.eq(PlanetVisuals.look_for(&"not_a_planet_type"), PlanetVisuals.Look.ROCK,
+		"an unrecognised type renders as bare rock")
+
+	# Colour identity is the claim being made, so it is checked as colour.
+	var water := PlanetVisuals.palette(&"ocean")
+	sup.ok(water[0].b > water[0].r and water[0].b > water[0].g,
+		"a Water World's deep tone is bluer than it is red or green")
+	sup.ok(water[2].b > water[2].r, "and its highlight is blue too")
+	var desert := PlanetVisuals.palette(&"desert")
+	sup.ok(desert[1].r > desert[1].b and desert[1].g > desert[1].b,
+		"a Desert World's mid tone is yellow-tan: more red and green than blue")
+	var ice := PlanetVisuals.palette(&"ice")
+	sup.ok(ice[2].r > 0.85 and ice[2].g > 0.85 and ice[2].b > 0.85,
+		"a Snow/Ice World's highlight is near-white")
+	sup.ok(ice[2].b >= ice[2].r, "with a pale cyan cast rather than a flat white")
+	var jungle := PlanetVisuals.palette(&"jungle")
+	sup.ok(jungle[1].g > jungle[1].r * 1.5 and jungle[1].g > jungle[1].b * 1.5,
+		"a Jungle World's mid tone is overwhelmingly green")
+
+	# Land fraction is what separates "mostly ocean" from "dense deep greens".
+	sup.ok(PlanetVisuals.land_fraction(&"ocean") < PlanetVisuals.land_fraction(&"jungle"),
+		"a Water World has less land than a Jungle World")
+	sup.ok(PlanetVisuals.land_fraction(&"jungle") >= 0.8,
+		"and a Jungle World's land is dense, as the brief describes")
+
+	# Deterministic: the same world has the same continents on every client and after a
+	# save/load. Randomly regenerating a planet's surface each frame would make the map
+	# shimmer and a remembered galaxy unreproducible.
+	for variant in 3:
+		var first := PlanetVisuals.landmasses(&"terrestrial", variant)
+		var again := PlanetVisuals.landmasses(&"terrestrial", variant)
+		sup.eq(str(first), str(again),
+			"variant %d draws the same continents every time" % variant)
+	sup.ok(str(PlanetVisuals.landmasses(&"jungle", 1)) != str(PlanetVisuals.landmasses(&"jungle", 2)),
+		"different variants are different worlds")
+	sup.ok(PlanetVisuals.landmasses(&"jungle", 0).size() > PlanetVisuals.landmasses(&"ocean", 0).size(),
+		"a Jungle World carries more landmasses than a Water World")
+
+	# Every vertex stays inside the unit disc, which is what lets the map clip cheaply.
+	var inside := true
+	for blob: Variant in PlanetVisuals.landmasses(&"jungle", 4):
+		for corner: Vector2 in blob as PackedVector2Array:
+			if corner.length() > 1.0:
+				inside = false
+	sup.ok(inside, "landmass vertices stay within the unit disc they are drawn in")
+
+	# The variant survives a save, so a loaded galaxy looks like the one that was saved.
+	var dict := g.planet(0).to_dict()
+	var reloaded := PlanetState.new()
+	sup.ok(reloaded.from_dict(dict), "a planet round-trips through JSON")
+	sup.eq(reloaded.visual_variant, g.planet(0).visual_variant,
+		"and its surface variant is part of the save")
+	sup.ok(reloaded.fingerprint() == g.planet(0).fingerprint(),
+		"and it is part of the fingerprint, so two saves differing only in appearance differ")
 
 
 # --- troops and cargo ---------------------------------------------------

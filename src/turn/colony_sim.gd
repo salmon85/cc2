@@ -57,6 +57,130 @@ static func growth_chance(population: float, db: Node) -> float:
 	return clampf(base - population * penalty, floor_chance, ceiling)
 
 
+## What a colony's single build slot is currently holding.
+##
+## A colony works one structure and then, once that slot is free, its hulls one at a time --
+## but to the player both are "the thing I clicked Build on", and the metal dialog, the
+## progress bar and the refund rule have to behave identically for both. Naming the kind once
+## here is what stops the building half and the ship half from drifting into two rules.
+enum ProjectKind {
+	NONE,
+	STRUCTURE,
+	SHIP,
+}
+
+
+## Which kind of project the colony's build slot holds, buildings first.
+static func project_kind(planet: PlanetState) -> int:
+	if planet == null:
+		return ProjectKind.NONE
+	if not planet.building_queue.is_empty():
+		return ProjectKind.STRUCTURE
+	if not planet.ship_queue.is_empty():
+		return ProjectKind.SHIP
+	return ProjectKind.NONE
+
+
+## The hull id of the ship under construction, or `&""`.
+static func queued_hull_id(planet: PlanetState) -> StringName:
+	if planet == null or planet.ship_queue.is_empty():
+		return &""
+	var job: Dictionary = planet.ship_queue[0] as Dictionary
+	return StringName(str(job.get("hull", "")))
+
+
+## Metal assigned to whatever the colony is building: `build_metal` for a structure, the
+## head job's `metal` for a hull.
+##
+## One accessor because two readers deriving this separately is how the progress bar ends up
+## reporting a hull's metal paid while the refund rule is still looking at `build_metal`.
+static func project_paid(planet: PlanetState) -> float:
+	if planet == null:
+		return 0.0
+	if not planet.building_queue.is_empty():
+		return planet.build_metal
+	if not planet.ship_queue.is_empty():
+		var job: Dictionary = planet.ship_queue[0] as Dictionary
+		return maxf(0.0, float(job.get("metal", 0.0)))
+	return 0.0
+
+
+## Write metal assigned to the current project. See `project_paid`.
+static func set_project_paid(planet: PlanetState, value: float) -> void:
+	if planet == null:
+		return
+	var paid := maxf(0.0, value)
+	if not planet.building_queue.is_empty():
+		planet.build_metal = paid
+		return
+	if not planet.ship_queue.is_empty():
+		var job: Dictionary = planet.ship_queue[0] as Dictionary
+		job["metal"] = paid
+
+
+## The head ship job, or an empty dictionary when nothing is in the yard.
+##
+## Empty rather than null: the declared return type is `Dictionary`, and a caller testing
+## `job.is_empty()` is testing the same thing whether the yard is empty or the entry is
+## malformed.
+static func queued_ship_job(planet: PlanetState) -> Dictionary:
+	if planet == null or planet.ship_queue.is_empty():
+		return {} as Dictionary
+	return planet.ship_queue[0] as Dictionary
+
+
+## The metal cost of the project in the build slot: the queued structures, or the hull at the
+## head of the ship queue.
+##
+## `hulls` is optional so a caller holding only the building table still gets the right
+## answer for a structure, and a definite zero for a hull rather than a crash.
+static func project_cost(planet: PlanetState, buildings: Dictionary, hulls: Dictionary = {}) -> float:
+	var kind := project_kind(planet)
+	if kind == ProjectKind.STRUCTURE:
+		return queued_cost(planet, buildings)
+	if kind == ProjectKind.SHIP:
+		var job := queued_ship_job(planet)
+		if job.is_empty():
+			return 0.0
+		var hull: Resource = hulls.get(StringName(str(job.get("hull", ""))), null) as Resource
+		if hull == null:
+			return 0.0
+		return float(hull.get("cost_metals"))
+	return 0.0
+
+
+## Metal still owed on the current project, floored at zero.
+static func project_remaining(
+	planet: PlanetState, buildings: Dictionary, hulls: Dictionary = {}
+) -> float:
+	return maxf(0.0, project_cost(planet, buildings, hulls) - project_paid(planet))
+
+
+## Completion progress for the colony's current project, 0..1, for either kind.
+static func project_progress(
+	planet: PlanetState, buildings: Dictionary, hulls: Dictionary = {}
+) -> float:
+	var cost := project_cost(planet, buildings, hulls)
+	if cost <= 0.0:
+		return 0.0
+	return clampf(project_paid(planet) / cost, 0.0, 1.0)
+
+
+## The most metal that could usefully move *into* the project right now.
+static func max_assignment(
+	planet: PlanetState, buildings: Dictionary, hulls: Dictionary = {}
+) -> float:
+	return maxf(0.0, minf(planet.reserve_metals, project_remaining(planet, buildings, hulls)))
+
+
+## The most metal that could usefully move *out* of the project right now.
+##
+## Bounded by the banked metal alone, and never by storage: metal coming *back* has nowhere
+## to be refused, so the only limit is how much the player ever put in.
+static func max_refund(planet: PlanetState) -> float:
+	return project_paid(planet)
+
+
 ## Simulate one colony. Mutates `planet` and returns its report.
 ##
 ## `faction` supplies tech bonuses; `defs` is the registry; `db` holds the tuning constants.
@@ -73,6 +197,7 @@ static func simulate_colony(
 		return report
 
 	var buildings := defs.get("buildings") as Dictionary
+	var hulls := defs.get("ship_hulls") as Dictionary
 
 	# Warnings describe the turn that just resolved, so the list is rebuilt every turn rather
 	# than accumulated. Without this a colony that starved once would carry the warning for
@@ -166,7 +291,7 @@ static func simulate_colony(
 		report.starving = true
 
 	# --- Construction ----------------------------------------------------------
-	_advance_construction(planet, buildings, db)
+	_advance_construction(galaxy, planet, faction, buildings, hulls, db)
 
 	return report
 
@@ -179,16 +304,44 @@ static func simulate_colony(
 ## meal and lose its first reactor's output, which is the opposite of what starting
 ## infrastructure is for.
 static func _recount_capacity(planet: PlanetState, buildings: Dictionary, db: Node) -> void:
+	var caps := capacity_for(planet, buildings, db)
+	planet.food_capacity = float(caps.get("food", 0.0))
+	planet.power_capacity = float(caps.get("power", 0.0))
+	planet.power_generated = float(caps.get("power_out", 0.0))
+	planet.power_drawn = float(caps.get("power_in", 0.0))
+	planet.housing = float(caps.get("housing", 0.0))
+
+
+## Storage capacities, power budget and housing implied by `planet.structures`.
+##
+## The same arithmetic `_recount_capacity` writes onto the planet, returned rather than
+## applied, so the panel and a test can ask what a structure is *worth* before it is built.
+##
+## This matters because "each granary adds 1000 food, each Energy Storage adds 1000 power
+## and each City Complex adds 20 housing" is a claim about per-copy contribution, and the only
+## way to check it is to read the number a copy of the structure produces rather than the
+## total after some unknown number of them. Three separate tallies would be three chances to
+## answer a different question from the one asked.
+##
+## Returns `food`, `power`, `power_out`, `power_in` and `housing`.
+static func capacity_for(planet: PlanetState, buildings: Dictionary, db: Node) -> Dictionary:
 	var food_cap := float(db.get("BASE_FOOD_STORAGE"))
 	var power_cap := float(db.get("BASE_POWER_STORAGE"))
 	var power_out := 0.0
 	var power_in := 0.0
 	var houses := 0.0
+	if planet == null:
+		return {
+			"food": food_cap, "power": power_cap,
+			"power_out": power_out, "power_in": power_in, "housing": houses,
+		}
 	for building_id: StringName in planet.structures:
 		var def: Resource = buildings.get(building_id, null) as Resource
 		if def == null:
 			continue
 		var count := int(planet.structures[building_id])
+		if count <= 0:
+			continue
 		if def.is_food_storage():
 			food_cap += float(def.get("food_store")) * count
 		if def.get("kind") == BuildingData.Kind.STORAGE:
@@ -198,11 +351,13 @@ static func _recount_capacity(planet: PlanetState, buildings: Dictionary, db: No
 		if def.draws_power():
 			power_in += float(def.get("power_required")) * count
 		houses += float(def.get("pop_housed")) * count
-	planet.food_capacity = food_cap
-	planet.power_capacity = power_cap
-	planet.power_generated = power_out
-	planet.power_drawn = power_in
-	planet.housing = houses
+	return {
+		"food": food_cap,
+		"power": power_cap,
+		"power_out": power_out,
+		"power_in": power_in,
+		"housing": houses,
+	}
 
 
 ## Bank a surplus, or draw the bank down against a deficit.
@@ -316,56 +471,139 @@ static func _staffed(planet: PlanetState, def: Resource) -> int:
 
 ## Advance the construction and shipyard queues by one turn.
 ##
-## Progress is banked as *metal*, so the clickable bar in the construction panel and the
-## per-turn advance read the same number and cannot disagree.
+## Both queues spend the colony's *actual* metal, a slice of the project's cost each turn.
 ##
-## The per-turn contribution is the project's **total metal cost divided by its build turns**
-## — "equal production", spread evenly. The earlier `+1.0` a turn was flat *absolute*, so a
-## 100-metal City Complex advanced 1% a turn while a 10-metal Solar Array advanced 10%: a
-## three-turn project read as 3% after one turn, and the bar told a player almost nothing. The
-## divisor makes turn N of a T-turn project read as N/T regardless of what the structure
-## costs, which is what a player watching a bar expects it to mean.
+## The slice is `cost / build_turns`, spread evenly: turn N of a T-turn project reads as N/T
+## whatever the structure costs. That divisor used to be absent -- the contribution was a flat
+## `+1.0` metal -- so a 100-metal City Complex advanced 1% a turn while a 10-metal Solar Array
+## advanced 10%, and a three-turn project read as 3% after one turn no matter what was being
+## built.
 ##
-## That contribution is *accounting*, not a transfer: it never moves metal in or out of
-## storage. The full cost was already debited when the order was accepted, and the metal a
-## player pushes in through the boost modal is debited at that moment. Nothing is ever paid
-## back — see `finish_construction`.
+## The metal is *moved*, not tallied: it leaves `reserve_metals` and lands in the project's
+## assigned pool (`build_metal`, or the head ship job's `metal`). It used to be pure
+## accounting -- credited straight to the pool with nothing ever leaving storage -- which made
+## the pool a number about the project rather than a quantity of metal, and made the refund
+## control in the metal dialog meaningless: there was no metal in there to give back.
+##
+## A colony that cannot cover the whole slice contributes what it has and the project simply
+## takes longer. Nothing is refused and nothing is owed: there is no upfront gate on queueing
+## at all, so a colony with an empty bank can commit to a project and pay for it out of the
+## mines over the turns that follow.
 static func _advance_construction(
-	planet: PlanetState, buildings: Dictionary, db: Node
+	galaxy: GalaxyState, planet: PlanetState, faction: FactionState,
+	buildings: Dictionary, hulls: Dictionary, db: Node
 ) -> void:
 	if not planet.building_queue.is_empty():
-		var cost := queued_cost(planet, buildings)
-		var total_turns := maxi(1, planet.build_total_turns)
-		# Equal production: the cost spread evenly over the project's own build time, so
-		# turn N of a T-turn project reads as N/T whatever the structure costs.
-		planet.build_metal += cost / float(total_turns)
-		planet.build_turns_remaining -= 1
-		# Completion is decided by the metal, not the clock. A player who pushed metal in
-		# through the boost modal finishes early; one whose colony simply produced enough
-		# finishes on schedule; neither is held to the turn counter.
-		if planet.build_metal >= cost - 0.001:
-			finish_construction(planet, buildings, db)
+		_advance_structure(planet, buildings, db)
 		return
-
-	# Otherwise the planet's metal output feeds the shipyard, if the colony has one.
 	if planet.count(&"space_port") <= 0:
 		return
 	if planet.ship_queue.is_empty():
 		return
-	var job: Dictionary = planet.ship_queue[0] as Dictionary
-	job["progress"] = float(job.get("progress", 0.0)) + _shipyard_output(planet, db)
-	if float(job.get("progress", 0.0)) >= 1.0:
-		planet.shipyard_progress += float(job.get("progress", 0.0))
+	_advance_ship(galaxy, planet, faction, hulls)
+
+
+## One turn of the structure under construction.
+static func _advance_structure(
+	planet: PlanetState, buildings: Dictionary, db: Node
+) -> void:
+	var cost := queued_cost(planet, buildings)
+	if cost <= 0.0:
+		# A queue of ids whose definitions all failed to load. Leaving it in place would
+		# block every later build behind an unreadable entry, so drop it.
+		planet.building_queue.clear()
+		planet.build_turns_remaining = 0
+		planet.build_total_turns = 0
+		planet.build_metal = 0.0
+		return
+	var total_turns := maxi(1, planet.build_total_turns)
+	planet.build_metal += _draw_metal(planet, cost / float(total_turns), cost)
+	planet.build_turns_remaining -= 1
+	# Completion is decided by the metal, not the clock. A player who pushes metal in through
+	# the dialog finishes early; one whose colony simply produces enough finishes on
+	# schedule; neither is held to the turn counter.
+	if planet.build_metal >= cost - 0.001:
+		finish_construction(planet, buildings, db)
+
+
+## One turn of the hull at the head of the shipyard queue.
+static func _advance_ship(
+	galaxy: GalaxyState, planet: PlanetState, faction: FactionState, hulls: Dictionary
+) -> void:
+	var job := queued_ship_job(planet)
+	if job.is_empty():
+		return
+	var hull_id := StringName(str(job.get("hull", "")))
+	var hull: Resource = hulls.get(hull_id, null) as Resource
+	if hull == null:
 		planet.ship_queue.pop_front()
+		return
+	var cost := float(hull.get("cost_metals"))
+	var total_turns := maxi(1, int(job.get("turns", 1)))
+	job["metal"] = float(job.get("metal", 0.0)) + _draw_metal(planet, cost / float(total_turns), cost)
+	if float(job.get("metal", 0.0)) >= cost - 0.001:
+		planet.shipyard_progress = float(job.get("metal", 0.0))
+		planet.ship_queue.pop_front()
+		# The hull exists in orbit the moment it is paid for. It used to leave the yard and
+		# vanish: `ship_queue.pop_front()` was the end of the line, so a ship the player had
+		# spent several turns and a hundred metal on simply stopped existing, and nothing
+		# ever put it in a fleet.
+		deliver_ships(galaxy, planet, faction, hull_id, 1, hulls)
+	else:
+		planet.shipyard_progress = float(job.get("metal", 0.0))
 
 
-static func _shipyard_output(planet: PlanetState, db: Node) -> float:
-	# Per-turn ship production is allowed to be faster than a single hull when the colony
-	# is producing at full tilt, which is what `PER_TURN` mode asks for. A colony with no
-	# Space Port contributes nothing, so the mode cannot be used to smuggle shipbuilding
-	# past the "at least 1 Space Port" rule.
-	var ports := planet.count(&"space_port")
-	return 0.5 + 0.25 * ports
+## Move up to `slice` metal out of storage toward the current project, never more than `cost`
+## in total. Returns what actually moved.
+##
+## Only the *debit* happens here; the caller credits the project pool, because the two halves
+## are written to different fields for a structure and for a hull and only the caller knows
+## which. Crediting both was how a three-turn project reached two thirds on its first turn.
+static func _draw_metal(planet: PlanetState, slice: float, cost: float) -> float:
+	var owed := maxf(0.0, cost - project_paid(planet))
+	var moved := clampf(minf(slice, planet.reserve_metals), 0.0, owed)
+	if moved <= 0.0:
+		return 0.0
+	planet.reserve_metals -= moved
+	return moved
+
+
+## Put a finished hull into the orbital fleet over `planet`, creating that fleet if the colony
+## has none yet.
+##
+## "Orbits as fleet sources" is the whole point: a ship a colony paid for has to be somewhere
+## the player can see and order. Returning it to a shared pool of unplaced hulls -- or dropping
+## it, which is what used to happen -- makes building a ship a payment into a void.
+##
+## Returns the fleet the ship went into, or null when `galaxy` is missing.
+static func deliver_ships(
+	galaxy: GalaxyState, planet: PlanetState, faction: FactionState,
+	hull_id: StringName, count: int, hulls: Dictionary
+) -> FleetState:
+	if galaxy == null or planet == null or faction == null or count <= 0:
+		return null
+	var orbiter := galaxy.orbital_fleet(planet.index, faction.id)
+	if orbiter == null:
+		orbiter = FleetState.new()
+		orbiter.bind_hulls(hulls)
+		orbiter.owner = faction.id
+		orbiter.system = planet.index
+		orbiter.name = "%s Orbital" % _world_name(galaxy, planet.index)
+		galaxy.add_fleet(orbiter)
+	orbiter.add_ships(hull_id, count)
+	return orbiter
+
+
+## A world in this model has one name, and it may be empty on a body nobody generated a name
+## for. The fallback is the catalogue designation the map already shows, so an orbital fleet's
+## name can never be the one string that leaks a world the map is hiding.
+static func _world_name(galaxy: GalaxyState, planet_index: int) -> String:
+	var p := galaxy.planet(planet_index)
+	if p == null:
+		return "Orbital"
+	if p.name != "":
+		return p.name
+	return "P-%d" % (planet_index + 1)
 
 
 # --- Imperium ------------------------------------------------------------------
@@ -433,32 +671,55 @@ static func metal_remaining(planet: PlanetState, buildings: Dictionary) -> float
 
 
 ## Add `amount` metal against whatever the colony is building. Returns the amount actually
-## transferred.
+## transferred. Works identically for a structure and a hull.
 ##
-## The mechanic behind the boost modal. Clamped three ways: to what was asked for, to what the
+## The mechanic behind the metal dialog. Clamped three ways: to what was asked for, to what the
 ## colony has in store, and to what the project still owes. The third clamp is the one that
-## matters — a player who opens the modal on a project that needs 20 metal more must not be
-## able to pour a colony's entire 500-metal stockpile into it and watch 480 vanish into a
-## structure worth 20.
-static func boost_construction(planet: PlanetState, amount: float, buildings: Dictionary = {}) -> float:
+## matters — a player who opens the dialog on a hull that needs 20 metal more must not be able
+## to pour a colony's entire 500-metal stockpile into it and watch 480 vanish into a ship worth
+## 20.
+static func boost_construction(
+	planet: PlanetState, amount: float, buildings: Dictionary = {}, hulls: Dictionary = {}
+) -> float:
 	if planet == null or amount <= 0.0:
 		return 0.0
 	# Nothing queued, nothing to spend metal on. Returning zero rather than banking the metal
 	# silently is what lets the construction bar tell the player why a press did nothing.
-	if planet.building_queue.is_empty():
+	if project_kind(planet) == ProjectKind.NONE:
 		return 0.0
 	var ceiling := planet.reserve_metals
 	if not buildings.is_empty():
-		ceiling = minf(ceiling, metal_remaining(planet, buildings))
+		ceiling = minf(ceiling, project_remaining(planet, buildings, hulls))
 	var available := minf(amount, maxf(0.0, ceiling))
 	if available <= 0.0:
 		return 0.0
 	# Debited here, credited here. The metal leaves storage exactly once and is never
-	# returned -- `finish_construction` zeroes `build_metal` rather than paying the surplus
-	# back, so a boosted project cannot refund the colony.
+	# returned when the project lands -- `finish_construction` zeroes the pool rather than
+	# paying the surplus back, so a boosted project cannot be laundered into a profit.
 	planet.reserve_metals -= available
-	planet.build_metal += available
+	set_project_paid(planet, project_paid(planet) + available)
 	return available
+
+
+## Take `amount` metal back *out* of the project and return it to the colony's storage.
+##
+## The other half of the metal dialog, and the reason the assigned pool has to hold real metal
+## rather than a tally: there is nothing to refund if nothing was ever taken out.
+##
+## Bounded by what is banked against the project and by nothing else. In particular it is *not*
+## bounded by the colony's storage -- there is no storage cap on metal -- and the floor is zero
+## banked metal rather than "whatever was left", so a player can always pull a project's
+## allocation all the way back out and start it again from an empty bar.
+static func refund_construction(planet: PlanetState, amount: float) -> float:
+	if planet == null or amount <= 0.0:
+		return 0.0
+	var banked := project_paid(planet)
+	var returned := minf(amount, banked)
+	if returned <= 0.0:
+		return 0.0
+	planet.reserve_metals += returned
+	set_project_paid(planet, banked - returned)
+	return returned
 
 
 ## Land the queued project: move it from the queue into the colony's structures.
@@ -485,30 +746,23 @@ static func finish_construction(
 	_recount_capacity(planet, buildings, db)
 
 
-## Completion progress for the colony's current project, 0..1.
+## Completion progress for the *building* queue, 0..1.
 ##
-## `progress = metal paid / total metal cost`, from `queued_cost`. A three-turn project at
-## equal production reads 33% after one turn, whatever it costs — which is what the bar is
-## claiming when it fills, and what the boost modal reports as the percentage already paid.
-##
-## Read from the definition rather than from the turn counter because a boosted project has
-## turns left on the clock and metal banked against it at the same time. The metal is the
-## honest measure: it is what was actually spent, by production or by hand.
+## Kept as a named reader of `project_progress` so existing callers that only ever had a
+## structure in the slot keep a function whose name says so, while the rule itself lives in one
+## place and covers hulls too.
 static func construction_progress(planet: PlanetState, buildings: Dictionary) -> float:
-	if planet == null or planet.building_queue.is_empty():
-		return 0.0
-	var cost := queued_cost(planet, buildings)
-	if cost <= 0.0:
-		return 0.0
-	return clampf(planet.build_metal / cost, 0.0, 1.0)
+	return project_progress(planet, buildings)
 
 
 ## The most metal a boost could usefully transfer right now: what the colony holds, capped by
 ## what the project still owes.
 ##
-## This is the ceiling the boost modal's slider is clamped to, so a player cannot be offered
-## a transfer larger than the project can absorb.
-static func max_boost(planet: PlanetState, buildings: Dictionary) -> float:
-	if planet == null or planet.building_queue.is_empty():
+## This is the ceiling the metal dialog's "add" slider is clamped to, so a player cannot be
+## offered a transfer larger than the project can absorb.
+static func max_boost(
+	planet: PlanetState, buildings: Dictionary, hulls: Dictionary = {}
+) -> float:
+	if planet == null or project_kind(planet) == ProjectKind.NONE:
 		return 0.0
-	return maxf(0.0, minf(planet.reserve_metals, metal_remaining(planet, buildings)))
+	return maxf(0.0, minf(planet.reserve_metals, project_remaining(planet, buildings, hulls)))

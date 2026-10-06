@@ -13,10 +13,23 @@ static func credits(value: float) -> String:
 
 
 ## Format a signed delta, always showing + or -, e.g. 12.4 -> "+12.4".
+##
+## Values that round to zero at the requested precision print as `+0`, never `-0`. The power
+## panel hit this: a Nuclear plant's +40 against a structure drawing 0.4 power printed
+## `(+40, -0)` at zero decimals, and a signed zero on a balance reads as a broken calculation
+## rather than as "nothing". Anything smaller than half the last displayed digit is not
+## information at this precision, so it is rounded *before* the sign is chosen.
 static func signed(value: float, places: int = 1) -> String:
-	if value >= 0.0:
-		return "+" + String.num(value, places)
-	return String.num(value, places)
+	var shown := _rounded_away_from_sign_zero(value, places)
+	if shown >= 0.0:
+		return "+" + String.num(shown, places)
+	return String.num(shown, places)
+
+
+## Snap a value whose magnitude is below half the last displayed digit onto zero.
+static func _rounded_away_from_sign_zero(value: float, places: int) -> float:
+	var threshold := 0.5 * pow(10.0, -places)
+	return 0.0 if absf(value) < threshold else value
 
 
 ## Format a 0..1 ratio as a percentage, e.g. 0.35 -> "35%".
@@ -32,7 +45,7 @@ static func fixed(value: float, places: int = 1) -> String:
 ## Format a signed delta in a colour: green for a surplus, amber for a deficit. Used for
 ## net income so the eye can find trouble without reading the sign.
 static func signed_colored(value: float, places: int = 1) -> String:
-	if value < -0.05:
+	if _rounded_away_from_sign_zero(value, places) < 0.0:
 		return "[color=#%s]%s[/color]" % [CC2Theme.AMBER.to_html(false), signed(value, places)]
 	return "[color=#%s]%s[/color]" % [CC2Theme.PHOSPHOR.to_html(false), signed(value, places)]
 

@@ -8,6 +8,7 @@ id = &"leviathan"
 display_name = "Leviathan"
 role = 13
 cost_metals = 2500.0
+build_turns = 12
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 25.0

@@ -8,6 +8,7 @@ id = &"battlestar"
 display_name = "Battlestar"
 role = 11
 cost_metals = 850.0
+build_turns = 7
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 10.0

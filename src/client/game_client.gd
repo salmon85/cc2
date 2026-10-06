@@ -27,8 +27,33 @@ var fleets: FleetPanel = null
 ## sit above the map: the player is choosing between worlds and needs to see them to choose.
 var travel: TravelModal = null
 
-## The metal-transfer dialog behind the construction progress bar.
+## The metal-allocation dialog behind the construction progress bars.
 var boost: BoostModal = null
+
+## The fleet manifest: which ships leave a source world, and which stay. Opened by the travel
+## flow once both ends of the route are known.
+var manifest: FleetManifestModal = null
+
+## Load / unload between a colony's stockpiles and the lifts in its orbit.
+var cargo: CargoModal = null
+
+## Which step of the travel flow is waiting for a map click, or -1 when none is.
+##
+## The flow is: press Travel, click the source world, click the destination, then the manifest.
+## Two of those three steps are map clicks, and a map click with no question outstanding is a
+## misclick -- so the step has to be remembered somewhere the map can reach. It lives here
+## rather than on the map because the map is a pure drawing layer and this is a decision.
+var travel_step: int = TravelStep.NONE
+
+## The stages of the interactive travel flow.
+enum TravelStep {
+	NONE,     ## Not travelling; a map click selects normally.
+	SOURCE,   ## Waiting for the world whose orbit the ships come from.
+	DESTINATION, ## Waiting for where they are going.
+}
+
+## The world chosen as the travel source, or -1.
+var travel_source: int = -1
 
 var _log: RichTextLabel = null
 ## Every line the session log has shown, kept as plain strings.
@@ -53,6 +78,8 @@ func _ready() -> void:
 	_build_layout()
 	_build_travel_overlay()
 	_build_boost_overlay()
+	_build_manifest_overlay()
+	_build_cargo_overlay()
 	# `start()` may have been called before this node entered the tree, in which case the
 	# panels it needs did not exist yet.
 	if _pending_galaxy != null:
@@ -162,6 +189,29 @@ func _build_boost_overlay() -> void:
 	add_child(boost)
 
 
+## Mount the fleet manifest, centred over the map.
+##
+## The player is choosing between ships and needs to be able to see them, so this sits above the
+## board rather than inside the fleet panel beside it.
+func _build_manifest_overlay() -> void:
+	manifest = FleetManifestModal.new()
+	manifest.set_anchors_preset(Control.PRESET_CENTER)
+	manifest.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	manifest.grow_vertical = Control.GROW_DIRECTION_BOTH
+	manifest.visible = false
+	add_child(manifest)
+
+
+## Mount the cargo dialog, also centred over the map.
+func _build_cargo_overlay() -> void:
+	cargo = CargoModal.new()
+	cargo.set_anchors_preset(Control.PRESET_CENTER)
+	cargo.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	cargo.grow_vertical = Control.GROW_DIRECTION_BOTH
+	cargo.visible = false
+	add_child(cargo)
+
+
 ## Point the whole client at a galaxy. Panels are bound here and nowhere else, so the
 ## wiring order is a single readable block.
 func start(galaxy: GalaxyState, player_faction: int = 0, seed_override: int = 0) -> bool:
@@ -204,6 +254,8 @@ func _attach_session() -> void:
 	map.bind(controller)
 	travel.bind(controller)
 	boost.bind(controller)
+	manifest.bind(controller)
+	cargo.bind(controller)
 
 	_wire()
 	_log_line("SESSION %d OPENED - %d SYSTEMS - %d FACTIONS" % [
@@ -234,10 +286,16 @@ func _wire() -> void:
 	fleets.fleet_selected.connect(_on_fleet_selected)
 	fleets.travel_requested.connect(_on_travel_requested)
 	fleets.land_requested.connect(_on_land_requested)
+	fleets.cargo_requested.connect(_on_cargo_requested)
 	travel.travel_confirmed.connect(_on_travel_confirmed)
 	travel.travel_cancelled.connect(_on_travel_cancelled)
+	manifest.travel_confirmed.connect(_on_manifest_confirmed)
+	manifest.travel_cancelled.connect(_on_manifest_cancelled)
+	cargo.transfer_confirmed.connect(_on_transfer_confirmed)
+	cargo.transfer_cancelled.connect(_on_transfer_cancelled)
 	macros.build_requested.connect(_on_build_requested)
 	macros.construction_boosted.connect(_on_construction_boosted)
+	macros.ship_construction_boosted.connect(_on_construction_boosted)
 	boost.boost_confirmed.connect(_on_boost_confirmed)
 	boost.boost_cancelled.connect(_on_boost_cancelled)
 	controller.turn_resolved.connect(_on_turn_resolved)
@@ -344,6 +402,102 @@ func _on_system_picked(index: int) -> void:
 ## detail the same way, while the log -- which is what a player actually reads to confirm
 ## what they just clicked -- printed the real name in plain text. Fog that a player can
 ## switch off by clicking harder is not fog.
+func _on_planet_picked(index: int) -> void:
+	if controller.galaxy.planet(index) == null:
+		return
+	# A travel step outstanding swallows the click: the world is an answer to "which orbit?"
+	# or "where to?", not a new selection to report.
+	if _advance_travel_flow(index):
+		return
+	_log_line("SELECTED %s" % controller.display_name(index))
+
+
+## Feed a map click to the travel flow. Returns true when the click was consumed as an answer.
+##
+## Both steps refuse a world that cannot serve the answer, and say why in the log rather than
+## quietly advancing the flow on a world with no ships: a click on a rival's planet mid-travel
+## should leave the player where they were and told what was wrong, not silently become a
+## source that resolves to an empty manifest.
+func _advance_travel_flow(index: int) -> bool:
+	if travel_step == TravelStep.SOURCE:
+		if not controller.can_travel_from(index):
+			_log_line("[color=#%s]no ships of yours in orbit there[/color]"
+				% CC2Theme.AMBER.to_html(false))
+			return true
+		travel_source = index
+		travel_step = TravelStep.DESTINATION
+		_log_line("TRAVEL SOURCE -> %s" % controller.display_name(index))
+		status_message.emit("Select Destination")
+		return true
+	if travel_step == TravelStep.DESTINATION:
+		if index == travel_source:
+			_log_line("[color=#%s]source and destination are the same world[/color]"
+				% CC2Theme.AMBER.to_html(false))
+			return true
+		if not manifest.open(travel_source, index):
+			_log_line("[color=#%s]cannot open a manifest for that route[/color]"
+				% CC2Theme.ALERT.to_html(false))
+			return true
+		travel_step = TravelStep.NONE
+		_log_line("TRAVEL DESTINATION -> %s" % controller.display_name(index))
+		return true
+	return false
+
+
+## Open the travel flow: press Travel, then click the source world.
+##
+## A refusal is logged rather than swallowed. "no ships of yours in orbit" is the difference
+## between a button that is broken and one that is telling the player why.
+func _on_travel_requested() -> void:
+	if controller == null or controller.galaxy == null:
+		return
+	if controller.player_fleets().is_empty():
+		_log_line("[color=#%s]TRAVEL REFUSED: you have no ships[/color]"
+			% CC2Theme.AMBER.to_html(false))
+		status_message.emit("you have no ships to send")
+		return
+	_abandon_travel()
+	travel_step = TravelStep.SOURCE
+	status_message.emit("Select Source Location")
+	_log_line("TRAVEL: select the world your ships are orbiting")
+
+
+## Abandon an in-flight travel selection without disturbing anything else.
+func _abandon_travel() -> void:
+	travel_step = TravelStep.NONE
+	travel_source = -1
+	if travel != null:
+		travel.close()
+	if manifest != null:
+		manifest.close()
+
+
+## The manifest's OK: create a transit fleet from the selected ships and dispatch it.
+##
+## The travel order carries the manifest rather than naming a fleet, so the resolver splits the
+## source orbit into "these ships go" and "these stay" and puts the first group into transit.
+func _on_manifest_confirmed(source: int, destination: int, ships: Dictionary) -> void:
+	var fleet := controller.orbital_fleet(source)
+	if fleet == null:
+		_log_line("[color=#%s]TRAVEL REFUSED: nothing left in orbit[/color]"
+			% CC2Theme.ALERT.to_html(false))
+		return
+	var count := 0
+	for key: Variant in ships:
+		count += int(ships[key])
+	if controller.queue_travel(destination, ships, fleet.id):
+		# Adopt the source world so the fleet panel shows the fleet that is leaving rather than
+		# continuing to describe the one that stayed.
+		controller.select_planet(source)
+		controller.select_fleet(fleet.id)
+	_log_line("TRAVEL STAGED -> %s (%d ship%s)" % [
+		controller.display_name(destination), count, "" if count == 1 else "s"])
+
+
+func _on_manifest_cancelled() -> void:
+	_log_line("TRAVEL DISCARDED")
+
+
 ## A destination was proposed on the map. Quote the flight and open the travel modal with
 ## that world already chosen; the order is not queued until the modal's OK.
 func _on_order_proposed(index: int) -> void:
@@ -358,20 +512,8 @@ func _on_order_cancelled() -> void:
 	fleets.hide_proposal()
 	if travel != null:
 		travel.close()
+	_abandon_travel()
 	_log_line("ORDER DISCARDED")
-
-
-## Open the travel modal for the selected fleet.
-##
-## A refusal is logged rather than swallowed: the player pressed TRAVEL and something
-## happened, and "no fleet selected" or "that fleet is already under way" is the difference
-## between a button that is broken and one that is telling them why.
-func _on_travel_requested() -> void:
-	if travel.open_for_selected_fleet():
-		return
-	status_message.emit("select a fleet that is not already under way")
-	_log_line("[color=#%s]TRAVEL REFUSED: no eligible fleet selected[/color]"
-		% CC2Theme.AMBER.to_html(false))
 
 
 ## The modal's OK button. This is the only route to a move order now.
@@ -411,27 +553,40 @@ func _on_construction_boosted() -> void:
 	status_message.emit("nothing under construction to put metal into")
 
 
-## The dialog's OK. This is the only place a player transfers metal by hand.
+## The dialog's OK. This is the only place a player moves metal by hand.
 ##
-## The modal has already clamped the amount to `min(storage, metal still owed)`, and
-## `SessionController.boost_construction` clamps again -- the UI guard is so the player
-## cannot pick an absurd number, and the sim guard is so a packet cannot.
+## The modal has already clamped each direction to its own ceiling, and `ColonySim` clamps
+## again -- the UI guard is so the player cannot pick an absurd number, and the sim guard is so
+## a packet cannot. The signal carries a signed amount: positive put metal into the project,
+## negative took it back out, and both applied by the modal itself before the log line.
 func _on_boost_confirmed(metals: float) -> void:
-	var spent := controller.boost_construction(metals)
-	if spent > 0.0:
-		_log_line("CONSTRUCTION BOOSTED by %d metal" % int(spent))
+	if metals >= 0.0:
+		_log_line("CONSTRUCTION BOOSTED by %d metal" % int(metals))
 		return
-	_log_line("[color=#%s]BOOST REFUSED[/color]" % CC2Theme.ALERT.to_html(false))
+	_log_line("CONSTRUCTION REFUNDED by %d metal" % int(-metals))
 
 
 func _on_boost_cancelled() -> void:
 	_log_line("METAL TRANSFER CANCELLED")
 
 
-func _on_planet_picked(index: int) -> void:
-	if controller.galaxy.planet(index) == null:
+## The Load / Unload button on the planet panel. Opens for the selected world.
+func _on_cargo_requested() -> void:
+	if cargo.open(controller.selected_planet):
 		return
-	_log_line("SELECTED %s" % controller.display_name(index))
+	_log_line("[color=#%s]CARGO REFUSED: nothing in orbit here to load[/color]"
+		% CC2Theme.AMBER.to_html(false))
+
+
+func _on_transfer_confirmed(
+	planet: int, hull_id: StringName, loads: Dictionary, unloads: Dictionary
+) -> void:
+	_log_line("CARGO -> %s: %d loaded, %d unloaded" % [
+		controller.display_name(planet), loads.size(), unloads.size()])
+
+
+func _on_transfer_cancelled() -> void:
+	_log_line("CARGO CANCELLED")
 
 
 func _on_refused(reason: String) -> void:

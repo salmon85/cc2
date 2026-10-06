@@ -8,6 +8,7 @@ id = &"cruiser"
 display_name = "Cruiser"
 role = 4
 cost_metals = 300.0
+build_turns = 4
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 5.0

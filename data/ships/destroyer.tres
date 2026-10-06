@@ -8,6 +8,7 @@ id = &"destroyer"
 display_name = "Destroyer"
 role = 8
 cost_metals = 175.0
+build_turns = 3
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 3.0

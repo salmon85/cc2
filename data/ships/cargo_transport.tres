@@ -8,6 +8,7 @@ id = &"cargo_transport"
 display_name = "Cargo Transport"
 role = 14
 cost_metals = 60.0
+build_turns = 2
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 0.0

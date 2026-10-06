@@ -8,6 +8,7 @@ id = &"corvette"
 display_name = "Corvette"
 role = 3
 cost_metals = 75.0
+build_turns = 2
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 1.0

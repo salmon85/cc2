@@ -293,6 +293,10 @@ static func _populate_planets(
 		body.index = galaxy.planets.size()
 		body.type_id = types[chosen_cls].get("id")
 		body.name = _planet_name(rng)
+		# Cosmetic surface variant. Rolled from the same stream as everything else, so a seed
+		# reproduces the whole board's appearance and not just its economy -- a map that
+		# reshuffled its continents on every load would make a remembered galaxy useless.
+		body.visual_variant = rng.randi() % GameDB.PLANET_VISUAL_VARIANTS
 		body.orbit = i
 		body.position = _orbit_point(rng, i, count, galaxy.map_radius)
 		body.seed_reserves(types[chosen_cls])

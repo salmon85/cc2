@@ -8,6 +8,7 @@ id = &"exploration_ship"
 display_name = "Exploration Ship"
 role = 6
 cost_metals = 100.0
+build_turns = 2
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 1.0

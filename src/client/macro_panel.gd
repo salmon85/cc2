@@ -17,6 +17,11 @@ signal construction_boosted
 ## Emitted when the player presses the Build button, with the structure to construct.
 signal build_requested(building_id: StringName)
 
+## Emitted when the player clicks the *ship* progress bar. Separate from `construction_boosted`
+## only so a caller can tell which bar was pressed; both open the same dialog, because from the
+## player's side a hull and a structure are the same decision.
+signal ship_construction_boosted
+
 var _controller: SessionController = null
 
 var _build_selector: OptionButton = null
@@ -30,6 +35,12 @@ var _build_mode_selector: OptionButton = null
 
 ## The Build button. Choosing a structure is a *selection*; this is what starts it.
 var _build_button: Button = null
+
+## The shipyard's progress bar. A hull in the yard gets its own bar rather than sharing the
+## structure one, because the two are queued independently -- a colony can have a City Complex
+## going and a Corvette behind it in the same turn, and one bar showing two unrelated projects
+## would be a bar that is wrong half the time.
+var _ship_bar: ProgressBar = null
 
 ## Hull selector for the Space Port, populated the moment a port exists.
 var _ship_selector: OptionButton = null
@@ -136,6 +147,19 @@ func _build_construction(col: Control) -> void:
 	_build_button.focus_mode = Control.FOCUS_NONE
 	_build_button.pressed.connect(_on_build_button_pressed)
 	col.add_child(_build_button)
+
+	# The bar for the hull in the yard. Created here, immediately below the structure bar and
+	# the Build button, because it is the same kind of control about the same kind of decision:
+	# "the thing I clicked Build on, how far along is it, and how much metal is in it".
+	_ship_bar = ProgressBar.new()
+	_ship_bar.tooltip_text = "Click to allocate metal to the hull in the yard"
+	_ship_bar.custom_minimum_size = Vector2(0, 16)
+	_ship_bar.show_percentage = false
+	_ship_bar.max_value = 1.0
+	_ship_bar.step = 0.0
+	_ship_bar.focus_mode = Control.FOCUS_NONE
+	_ship_bar.gui_input.connect(_on_ship_bar_input)
+	col.add_child(_ship_bar)
 
 	# The interactive progress bar. A `ProgressBar` is not clickable on its own, so the click
 	# handler is attached through `gui_input` rather than a `pressed` signal that does not
@@ -276,13 +300,18 @@ func _refresh_build_info() -> void:
 		def.description, int(def.cost_metals), def.build_turns,
 		int(def.upkeep), str(held), cap,
 	]
-	# Coloured by what the *colony* can pay. Phase 8 builds out of the colony's stored metal,
-	# so an imperial balance that is comfortable and a local pile that is empty are the same
-	# situation to the player looking at this readout -- and only one of them stops the build.
-	var affordable := planet != null \
-		and planet.reserve_metals >= float(def.get("cost_metals"))
+	# Coloured by whether this colony can *start* it, never by whether it can pay for it.
+	#
+	# Construction draws metal out of storage a slice each turn and there is no upfront gate, so
+	# a red cost line for "you cannot afford this right now" would be a lie: a colony with four
+	# mines and an empty bank starts a City Complex today and pays for it over three turns. The
+	# figure shown is the cost, and the way to hurry it along is the bar's dialog, not a
+	# refusal at the queue.
+	var blocked: bool = planet == null \
+		or not def.can_add(planet.count(id)) \
+		or not planet.building_queue.is_empty()
 	_build_info.add_theme_color_override(
-		"font_color", CC2Theme.ALERT if not affordable else CC2Theme.WHITE_DIM
+		"font_color", CC2Theme.ALERT if blocked else CC2Theme.WHITE_DIM
 	)
 
 
@@ -320,22 +349,42 @@ func _refresh_ships() -> void:
 		_build_button.disabled = _build_selector == null or _build_selector.item_count == 0
 
 
-## Draw the construction bar: completion fraction, and whether there is anything to boost.
+## Draw both progress bars: completion fraction, and whether there is anything to allocate.
+##
+## Both are driven by metal, and both appear the moment the order is queued rather than when
+## it resolves at the end of the turn. The bar appearing immediately is what tells a player
+## their Build press registered; a bar that appeared only at the end of the next turn reads as
+## a button that did nothing, and a player who thinks the button is broken presses it again.
 func _refresh_progress() -> void:
 	if _build_bar == null:
 		return
 	var planet := _selected_colony()
 	var buildings: Dictionary = {}
+	var hulls: Dictionary = {}
 	if _controller != null and _controller.defs != null:
 		buildings = _controller.defs.get("buildings") as Dictionary
-	var fraction := ColonySim.construction_progress(planet, buildings)
+		hulls = _controller.defs.get("ship_hulls") as Dictionary
+	var kind := ColonySim.project_kind(planet)
+	var fraction := ColonySim.project_progress(planet, buildings, hulls)
 	_build_bar.value = fraction
-	_build_bar.visible = planet != null and not planet.building_queue.is_empty()
+	_build_bar.visible = planet != null and kind == ColonySim.ProjectKind.STRUCTURE
 	if _build_bar.visible:
-		_build_bar.tooltip_text = "%d%% complete - click to transfer metal (M%d banked)" % [
+		_build_bar.tooltip_text = "%d%% complete - click to allocate metal (M%d banked)" % [
 			int(round(fraction * 100.0)), int(planet.reserve_metals)]
 	else:
 		_build_bar.tooltip_text = ""
+
+	# The shipyard's own bar, reading the hull at the head of the queue.
+	var ship_fraction := 0.0
+	if planet != null and kind == ColonySim.ProjectKind.SHIP:
+		ship_fraction = fraction
+	if _ship_bar != null:
+		_ship_bar.value = ship_fraction
+		_ship_bar.visible = planet != null and kind == ColonySim.ProjectKind.SHIP
+		_ship_bar.tooltip_text = (
+			"%d%% complete - click to allocate metal (M%d banked)" % [
+				int(round(ship_fraction * 100.0)), int(planet.reserve_metals)]
+		) if _ship_bar.visible else ""
 
 	var mode: int = planet.build_mode if planet != null else int(Enums.BuildMode.SINGLE)
 	if _build_mode_selector != null:
@@ -391,6 +440,22 @@ func _on_build_bar_input(event: InputEvent) -> void:
 	# twenty-metal Solar Array quietly lost four hundred and eighty of it. The amount is now
 	# a decision the player makes, and the modal's slider is capped at what the project owes.
 	construction_boosted.emit()
+
+
+## A click on the shipyard bar. Opens the same dialog: the project is a hull rather than a
+## structure, and the dialog reads whichever is in the slot.
+func _on_ship_bar_input(event: InputEvent) -> void:
+	if _controller == null:
+		return
+	var pressed := event is InputEventMouseButton \
+		and (event as InputEventMouseButton).pressed \
+		and (event as InputEventMouseButton).button_index == MOUSE_BUTTON_LEFT
+	if not pressed:
+		return
+	var planet := _selected_colony()
+	if planet == null or ColonySim.project_kind(planet) != ColonySim.ProjectKind.SHIP:
+		return
+	ship_construction_boosted.emit()
 
 
 ## Select the colony the dropdown names.
@@ -511,9 +576,14 @@ func colony_selector() -> OptionButton:
 	return _colony_selector
 
 
-## The construction progress bar. Clicking it spends stored metal.
+## The structure progress bar. Clicking it opens the metal-allocation dialog.
 func build_bar() -> ProgressBar:
 	return _build_bar
+
+
+## The shipyard progress bar. Clicking it opens the same dialog for the hull in the yard.
+func ship_bar() -> ProgressBar:
+	return _ship_bar
 
 
 ## The single-project / per-turn selector.
@@ -592,8 +662,9 @@ func visible_text() -> String:
 			continue
 		for i in button.item_count:
 			parts.append(button.get_item_text(i))
-	if build_bar() != null and build_bar().visible:
-		parts.append(build_bar().tooltip_text)
+	for bar: ProgressBar in [build_bar(), ship_bar()]:
+		if bar != null and bar.visible:
+			parts.append(bar.tooltip_text)
 	if build_info() != null:
 		parts.append(build_info().text)
 	if warnings_label() != null:

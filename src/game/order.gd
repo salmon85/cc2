@@ -39,6 +39,7 @@ var target_planet: int = -1
 ##   SET_BUILD_MODE {"mode": int}
 ##   LOAD_CARGO     {"kind": String, "amount": float}
 ##   UNLOAD_CARGO   {"kind": String, "amount": float}
+##   REFUND_BUILD   {"metals": float}
 ##
 ## `SET_TAX` and `SET_RESEARCH` are retained rather than removed: the tax slider and the
 ## research allocation sliders are both gone from the UI, so nothing produces these any more,
@@ -185,6 +186,21 @@ static func make_cargo(
 	return o
 
 
+## Pull `metals` back *out* of the construction in progress and back into storage.
+##
+## The mirror of `make_boost_build`, and deliberately a separate type rather than a negative
+## `metals`: a signed payload is how a refund turns into a silent free grant the first time a
+## sign is lost, and the two directions have different caps (one is bounded by storage, the
+## other by what has already been assigned).
+static func make_refund_build(faction_id: int, planet_index: int, metals: float) -> Order:
+	var o := Order.new()
+	o.type = 16  # REFUND_BUILD
+	o.faction = faction_id
+	o.target_planet = planet_index
+	o.payload = {"metals": metals}
+	return o
+
+
 ## Human-readable label, used by the resolver's rejection log and the UI.
 func describe() -> String:
 	match type:
@@ -208,6 +224,8 @@ func describe() -> String:
 			"per-turn ships" if int(payload.get("mode", 0)) == 1 else "single project"]
 		14: return "Load %s into fleet %d" % [payload.get("kind", "?"), fleet]
 		15: return "Unload %s from fleet %d" % [payload.get("kind", "?"), fleet]
+		16: return "Refund %d metal from construction at planet %d" % [
+			int(payload.get("metals", 0.0)), target_planet]
 	return "Unknown order"
 
 

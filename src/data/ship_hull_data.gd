@@ -19,6 +19,15 @@ class_name ShipHullData
 @export var cost_rare: float = 0.0
 @export var cost_energy: float = 5.0
 
+## Turns of construction at a colony's Space Port.
+##
+## Authored rather than derived from `cost_metals`, because a ship and a structure with the
+## same metal price should not necessarily take the same time, and because the figure is
+## shown to the player. It was previously read as `hull.get("build_turns")` on a class that
+## had no such property: Godot returned null for every hull, the queue stored `turns: 0`, and
+## every hull finished on its first turn of shipyard output regardless of price.
+@export var build_turns: int = 2
+
 ## Attack, as the Phase 8 roster states it: damage this hull puts into an opposing hull per
 ## exchange. `weapon_damage` is what the combat stage actually reads; `attack` is the
 ## authored figure the design document gives, kept as a named field so a balance pass is an
@@ -131,6 +140,8 @@ func validate() -> PackedStringArray:
 		issues.append("weapon_damage set but no weapon_slots to mount it in")
 	if cost_metals < 0.0 or cost_rare < 0.0 or cost_energy < 0.0:
 		issues.append("negative build cost")
+	if build_turns < 1:
+		issues.append("build_turns must be >= 1")
 	if role == int(Enums.ShipRole.SCOUT) and sensor_range < 1.0:
 		issues.append("a scout with sensor_range < 1 is useless")
 	if role == int(Enums.ShipRole.COLONY) and not colony_kit:

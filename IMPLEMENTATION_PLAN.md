@@ -1362,3 +1362,124 @@ must not silence everything.
 - `test_gui_integration`: 457 (was 368) — the Build button, the ship list following the port,
   the landing button's visibility rules, the boost modal's ceiling and refusals, the planet
   metal/population rows, the research delta, and the shrunken header.
+
+---
+
+# Phase 8 corrections II: metal allocation, orbits, cargo and appearance
+
+Six corrections on top of the first Phase 8 pass. Each is recorded with the defect it fixes.
+
+## Construction is paid for out of production, not out of the bank
+
+Queueing a project no longer asks whether the colony has the metal, and no longer debits it
+when the order is accepted. Construction draws the colony's stockpile a slice a turn --
+`cost / build_turns`, so turn N of a T-turn project reads N/T whatever it costs.
+
+The gate was the wrong shape twice over. It refused a colony with an empty bank and four
+mines, which is precisely the colony whose mines are about to produce the metal; and it
+charged the full cost up front, so a player who pressed Build on a 100-metal structure had
+their balance emptied before the first turn ran and the bar had nothing to spend.
+
+The slice used to be `cost / total_turns` *credited straight to the project pool* with nothing
+ever leaving storage. That made the pool a number about the project rather than a quantity of
+metal, and it made the refund control meaningless: there was no metal in there to give back.
+Metal now moves. A colony that cannot cover the whole slice contributes what it has and the
+project takes longer; nothing is refused and nothing is owed.
+
+## The progress bar exists the moment Build is pressed
+
+The panel mirrors the order onto the colony at press time -- the same idiom `queue_move` uses
+for a transit line -- so the bar renders on the same frame as the press rather than when the
+turn resolves. A bar that appeared at the end of the next turn read as a button that had done
+nothing, and a player who thinks a button is broken presses it again.
+
+Applying the order twice is a no-op: `_apply_build_structure` refuses to touch a colony whose
+slot is already full, so the resolver's pass over the same order finds the work done.
+
+Ships get their own bar. A colony can have a City Complex going and a Corvette behind it in
+the same turn, and one bar showing two unrelated projects would be a bar that is wrong half
+the time.
+
+## One dialog, two directions, both kinds of project
+
+The metal dialog is now bidirectional: **Add** pulls metal out of storage, capped by what the
+project still owes; **Remove** returns assigned metal to storage, capped by what is assigned
+and never below zero. The two ceilings are different numbers and the dialog says so.
+
+It serves a hull exactly as it serves a structure. From the player's side they are one
+decision -- *this thing I clicked Build on is eating my metal* -- and two dialogs is how they
+become two rules. `ColonySim` grew a `ProjectKind` and a set of `project_*` readers over the
+build slot, so the kind is named once and every consumer agrees.
+
+A fully paid project still opens: its remove direction is exactly the amount assigned to it,
+and refusing there would strand metal the player put in with no way to take it back. A project
+with nothing assigned *and* an empty colony does not open, because both sliders would read
+zero.
+
+## Hulls are delivered to an orbital fleet
+
+`ShipHullData.build_turns` did not exist. `hull.get("build_turns")` returned null, `int(null)`
+was 0, and every hull queued with zero turns and finished on its first turn in the yard
+whatever it cost. Authored per hull now, on the same pattern as `BuildingData`.
+
+Worse, a finished hull went nowhere: `ship_queue.pop_front()` was the end of the line. A ship a
+colony had spent several turns and a hundred metal on simply stopped existing, and nothing
+ever put it in a fleet. `deliver_ships` now finds or creates the orbital fleet over the world
+that built it and puts the hull aboard, so building a ship is not a payment into a void.
+`GalaxyState.orbital_fleet` returns the *lowest-id* stationary fleet, so the garrison a colony
+has had since it was founded is the one new ships join rather than the fleet that happened to
+arrive last.
+
+## Travel is a flow; Load / Unload is a dialog
+
+Travel is now: press Travel -> the player clicks the **source** world -> clicks the
+**destination** -> the manifest opens. Both world steps are map clicks, so the step being
+awaited lives on the client root (the map is a pure drawing layer and this is a decision). A
+click on a world with nothing of yours in orbit is refused *with a reason* rather than
+silently advancing to a manifest that resolves to nothing.
+
+`FleetManifestModal` lists the orbit's hulls split into combat and logistics rosters, with
+`+`, `-`, `All` and `None`, and a per-hull cargo readout. The split is the point: a Colony Ship
+is not a warship, and putting it in the same list and trusting the player to know which is
+which is how a kit gets left in orbit.
+
+`CargoModal` handles metal, food, power, troops and civilians over one dialog, because the
+*shape* of the decision is the same each time -- something on the ground, something in the
+hold, a slider between them -- and only the noun differs. The hull is chosen first, then the
+transfers, because both ceilings are properties of which lift is selected. Nothing is applied
+until OK.
+
+`Load / Unload` sits beneath Travel on the planet panel and appears only when a Cargo
+Transport, Troop Transport or Colony Ship is actually in orbit, so "you have no transport here"
+is a row that is absent rather than a button that does nothing.
+
+## The board is drawn, not plotted
+
+The star at the centre was two discs: a faint halo and a solid core. It is now five graded
+layers running core-outward -- radii growing, alpha falling -- reaching four times the radius
+of any planet. That separation is the point: the star has to be distinguishable from a
+clickable body at a glance, and the only reliable way is to make it the one object on the board
+with a soft edge.
+
+Planets were two flat circles in one hashed colour. `PlanetVisuals` gives each world a
+three-step palette and a set of procedurally generated landmasses, keyed on the cosmetic class
+the brief names -- water, desert, snow/ice, temperate, jungle -- with land fraction and
+feature count doing as much work as colour: a jungle world is "dense greens, minimal ocean"
+mostly by having four landmasses where a water world has one. A terminator crescent gives the
+disc a lit limb, so it reads as a sphere rather than a sticker.
+
+Everything is a pure function of `(type_id, variant)`, so the client still has no binary asset
+dependency and a save/load does not reshuffle every planet's continents. The variant is
+rolled by the generator and serialised.
+
+## Verification
+
+- `tools/verify.sh`: **11 suites, 2836 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_turn_engine`: 907 (was 772) -- per-structure capacity contributions measured one copy
+  at a time, refunds in both directions, construction spending real metal, no upfront gate,
+  hulls on a metal schedule, delivery into an orbital fleet, cargo through the planet-facing
+  API, and the procedural looks.
+- `test_gui_integration`: 573 (was 457) -- both progress bars appearing on the press, the
+  bidirectional dialog over a structure and over a hull, the three-step travel flow driven
+  through the client's own handlers, Load/Unload visibility and validation, the star's layers,
+  and the panel's Food/Power/Population rows.

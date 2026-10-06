@@ -25,6 +25,13 @@ var _detail: RichTextLabel = null
 var _travel_button: Button = null
 var _hint: Label = null
 
+## Load / unload between the selected world's stockpiles and the lifts in its orbit.
+##
+## Placed directly beneath Travel because it is the other half of the same question -- what is
+## on the ground here, and what is in the ships above it -- and a player looking for one should
+## find the other next to it.
+var _cargo_button: Button = null
+
 ## Land the fleet's Colony Ship on the world it is over. Only shown when that is legal, so
 ## the button is a statement rather than a question.
 var _land_button: Button = null
@@ -60,6 +67,16 @@ func _build() -> void:
 	_travel_button.focus_mode = Control.FOCUS_NONE
 	_travel_button.pressed.connect(_on_travel_pressed)
 	col.add_child(_travel_button)
+
+	# Load / unload. Keyed on the *selected planet* rather than on the selected fleet: the
+	# dialog is about a world and its orbit, and a transport sitting over the colony is what
+	# the player wants whether or not they happened to click it first.
+	_cargo_button = Button.new()
+	_cargo_button.text = "Load / Unload"
+	_cargo_button.tooltip_text = "Move cargo, troops or civilians between this world and its orbit"
+	_cargo_button.focus_mode = Control.FOCUS_NONE
+	_cargo_button.pressed.connect(_on_cargo_pressed)
+	col.add_child(_cargo_button)
 
 	# The Colony Ship is the one structure a colony cannot build: it flies here and is spent.
 	# The button is enabled only when the fleet actually carries one over an unclaimed world,
@@ -107,6 +124,7 @@ func refresh() -> void:
 		_reported_fleet = current
 		fleet_selected.emit(current)
 	_refresh_land_button()
+	_refresh_cargo_button()
 	_refresh_detail()
 
 
@@ -118,6 +136,19 @@ func _refresh_land_button() -> void:
 	_land_button.visible = landable
 	_land_button.disabled = not landable
 	_land_button.tooltip_text = "Consume this fleet's Colony Ship to settle the world below"
+
+
+## Show the cargo control only when there is something in orbit that can actually be loaded.
+##
+## Visibility rather than a disabled button, for the same reason as the landing control: "you
+## have no transport here" is a different thing to be told than "you pressed a button and
+## nothing happened", and only one of them is worth a row on screen.
+func _refresh_cargo_button() -> void:
+	if _cargo_button == null or _controller == null:
+		return
+	var have_lifts := _controller.has_transports_at(_controller.selected_planet)
+	_cargo_button.visible = have_lifts
+	_cargo_button.disabled = not have_lifts
 
 
 func _refresh_detail() -> void:
@@ -187,6 +218,12 @@ func _on_land_pressed() -> void:
 	land_requested.emit()
 
 
+## Routed through the client root rather than opening the dialog here: the dialog overlays the
+## map, and the map is a sibling of this panel.
+func _on_cargo_pressed() -> void:
+	cargo_requested.emit()
+
+
 ## Emitted when the player asks for the travel workflow. The client root owns the modal,
 ## because the modal has to overlay the map and the map is a sibling of this panel.
 signal travel_requested
@@ -194,6 +231,10 @@ signal travel_requested
 
 ## Emitted when the player presses the landing button.
 signal land_requested
+
+
+## Emitted when the player presses Load / Unload.
+signal cargo_requested
 
 
 # --- Proposal compatibility -------------------------------------------------
@@ -256,6 +297,11 @@ func land_button() -> Button:
 	return _land_button
 
 
+## The Load / Unload button, shown only when the selected world has a lift in orbit.
+func cargo_button() -> Button:
+	return _cargo_button
+
+
 func detail() -> RichTextLabel:
 	return _detail
 
@@ -293,6 +339,8 @@ func visible_text() -> String:
 		parts.append(_hint.text)
 	if _travel_button != null:
 		parts.append(_travel_button.text)
+	if _cargo_button != null and _cargo_button.visible:
+		parts.append(_cargo_button.text)
 	if _land_button != null and _land_button.visible:
 		parts.append(_land_button.text)
 	return "\n".join(parts)

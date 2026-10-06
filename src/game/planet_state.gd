@@ -110,6 +110,14 @@ var build_metal: float = 0.0
 ## per-turn contribution `cost / total_turns` and the bar read N/T.
 var build_total_turns: int = 0
 
+## Cosmetic surface variant for this body, 0..`GameDB.PLANET_VISUAL_VARIANTS` - 1.
+##
+## Rolled by the generator and serialised, because it is part of how this world *looks* and a
+## save/load that reshuffled every planet's continents would make a remembered galaxy
+## unreproducible. Deliberately separate from `type_id`: two Terrestrial worlds are the same
+## climate and emphatically not the same place.
+var visual_variant: int = 0
+
 ## Whether the owner has surveyed this body (drives fog of war).
 var surveyed: bool = false
 
@@ -236,6 +244,7 @@ func to_dict() -> Dictionary:
 		"build_total_turns": build_total_turns,
 		"warnings": warnings.duplicate(true),
 		"surveyed": surveyed,
+		"visual_variant": visual_variant,
 	}
 
 
@@ -277,6 +286,10 @@ func from_dict(data: Dictionary) -> bool:
 	build_total_turns = int(data.get("build_total_turns", 0))
 	warnings = _coerce_warnings(data.get("warnings", []))
 	surveyed = bool(data.get("surveyed", false))
+	# Absent from every save written before the map gained procedural worlds, so a loaded
+	# body gets variant 0 rather than failing. Variant 0 is a real variant, not a sentinel:
+	# it is the one every world used to look like.
+	visual_variant = int(data.get("visual_variant", 0))
 	return true
 
 
@@ -312,7 +325,7 @@ func fingerprint() -> String:
 	# layouts that differ only in where a body sits are different games. Leaving it out
 	# would let a regression reorder the whole system without a single determinism test
 	# noticing.
-	return "%d:%s:%s:%d:%.3f,%.3f:%d:%s:%.4f:%s:%.2f:%.2f:%.2f:%.4f:%s:%.4f:%.4f:%d:%d:%.4f:%d:%.2f:%d:%s" % [
+	return "%d:%s:%s:%d:%.3f,%.3f:%d:%s:%.4f:%s:%.2f:%.2f:%.2f:%.4f:%s:%.4f:%.4f:%d:%d:%.4f:%d:%.2f:%d:%s:%d" % [
 		index, String(type_id), name, orbit, position.x, position.y,
 		owner, str(colonized), population,
 		_sorted_keys(structures), reserve_metals, reserve_rare, reserve_energy,
@@ -320,6 +333,7 @@ func fingerprint() -> String:
 		food_stock, build_turns_remaining, troops, power, build_mode, build_metal,
 		build_total_turns,
 		_sorted_keys(warning_set()),
+		visual_variant,
 	]
 
 

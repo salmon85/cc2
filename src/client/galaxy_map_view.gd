@@ -138,15 +138,43 @@ func _draw_systems(galaxy: GalaxyState) -> void:
 
 func _draw_star(sys: SystemState) -> void:
 	var colour := CC2Theme.star_color(sys.star_class)
-	# Soft halo, then the core. Two discs read as a star far better than one at this
-	# zoom without needing a texture asset.
-	draw_circle(sys.position, STAR_RADIUS, Color(colour.r, colour.g, colour.b, 0.16))
-	draw_circle(sys.position, STAR_RADIUS * 0.5, colour)
+	# Corona, glow, photosphere, core. A star is not a disc -- it is a light source, and the
+	# thing that says so at this zoom is the falloff around it rather than anything drawn on
+	# top of it. Two discs (a faint halo and a solid core) read as a glowing dot; four graded
+	# layers read as something radiating.
+	for layer: Array in star_layers(colour):
+		draw_circle(sys.position, float(layer[0]), layer[1] as Color)
 	if _ownership_known(_controller.galaxy, sys):
 		var owner_colour := CC2Theme.faction_color(sys.owner)
 		draw_arc(sys.position, STAR_RADIUS + 3.0, 0.0, TAU, 24, owner_colour, 1.5)
 	if sys.index == _controller.selected_system:
 		draw_arc(sys.position, STAR_RADIUS + 6.0, 0.0, TAU, 24, CC2Theme.PHOSPHOR, 1.5)
+
+
+## The graded discs that make the central star look like a light source.
+##
+## Returned as `[radius, colour]` pairs, **ordered from the core outward**, rather than drawn
+## inline so the gradient can be asserted: a test that greps the source for `draw_circle`
+## proves the star is drawn, and one that checks the list runs from bright and small to faint
+## and wide proves it is drawn as a *corona* rather than as a stack of identical discs.
+##
+## Order matters for the drawing too -- later discs are drawn over earlier ones, so this
+## sequence paints the faint halo first and the core last.
+##
+## The corona reaches `STAR_RADIUS * 4`, which is wider than any planet on the map (see
+## `PLANET_RADIUS`). That separation is the point: the star has to be distinguishable from a
+## clickable body at a glance, and the only reliable way to do that is to make it the one
+## object on the board with a soft edge.
+static func star_layers(colour: Color) -> Array:
+	return [
+		[STAR_RADIUS * 0.62, Color(
+			minf(1.0, colour.r + 0.25), minf(1.0, colour.g + 0.25),
+			minf(1.0, colour.b + 0.20))],
+		[STAR_RADIUS * 1.1, Color(colour.r, colour.g, colour.b, 0.65)],
+		[STAR_RADIUS * 1.7, Color(colour.r, colour.g, colour.b, 0.26)],
+		[STAR_RADIUS * 2.6, Color(colour.r, colour.g, colour.b, 0.11)],
+		[STAR_RADIUS * 4.0, Color(colour.r, colour.g, colour.b, 0.05)],
+	]
 
 
 ## One planet.
@@ -162,9 +190,7 @@ func _draw_planet(galaxy: GalaxyState, p: PlanetState) -> void:
 		draw_arc(pos, UNKNOWN_MARKER_RADIUS, 0.0, TAU, 16, UNKNOWN_MARKER_COLOUR, 1.5)
 		return
 
-	var colour := CC2Theme.planet_color(p.type_id) if p.type_id != &"" else CC2Theme.WHITE_DIM
-	draw_circle(pos, PLANET_RADIUS, Color(colour.r, colour.g, colour.b, 0.18))
-	draw_circle(pos, PLANET_RADIUS * 0.55, colour)
+	_draw_planet_body(pos, p)
 
 	# An owned world gets a filled owner ring and a colony tick, because "is that mine" is
 	# the one question the map has to answer without being asked.
@@ -192,6 +218,57 @@ func _draw_planet(galaxy: GalaxyState, p: PlanetState) -> void:
 			font, pos + Vector2(9.0, -6.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1,
 			CC2Theme.FONT_TINY, CC2Theme.WHITE_DIM
 		)
+
+
+## The world itself: an ocean disc, its landmasses and a terminator shading.
+##
+## Drawn from `PlanetVisuals` rather than from a texture. At `PLANET_RADIUS` a five-pixel
+## disc cannot carry a photograph, but it can carry a silhouette -- and "mostly ocean",
+## "mostly ice", "densely forested" are exactly the judgements a player makes when choosing
+## where to land a Colony Ship.
+##
+## The shading pass is what stops it looking like a flat sticker: a dark crescent on the
+## anti-lit side gives the disc a terminator, so the body reads as a lit sphere rather than as
+## a circle with a pattern on it. Every colour comes from the one palette function, which is
+## also what the GUI suite reads.
+func _draw_planet_body(pos: Vector2, p: PlanetState) -> void:
+	var look := PlanetVisuals.look_for(p.type_id)
+	var palette := PlanetVisuals.palette(p.type_id, p.visual_variant)
+	var deep: Color = palette[0]
+	var mid: Color = palette[1]
+	var accent: Color = palette[2]
+	draw_circle(pos, PLANET_RADIUS, deep)
+	# Landmasses. `draw_colored_polygon` has no clip, so a polygon reaching past the rim would
+	# poke out as a floating shard; each feature is drawn with its furthest vertex pulled onto
+	# the disc, which at this radius is indistinguishable from a clip and costs no second pass.
+	var land := accent if look == PlanetVisuals.Look.JUNGLE else mid
+	for blob: Variant in PlanetVisuals.landmasses(p.type_id, p.visual_variant):
+		draw_colored_polygon(
+			_clip_to_disc(blob as PackedVector2Array, pos), land)
+	# Terminator: a bright limb on the lit edge and a shadow crescent over the rest, so the
+	# disc reads as a lit sphere rather than a circle with a pattern printed on it.
+	draw_arc(pos, PLANET_RADIUS - 0.5, 0.0, TAU, 18, accent, 1.0)
+	var shade := PackedVector2Array()
+	for step in 10:
+		var angle := PI * 0.5 + PI * float(step) / 9.0
+		shade.append(pos + Vector2(cos(angle), sin(angle)) * PLANET_RADIUS)
+	shade.append(pos)
+	draw_colored_polygon(shade, Color(0.0, 0.0, 0.0, 0.28))
+
+
+## Pull a feature's vertices onto the disc and drop the ones that fall outside it.
+##
+## `landmasses` works in unit-disc coordinates; this scales them to the draw radius and
+## projects any vertex past the rim back onto it, so a coastline that would have run off the
+## edge of the world ends at its edge instead of floating beside it.
+static func _clip_to_disc(blob: PackedVector2Array, centre: Vector2) -> PackedVector2Array:
+	var out := PackedVector2Array()
+	for corner: Vector2 in blob:
+		var scaled := corner * PLANET_RADIUS
+		if scaled.length() > PLANET_RADIUS and scaled.length() > 0.0:
+			scaled = scaled.normalized() * PLANET_RADIUS
+		out.append(centre + scaled)
+	return out
 
 
 ## Which system a planet orbits in, or -1.

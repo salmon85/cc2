@@ -198,6 +198,23 @@ const PORT_HULLS: Array[StringName] = [
 	&"corvette", &"frigate",
 ]
 
+## Hulls that exist to move something other than ordnance: cargo, troops, or a colony kit.
+##
+## The Load/Unload control's visibility rule and the cargo modal's roster. Keyed on the hull
+## rather than on the colony's structures, because a colony with no Space Port can still be
+## sitting under a transport somebody else launched at it -- and that transport is exactly what
+## the player wants to use.
+const LOGISTIC_HULLS: Array[StringName] = [
+	&"cargo_transport", &"troop_transport", &"colony_ship",
+]
+
+## How many distinct surface variants a world rolls at generation.
+##
+## The count lives here rather than in `PlanetVisuals` so the generator -- which is in the
+## simulation layer and must not reach into the presentation layer to find out how many
+## looks there are -- and the renderer read the same number from one place.
+const PLANET_VISUAL_VARIANTS: int = 5
+
 
 ## Build the default research slider allocation (evenly spread).
 ##

@@ -103,6 +103,42 @@ func colonies_of(faction_id: int) -> Array[PlanetState]:
 	return out
 
 
+## The lowest-id fleet of `faction_id` parked over `planet_index`, or null.
+##
+## "Orbits as fleet sources": a colony's Space Port delivers finished hulls into a fleet
+## stationed over that world, and this is the query that finds it. Stationary only -- a fleet
+## with a `destination` is in transit and belongs to no orbit until it arrives -- and
+## lowest-id rather than newest, so the garrison a colony has had since it was founded is the
+## one new ships join rather than the fleet that happened to arrive last.
+func orbital_fleet(planet_index: int, faction_id: int) -> FleetState:
+	var ids := fleets.keys()
+	ids.sort()
+	for id: int in ids:
+		var f: FleetState = fleets[id] as FleetState
+		if f != null and f.active and f.owner == faction_id \
+				and f.destination < 0 and f.system == planet_index:
+			return f
+	return null
+
+
+## Every fleet of `faction_id` parked over `planet_index`, in id order.
+##
+## The travel flow asks for a *source location*, not for a specific fleet: a player who
+## clicks a world means "the ships I have there". Collapsing several fleets into one at
+## source-pick time would throw ships away, so the query returns them all and the manifest
+## modal lists the union.
+func fleets_in_orbit_at(planet_index: int, faction_id: int) -> Array[FleetState]:
+	var out: Array[FleetState] = []
+	var ids := fleets.keys()
+	ids.sort()
+	for id: int in ids:
+		var f: FleetState = fleets[id] as FleetState
+		if f != null and f.active and f.owner == faction_id \
+				and f.destination < 0 and f.system == planet_index:
+			out.append(f)
+	return out
+
+
 ## Whether `faction_id` has completed the given tech node.
 func has_tech(faction_id: int, tech_id: StringName) -> bool:
 	var f: FactionState = faction(faction_id)

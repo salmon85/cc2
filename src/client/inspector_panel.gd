@@ -110,24 +110,40 @@ func _refresh_planet() -> void:
 	lines.append(Format.field("TYPE", String(p.type_id).capitalize()))
 
 	# Metal: the stockpile and what the next turn adds to it. The delta is read from the
-	# colony's own mines rather than a generic economy figure, so "Metal: 599 (+15)" is the
+	# colony's own mines rather than a generic economy figure, so "METAL 599 (+15)" is the
 	# number the resolver is about to credit.
 	lines.append(Format.field("METAL", "%d (%s)" % [
 		int(p.reserve_metals), Format.signed(_metal_per_turn(p), 0)]))
 
-	# Population: the headcount, then how many are working. The pair is the interesting part
-	# -- a colony with ten people and five jobs has five idle, and those five are the ones
-	# researching. Idle pop is not waste; it is the research budget.
+	# Population: the headcount, then how many are working and how many are not.
+	#
+	# `total (working/jobless)`. The idle figure is the second number rather than a separate
+	# row because the pair *is* the information: eight people with four jobs means four idle
+	# colonist-turns of research and four mouths, and printing "POPULATION 8" above a separate
+	# "IDLE 4" row made the player do the subtraction to see the decision.
 	var employed := employed_population(p)
 	lines.append(Format.field("POPULATION", "%d (%d/%d)" % [
-		int(round(p.population)), employed, employed + idle_population(p)]))
+		int(round(p.population)), employed, idle_population(p)]))
 	lines.append(Format.field("TROOPS", str(p.troops)))
 	lines.append(Format.field("HOUSING", "%d" % int(p.housing)))
-	lines.append(Format.field("FOOD", "%d / %d" % [
-		int(p.food_stock), int(p.food_capacity)]))
-	lines.append(Format.field("FOOD BALANCE", Format.signed_colored(_food_balance(p))))
-	lines.append(Format.field("POWER", "%d / %d (+%d, -%d)" % [
-		int(p.power), int(p.power_capacity), int(p.power_generated), int(p.power_drawn)]))
+
+	# Food: one line, current over max, with the per-turn net in brackets.
+	#
+	# This replaces `FOOD 990/1000` above a separate `FOOD BALANCE +7`. Two rows for one
+	# quantity, and the second row's number was the only one that changed turn to turn -- so
+	# the reader's eye went to the static part and the moving part scrolled past unremarked.
+	# `(+7)` next to the bank it will change is the same information in one glance.
+	lines.append(Format.field("FOOD", "%d/%d (%s)" % [
+		int(p.food_stock), int(p.food_capacity), Format.signed_colored(_food_balance(p))]))
+
+	# Power: current over max, with generation minus draw in brackets.
+	#
+	# It was `POWER 270/1000 (+40, -10)`, which is two signed numbers the reader has to combine
+	# before they mean anything, and it carried a literal `-0` whenever a structure drew
+	# nothing -- the format printed the sign of zero as a minus sign. One net figure, computed
+	# the way a player would: a Nuclear plant at +40 against a City Complex at 10 is +30.
+	lines.append(Format.field("POWER", "%d/%d (%s)" % [
+		int(p.power), int(p.power_capacity), Format.signed_colored(_power_balance(p))]))
 
 	# The Phase 8 building roster, in the order a player thinks about it. `space_port` is in
 	# `_ROSTER` and so is in `_is_economic`: it used to be printed on its own line here *and*
@@ -218,6 +234,16 @@ func _food_balance(p: PlanetState) -> float:
 	if p.count(&"colony_ship_building") > 0:
 		produced += 5.0
 	return produced - p.population
+
+
+## Power balance: what the colony generates minus what its structures draw.
+##
+## One net figure rather than the two signed halves. `power_generated` and `power_drawn` are
+## both still on the planet state and both still shown in the imperial summary, so nothing is
+## lost -- but the panel's job is to answer "is my grid in surplus", and a surplus is a
+## subtraction, not a pair of numbers.
+func _power_balance(p: PlanetState) -> float:
+	return p.power_generated - p.power_drawn
 
 
 ## The Phase 8 structure roster, in the order the readout lists it.

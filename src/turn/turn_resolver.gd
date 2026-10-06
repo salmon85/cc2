@@ -172,6 +172,8 @@ static func _apply_order(
 			_apply_recruit_troop(galaxy, faction, order, defs)
 		Enums.OrderType.BOOST_BUILD:
 			_apply_boost_build(galaxy, faction, order, defs)
+		Enums.OrderType.REFUND_BUILD:
+			_apply_refund_build(galaxy, faction, order)
 		Enums.OrderType.SET_BUILD_MODE:
 			var mode_planet: PlanetState = galaxy.planet(order.target_planet) as PlanetState
 			if mode_planet != null and mode_planet.owner == order.faction:
@@ -280,6 +282,21 @@ static func _apply_boost_build(
 		planet, float(order.payload.get("metals", 0.0)), buildings)
 
 
+## Take metal back out of the construction in progress and return it to the colony.
+##
+## `ColonySim` bounds the transfer by what is banked against the project, so a wire order
+## asking to withdraw a colony's whole stockpile takes back only what was ever put in. There
+## is no storage clamp to pass in: metal coming *back* has no cap to hit, and inventing one
+## would make "pull it all out" impossible.
+static func _apply_refund_build(
+	galaxy: GalaxyState, faction: FactionState, order: Order
+) -> void:
+	var planet: PlanetState = galaxy.planet(order.target_planet) as PlanetState
+	if planet == null or planet.owner != order.faction:
+		return
+	ColonySim.refund_construction(planet, float(order.payload.get("metals", 0.0)))
+
+
 ## Move food, metal, power or troops between a world and a fleet parked over it.
 static func _apply_cargo(
 	galaxy: GalaxyState, faction: FactionState, order: Order, loading: bool
@@ -385,6 +402,16 @@ static func can_queue_structure(
 	return true
 
 
+## Apply a ship order. Public for the same reason as `apply_build_structure`: the client
+## applies it at press time so the shipyard bar appears on the same frame as the press, and
+## having one implementation of the rule is what stops the pressed-time state and the
+## resolved-time state from being decided by two different functions.
+static func apply_build_ship(
+	galaxy: GalaxyState, faction: FactionState, order: Order, defs: Node, db: Node
+) -> void:
+	_apply_build_ship(galaxy, faction, order, defs, db)
+
+
 ## Apply a structure order. Public so a test can drive the queue without a full turn.
 static func apply_build_structure(
 	galaxy: GalaxyState, faction: FactionState, order: Order, defs: Node, db: Node
@@ -413,7 +440,14 @@ static func _apply_build_ship(
 		return
 	if not can_build_ship(planet, hull, faction, db):
 		return
-	planet.ship_queue.append({"hull": String(hull_id), "turns": int(hull.get("build_turns"))})
+	# `build_turns` is the hull's own authored figure. It used to be read off a property the
+	# class did not have -- Godot returned null, `int(null)` was 0, and every hull therefore
+	# queued with zero turns and finished on its first turn in the yard whatever it cost.
+	planet.ship_queue.append({
+		"hull": String(hull_id),
+		"turns": maxi(1, int(hull.get("build_turns"))),
+		"metal": 0.0,
+	})
 
 
 ## Whether `hull_id` can be laid down at `planet` at all, ignoring what it costs.

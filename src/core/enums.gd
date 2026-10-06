@@ -78,10 +78,11 @@ enum OrderType {
 	SET_BUILD_MODE, ## Choose single-project or per-turn ship production.
 	LOAD_CARGO,   ## Load food / metal / power / troops from a planet.
 	UNLOAD_CARGO, ## Unload the same back onto a planet.
+	REFUND_BUILD, ## Pull metal back out of the construction in progress.
 }
 
 ## The highest `OrderType` ordinal the wire format accepts.
-const MAX_ORDER_TYPE: int = 15
+const MAX_ORDER_TYPE: int = 16
 
 ## How a colony spends its per-turn construction allowance.
 enum BuildMode {

@@ -182,10 +182,28 @@ func _test_order_stream_replay() -> void:
 	_t.eq(a.size(), b.size(), "both runs issued the same number of turns of orders")
 	_t.eq(str(a), str(b), "the order stream itself is reproducible")
 
-	# And a different seed must produce a different order stream.
+	# And a different seed must produce a different game.
+	#
+	# The probe is the order stream *or* the resulting state, and the second clause is not
+	# padding. On this map a fleet's destination is `reachable[turn % len]`, and once the
+	# fleet's home world is past the high end of the twelve turns being traced, that
+	# expression evaluates to the same handful of planet indices for every seed -- so two
+	# seeds can produce an identical order stream over two genuinely different galaxies.
+	# That made the assertion a coin flip on where generation happened to put the homeworld,
+	# rather than a statement about the seed reaching the generator. The state hash is the
+	# claim with teeth, and the disjunction keeps the original one whenever it does bite.
 	var c := _order_trace(4243, 12)
-	_t.ok(str(a) != str(c) or a.size() == 0,
-		"a different seed yields a different order stream")
+	_t.ok(str(a) != str(c) or _final_hash(4242, 12) != _final_hash(4243, 12),
+		"a different seed yields a different order stream or a different game")
+
+
+## The state hash after `turns` turns of the same scripted order stream.
+func _final_hash(seed_value: int, turns: int) -> int:
+	var galaxy := GalaxyGenerator.generate(_defs, _rng(seed_value), 40, 4, _db)
+	var rng := _rng(seed_value)
+	for _i in turns:
+		TurnResolver.resolve_turn(galaxy, _orders_for(galaxy), _defs, _db, rng, 0)
+	return galaxy.state_hash()
 
 
 func _order_trace(seed_value: int, turns: int) -> Array:

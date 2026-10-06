@@ -386,10 +386,16 @@ func queue_move(target_planet: int) -> bool:
 ## Queue a structure for the selected colony. `building_id` must be a known building the
 ## faction has unlocked and the colony is allowed to add.
 ##
-## The construction cost is paid from the *colony's* stored metal rather than the imperial
-## treasury. That is what makes the clickable progress bar meaningful: the metal boosting a
-## project and the metal a mine produces are the same pool, so a colony that has mined hard
-## can finish a City Complex now instead of in three turns.
+## There is deliberately no metal gate. The colony is not asked to have the full cost banked
+## before it may commit to a project: construction draws the colony's metal out of storage a
+## slice each turn, so a colony with an empty bank and four mines can still start a City
+## Complex and pay for it over the turns that follow. Gating on the balance made construction
+## impossible for a young colony -- exactly the colony whose mines are about to produce the
+## metal -- and it made the "no upfront payment" rule a UI convention rather than a rule.
+##
+## Power is the one thing that can still block a build, and it blocks *new* structures only.
+## `can_supply_power` is the same test the resolver applies, so the button and the order cannot
+## disagree.
 func queue_build_structure(building_id: StringName) -> bool:
 	var planet := _selected_owned_planet()
 	if planet == null:
@@ -410,12 +416,6 @@ func queue_build_structure(building_id: StringName) -> bool:
 	if not def.can_add(planet.count(building_id)):
 		action_rejected.emit("this colony is already at its limit")
 		return false
-	if planet.reserve_metals < float(def.get("cost_metals")):
-		action_rejected.emit("this colony does not have enough stored metal")
-		return false
-	# Power is the only resource that can block a build rather than merely price it, and it
-	# blocks *new* structures only. `can_supply_power` is the same test the resolver applies,
-	# so the button and the order cannot disagree.
 	if def.draws_power():
 		var needed := float(def.get("power_required"))
 		if not planet.can_supply_power(needed):
@@ -428,9 +428,14 @@ func queue_build_structure(building_id: StringName) -> bool:
 
 	var order := Order.make_build_structure(player_id, planet.index, building_id, 1)
 	if queue.submit(order):
-		# Debit immediately so the colony's readout shows the true remaining store; the
-		# resolver will not charge again.
-		planet.reserve_metals -= float(def.get("cost_metals"))
+		# Applied at press time as well as staged, so the progress bar appears on this frame
+		# rather than when the order resolves at the end of the turn. A player who pressed
+		# Build and saw no bar would press it again.
+		#
+		# Applying twice is harmless: `_apply_build_structure` refuses to touch a colony whose
+		# slot is already full, so the resolver's pass over the same order finds the work done
+		# and does nothing. That is the same mirror-the-move idiom `queue_move` uses.
+		TurnResolver.apply_build_structure(galaxy, player(), order, defs, db)
 		state_changed.emit()
 		return true
 	action_rejected.emit("the order was refused")
@@ -471,6 +476,8 @@ func queue_build_ship(hull_id: StringName) -> bool:
 
 	var order := Order.make_build_ship(player_id, planet.index, hull_id)
 	if queue.submit(order):
+		# Mirrored at press time, for the shipyard bar's sake, exactly as a structure is.
+		TurnResolver.apply_build_ship(galaxy, player(), order, defs, db)
 		state_changed.emit()
 		return true
 	action_rejected.emit("the order was refused")
@@ -547,22 +554,43 @@ func queue_recruit_troop() -> bool:
 
 ## Transfer `metals` from the selected colony's storage against its construction.
 ##
-## The boost modal's whole mechanic. Clamped to what the colony holds *and* to what the project
-## still owes, so the caller cannot overpay by accident; the metal leaves storage exactly once
-## and is never returned when the structure lands.
+## One half of the metal dialog; `refund_construction` is the other. Works on a structure or a
+## hull -- whichever is in the build slot -- because from the player's side they are the same
+## decision. Clamped to what the colony holds *and* to what the project still owes, so the
+## caller cannot overpay by accident.
 func boost_construction(metals: float) -> float:
 	var planet := _selected_owned_planet()
 	if planet == null:
 		return 0.0
-	if planet.building_queue.is_empty():
+	if ColonySim.project_kind(planet) == ColonySim.ProjectKind.NONE:
 		action_rejected.emit("nothing is under construction")
 		return 0.0
-	var spent := ColonySim.boost_construction(planet, metals, _building_table())
+	var spent := ColonySim.boost_construction(
+		planet, metals, _building_table(), _hull_table())
 	if spent <= 0.0:
 		action_rejected.emit("nothing more to spend on this project")
 		return 0.0
 	state_changed.emit()
 	return spent
+
+
+## Pull `metals` back out of the selected colony's construction and into its storage.
+##
+## The mirror of `boost_construction`. Bounded by what is banked against the project and by
+## nothing else, so "take it all out" always works and the bar returns to zero.
+func refund_construction(metals: float) -> float:
+	var planet := _selected_owned_planet()
+	if planet == null:
+		return 0.0
+	if ColonySim.project_kind(planet) == ColonySim.ProjectKind.NONE:
+		action_rejected.emit("nothing is under construction")
+		return 0.0
+	var returned := ColonySim.refund_construction(planet, metals)
+	if returned <= 0.0:
+		action_rejected.emit("no metal is assigned to this project")
+		return 0.0
+	state_changed.emit()
+	return returned
 
 
 ## The building registry, or an empty dictionary when the autoload is missing.
@@ -573,6 +601,13 @@ func _building_table() -> Dictionary:
 	if defs == null:
 		return {} as Dictionary
 	return defs.get("buildings") as Dictionary
+
+
+## The hull registry, or an empty dictionary when the autoload is missing.
+func _hull_table() -> Dictionary:
+	if defs == null:
+		return {} as Dictionary
+	return defs.get("ship_hulls") as Dictionary
 
 
 ## Choose single-project or per-turn ship production on the selected colony.
@@ -686,10 +721,21 @@ func set_research_allocation(weights: PackedFloat64Array) -> bool:
 ## `ships` is a `{hull_id: count}` manifest; an empty one means the whole fleet. This is what
 ## the travel modal's OK button submits, and it is a `TRAVEL` order rather than a `MOVE_FLEET`
 ## one so that the partial-manifest case travels on the wire as what it is.
-func queue_travel(target_planet: int, ships: Dictionary = {}) -> bool:
-	var f := fleet()
+func queue_travel(target_planet: int, ships: Dictionary = {}, fleet_id: int = -1) -> bool:
+	# `fleet_id` names the source orbit explicitly. The travel flow gets to this point by the
+	# player picking a *world* and then some of the ships over it, so the fleet those ships
+	# belong to was never selected in the ordinary sense -- and reading the selection here
+	# would dispatch whatever happened to be selected rather than what the player chose.
+	var f: FleetState = null
+	if fleet_id >= 0:
+		f = galaxy.fleet(fleet_id) if galaxy != null else null
+	else:
+		f = fleet()
 	if f == null:
 		action_rejected.emit("select a fleet first")
+		return false
+	if f.owner != player_id:
+		action_rejected.emit("that fleet is not yours")
 		return false
 	if galaxy == null or galaxy.planet(target_planet) == null:
 		action_rejected.emit("no such destination")
@@ -713,6 +759,152 @@ func queue_travel(target_planet: int, ships: Dictionary = {}) -> bool:
 		return true
 	action_rejected.emit("the order was refused")
 	return false
+
+
+# --- Orbits, cargo, and the travel flow --------------------------------------
+
+## Fleets the player has parked over `planet_index`, in stable id order.
+##
+## The travel flow's "Select Source Location" step asks for a *world*, not a fleet: a player
+## clicking a body means "the ships I have there", and which of several fleets that is is an
+## implementation detail they were never shown.
+func fleets_in_orbit_at(planet_index: int) -> Array[FleetState]:
+	if galaxy == null or planet_index < 0:
+		return [] as Array[FleetState]
+	return galaxy.fleets_in_orbit_at(planet_index, player_id)
+
+
+## The lowest-id fleet parked over `planet_index`, or null.
+##
+## The one the travel flow dispatches from and the one the panels adopt afterwards, so that
+## selecting a transit fleet shows the player the ships that are leaving rather than the ones
+## that stayed behind.
+func orbital_fleet(planet_index: int) -> FleetState:
+	if galaxy == null:
+		return null
+	return galaxy.orbital_fleet(planet_index, player_id)
+
+
+## Whether `planet_index` is a legal travel source: a real world with at least one of the
+## player's own ships in orbit.
+##
+## A question rather than an action, so the travel flow can tell the player why a click did
+## not advance the workflow instead of silently ignoring the click.
+func can_travel_from(planet_index: int) -> bool:
+	return not fleets_in_orbit_at(planet_index).is_empty()
+
+
+## Every hull the player has in orbit over `planet_index`, as `{hull_id: count}`.
+##
+## The union across the world's fleets, which is what the manifest modal lists: a player sees
+## "2 Corvettes" whether they are in one fleet or two.
+func hulls_in_orbit_at(planet_index: int) -> Dictionary:
+	var out: Dictionary = {}
+	for f in fleets_in_orbit_at(planet_index):
+		for hull_id: StringName in f.ships:
+			out[hull_id] = int(out.get(hull_id, 0)) + int(f.ships[hull_id])
+	return out
+
+
+## Whether the player has a Cargo Transport, Troop Transport or Colony Ship over this world.
+##
+## The Load/Unload button's visibility rule. It is about the *ships in orbit*, not about the
+## selected fleet: the control is opened from a planet, and a transport sitting over the
+## planet is what the player wants to use whether or not they happened to click it first.
+func has_transports_at(planet_index: int) -> bool:
+	for hull_id: StringName in hulls_in_orbit_at(planet_index):
+		if GameDB.LOGISTIC_HULLS.has(hull_id):
+			return true
+	return false
+
+
+## Move `amount` of `kind` between `planet_index`'s stockpiles and the transports in its orbit.
+##
+## Keyed on the planet rather than on the selected fleet, because the dialog the player opened
+## is about a world and its orbit. `hull_id` names *which* transport in that orbit; an empty
+## one means the whole orbital lift, which is what "load everything" means when a colony has
+## only one Cargo Transport.
+##
+## Changes are applied on OK rather than on every slider move, so a half-finished dialog leaves
+## nothing behind -- the same rule the travel manifest follows.
+func transfer_at_planet(
+	planet_index: int, hull_id: StringName, kind: StringName, amount: float, loading: bool
+) -> float:
+	var planet := _owned_colony(planet_index)
+	if planet == null:
+		return 0.0
+	var lifts := _transports_at(planet_index, hull_id, kind)
+	if lifts.is_empty():
+		action_rejected.emit("no transport in orbit here lifts that")
+		return 0.0
+	var moved := 0.0
+	for f in lifts:
+		if moved >= amount:
+			break
+		var step := amount - moved
+		if loading:
+			moved += TransferStage.load(planet, f, kind, step)
+		else:
+			moved += TransferStage.unload(planet, f, kind, step)
+	if moved <= 0.0:
+		action_rejected.emit("nothing to load" if loading else "nothing to unload")
+		return 0.0
+	state_changed.emit()
+	return moved
+
+
+## The transports in orbit over `planet_index` that lift `kind`.
+##
+## A single-membership `Array` so the loop over it keeps a concrete element type; a `Variant`
+## array is exactly the sort of thing that turns into a runtime cast error three files away.
+func _transports_at(
+	planet_index: int, hull_id: StringName, kind: StringName
+) -> Array[FleetState]:
+	var out: Array[FleetState] = []
+	var code := _cargo_kind_code(kind)
+	for f in fleets_in_orbit_at(planet_index):
+		for key: StringName in f.ships:
+			var def: Resource = _hull_table().get(key, null) as Resource
+			if def == null:
+				continue
+			if hull_id != &"" and key != hull_id:
+				continue
+			if not def.call("carries", code):
+				continue
+			if not out.has(f):
+				out.append(f)
+	return out
+
+
+## The `ShipHullData.CargoKind` a manifest key stands for.
+##
+## Delegates to `TransferStage` rather than repeating its table, so a new cargo kind needs one
+## edit rather than one here and one there.
+func _cargo_kind_code(kind: StringName) -> int:
+	match kind:
+		TransferStage.KIND_METALS:
+			return ShipHullData.CargoKind.METALS
+		TransferStage.KIND_FOOD:
+			return ShipHullData.CargoKind.FOOD
+		TransferStage.KIND_POWER:
+			return ShipHullData.CargoKind.POWER
+		TransferStage.KIND_TROOPS:
+			return ShipHullData.CargoKind.TROOPS
+		TransferStage.KIND_CIVILIANS:
+			return ShipHullData.CargoKind.CIVILIANS
+	return ShipHullData.CargoKind.NONE
+
+
+## A world the player owns and has settled, by index, or null with a reason emitted.
+func _owned_colony(planet_index: int) -> PlanetState:
+	if galaxy == null or planet_index < 0:
+		action_rejected.emit("select one of your colonies first")
+		return null
+	var planet: PlanetState = galaxy.planet(planet_index)
+	if planet == null or planet.owner != player_id or not planet.colonized:
+		action_rejected.emit("select one of your colonies first")
+		return null
+	return planet
 
 
 # --- The turn --------------------------------------------------------------

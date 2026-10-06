@@ -8,6 +8,7 @@ id = &"dreadnought"
 display_name = "Dreadnought"
 role = 5
 cost_metals = 1100.0
+build_turns = 8
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 14.0

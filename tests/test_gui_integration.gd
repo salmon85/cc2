@@ -60,6 +60,8 @@ func _initialize() -> void:
 		"illegal_orders",
 		"no_tax_or_research", "macro_progress_bar", "boost_modal",
 		"build_button", "landing_button", "travel_modal",
+		"immediate_bars", "metal_dialog", "travel_flow", "cargo_modal",
+		"map_visuals", "economy_rows",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
@@ -108,6 +110,12 @@ func _process(_delta: float) -> bool:
 		"build_button": _step_build_button_and_ship_list()
 		"landing_button": _step_landing_button()
 		"travel_modal": _step_travel_modal()
+		"immediate_bars": _step_immediate_progress_bars()
+		"metal_dialog": _step_metal_allocation_modal()
+		"travel_flow": _step_travel_flow()
+		"cargo_modal": _step_cargo_modal()
+		"map_visuals": _step_map_visuals()
+		"economy_rows": _step_panel_economy_rows()
 		"macro_build": _step_macro_build()
 		"macro_map_stable": _step_macro_does_not_move_the_map()
 		"ready_button": _step_ready_button()
@@ -961,23 +969,25 @@ func _step_macro_progress_bar() -> void:
 	me.metals = 100000.0
 	for id: Variant in c.defs.get("buildings"):
 		me.unlocked_buildings[StringName(str(id))] = true
-	# More than the project costs, because the order debits the colony immediately: the bar
-	# then spends what is left, and a colony the build order had emptied would have nothing
-	# left to press.
 	colony.reserve_metals = 60.0
 	var queued_before := c.pending_orders().size()
 	sup.ok(c.queue_build_structure(&"granary"), "a granary can be queued")
 	sup.eq(c.pending_orders().size(), queued_before + 1, "the build order is staged")
 	var staged: Order = c.pending_orders()[c.pending_orders().size() - 1]
 	sup.eq(staged.type, Enums.OrderType.BUILD_STRUCTURE, "and it is a BUILD_STRUCTURE order")
-	sup.ok(not bar.visible,
-		"a staged order has not yet become a construction queue")
-	TurnResolver.apply_build_structure(c.galaxy, me, staged, c.defs, c.db)
-	sup.eq(colony.building_queue.size(), 1, "the resolver queues it on the colony")
-	# The order debits the colony, which is what the bar then spends from.
+	# The project is mirrored onto the colony at press time, so the bar can be rendered on the
+	# same frame as the press. A bar that waited for the order to resolve read as a button
+	# that had done nothing.
+	sup.eq(colony.building_queue.size(), 1,
+		"the project is queued on the colony as soon as Build is pressed")
 	_client.macros.refresh()
 	sup.ok(bar.visible, "a queued project shows the progress bar")
 	sup.near(bar.value, 0.0, 0.001, "at zero progress")
+	# Applying the order again -- which is what the resolver does at the end of the turn --
+	# must change nothing, or the mirror would double the work.
+	TurnResolver.apply_build_structure(c.galaxy, me, staged, c.defs, c.db)
+	sup.eq(colony.building_queue.size(), 1,
+		"and applying the same order again does not queue it twice")
 
 	var banked := colony.reserve_metals
 	sup.ok(banked > 0.0, "the colony has metal banked to spend", "%.1f" % banked)
@@ -999,8 +1009,11 @@ func _step_macro_progress_bar() -> void:
 		"shown=%s" % shown.replace("\n", " | "))
 	sup.ok(shown.contains("0% complete"),
 		"and reports the completion percentage", "shown=%s" % shown.replace("\n", " | "))
-	sup.ok(shown.contains("How much metal do you want to transfer from storage?"),
-		"and asks the question it exists to ask")
+	sup.ok(shown.contains("ADD metal from storage into this project"),
+		"and asks the question it exists to ask", "shown=%s" % shown.replace("\n", " | "))
+	sup.ok(shown.contains("REMOVE assigned metal"),
+		"and offers the other direction: metal already in the project can come back out",
+		"shown=%s" % shown.replace("\n", " | "))
 	sup.eq(_client.boost.ok_button().text, "OK", "with an OK button")
 	sup.eq(_client.boost.cancel_button().text, "CANCEL", "and a CANCEL button")
 
@@ -1265,7 +1278,8 @@ func _step_boost_modal() -> void:
 		"it refuses to open with nothing under construction")
 	sup.ok(not _client.boost.visible, "and stays hidden")
 
-	# A project, but a colony with no metal in it: still nothing to transfer.
+	# A project, but a colony with no metal in it and nothing assigned to it: there is
+	# nothing to move in *or* out, so a dialog offering two dead sliders is not a question.
 	colony.building_queue[&"granary"] = 1
 	colony.build_turns_remaining = 2
 	colony.build_total_turns = 2
@@ -1275,14 +1289,22 @@ func _step_boost_modal() -> void:
 		"and it refuses to open on an empty colony")
 	colony.reserve_metals = saved_metal
 
-	# Metal, but already paid for: the project owes nothing, so there is nothing to add.
+	# Metal already assigned and nothing left owing: the *add* direction is dead, but the
+	# *remove* one is not -- the whole assigned amount can come back out. Refusing here would
+	# strand it, and a project the player can put metal into but never take out is a one-way
+	# door.
 	var buildings: Dictionary = _defs.get("buildings") as Dictionary
 	var cost := ColonySim.queued_cost(colony, buildings)
 	colony.build_metal = cost
 	sup.near(ColonySim.construction_progress(colony, buildings), 1.0, 0.001,
 		"the project reads as complete")
-	sup.ok(not _client.boost.open_for_selected_colony(),
-		"and it refuses to open on a finished project")
+	sup.ok(_client.boost.open_for_selected_colony(),
+		"a fully paid project still opens, because its metal can be refunded")
+	sup.near(_client.boost.refund_slider().max_value, cost, 0.001,
+		"and the refund slider offers exactly what is assigned")
+	sup.near(_client.boost.amount_slider().max_value, 1.0, 0.001,
+		"while there is nothing left to add")
+	_client.boost.close()
 	colony.build_metal = 0.0
 
 	# Half paid: the ceiling is exactly what is left owing, not the colony's whole store.
@@ -1573,10 +1595,11 @@ func _step_planet_and_research_readouts() -> void:
 	_client.inspector.refresh()
 	detail = _client.inspector.planet_label().text
 	sup.ok(detail.contains("POPULATION"), "the detail panel shows population")
-	# `10 (4/10)`: ten people, four of them working. The second pair is employed/total, so a
-	# colony at half capacity reads `10 (5/10)` and the idle remainder is the difference.
-	sup.ok(detail.contains("10 (4/10)"),
-		"as total (employed/total): ten people, four of them working",
+	# `10 (4/6)`: ten people, four of them working and six idle. The pair is working/jobless
+	# rather than employed/total because the two idle colonist-turns *are* the research budget,
+	# and printing them as "4/10" made the reader do the subtraction to see that.
+	sup.ok(detail.contains("10 (4/6)"),
+		"as total (working/jobless): ten people, four of them working",
 		"shown=%s" % detail.replace("\n", " | "))
 	sup.eq(_client.inspector.employed_population(colony), 4,
 		"employed is the number of structures the colony can staff")
@@ -1591,8 +1614,8 @@ func _step_planet_and_research_readouts() -> void:
 		"two people staff two jobs, however many exist")
 	sup.eq(_client.inspector.idle_population(colony), 0, "and nobody is idle")
 	_client.inspector.refresh()
-	sup.ok(_client.inspector.planet_label().text.contains("2 (2/2)"),
-		"the panel agrees that everybody is working",
+	sup.ok(_client.inspector.planet_label().text.contains("2 (2/0)"),
+		"the panel agrees that everybody is working, with nobody jobless",
 		"shown=%s" % _client.inspector.planet_label().text)
 
 	# Troops are not civilians: a garrison does not work farms and is not idle labour.
@@ -1733,6 +1756,7 @@ func _step_macro_build() -> void:
 	sup.ok(_client.macros.build_button().text == "Build", "labelled 'Build'")
 
 	var queued_before := int(colony.building_queue.get(chosen, 0))
+	var built_before := colony.count(chosen)
 	var staged_before := c.pending_orders().size()
 	var accepted := c.queue_build_structure(chosen)
 	sup.ok(accepted, "a legal build order is accepted", "building %s" % String(chosen))
@@ -1742,8 +1766,10 @@ func _step_macro_build() -> void:
 		"the staged order is BUILD_STRUCTURE")
 	sup.eq(orders[orders.size() - 1].target_planet, colony.index,
 		"the order names the right colony")
-	sup.ok(int(colony.building_queue.get(chosen, 0)) == queued_before,
-		"the structure is queued for ColonySim, not granted immediately")
+	sup.eq(int(colony.building_queue.get(chosen, 0)), queued_before + 1,
+		"the project is queued for ColonySim -- it is not granted immediately")
+	sup.eq(colony.count(chosen), built_before,
+		"and the structure itself does not exist until the metal is in")
 
 	# A second identical order beyond the per-colony cap must be refused.
 	var def: Resource = _defs.building(chosen) as Resource
@@ -2164,13 +2190,25 @@ func _step_fog_colony_markers() -> void:
 			break
 	if foreign_sys >= 0:
 		var host: SystemState = gal.systems[foreign_sys]
+		# A body the player already owns is not a rival world at all: the detail gate opens on
+		# ownership before anything else, so settling one "for a rival" and then asserting the
+		# panel hides it would be asserting the panel fails against its own colony. Which body
+		# generation happens to put in the first visible system is not under this test's
+		# control, so the premise is enforced here rather than hoped for.
 		for p_index in host.planet_indices:
 			var candidate := gal.planet(p_index)
-			if candidate != null and candidate.is_colonizable():
+			if candidate != null and candidate.is_colonizable() \
+					and candidate.owner != me:
 				foreign_planet = candidate.index
 				break
-		if foreign_planet < 0 and host.planet_indices.size() > 0:
-			foreign_planet = host.planet_indices[0]
+		if foreign_planet < 0:
+			for p_index in host.planet_indices:
+				var fallback := gal.planet(p_index)
+				if fallback != null and fallback.owner != me:
+					foreign_planet = fallback.index
+					break
+		sup.ok(foreign_planet < 0 or gal.planet(foreign_planet).owner != me,
+			"the chosen body is not already the player's")
 
 	sup.ok(foreign_sys >= 0, "a system is in sensor range to hang a rival colony on")
 	sup.ok(foreign_planet >= 0, "that system has a body to colonise")
@@ -2179,14 +2217,19 @@ func _step_fog_colony_markers() -> void:
 
 	# Every fleet of ours is moved well clear: the claim under test is that a rival system
 	# with nothing of ours in it stays hidden, and a leftover scout would make that untrue.
+	#
+	# All of them, not just the ones whose position happens to equal something. The old guard
+	# here compared `f.system` -- a *planet* index -- against `foreign_sys`, so with one system
+	# it cleared a fleet only if its planet was planet zero, and left every other fleet sitting
+	# exactly where it was. On a seed that put one of them over the body under test, the panel
+	# correctly showed the world's detail and this step reported it as a fog leak.
 	var parked := {}
 	for f_key: int in gal.fleets:
 		var f: FleetState = gal.fleets[f_key]
 		if f.owner == me:
 			parked[f_key] = [f.system, f.destination]
 			f.destination = -1
-			if f.system == foreign_sys:
-				f.system = -1 if f.system >= 0 else 0
+			f.system = -1
 
 	var sys: SystemState = gal.systems[foreign_sys]
 	var p: PlanetState = gal.planet(foreign_planet)
@@ -2195,6 +2238,17 @@ func _step_fog_colony_markers() -> void:
 	var saved_colonized := p.colonized
 	var saved_pop := p.population
 	var saved_structures := p.structures.duplicate()
+	var saved_surveyed := p.surveyed
+	# A survey is a legitimate way to learn a world, so it opens this panel's detail gate --
+	# and earlier steps do run turns with an Exploration Ship in orbit, so the chosen body may
+	# already have been surveyed. The claim under test is narrower: a rival world with nothing
+	# of yours in orbit and no survey on it stays hidden. Clearing the flag states that premise
+	# rather than leaving it to whichever galaxy the seed produced, and the premise is asserted
+	# immediately below so a future change cannot quietly turn this into a test of a surveyed
+	# world.
+	p.surveyed = false
+	sup.ok(not p.surveyed and not c.knows_name_of(foreign_planet),
+		"the fixture is a rival world the player has neither surveyed nor visited")
 
 	# The rival settles it, richly populated and heavily built, so any leak is unmistakable.
 	sys.owner = rival
@@ -2278,6 +2332,7 @@ func _step_fog_colony_markers() -> void:
 	p.colonized = saved_colonized
 	p.population = saved_pop
 	p.structures = saved_structures
+	p.surveyed = saved_surveyed
 	for f_key: int in parked:
 		var f3: FleetState = gal.fleets[f_key]
 		var prior: Array = parked[f_key]
@@ -3039,6 +3094,602 @@ func _step_reproducible() -> void:
 		"a turn resolved from a reloaded state matches the live state")
 	sup.ok(first_hash != 0, "the turn report carried a non-zero state hash",
 		"hash=%d" % first_hash)
+
+
+# --- Phase 8 corrections: metal allocation, travel flow, cargo, visuals ---
+
+## Both progress bars, and the fact that they appear the moment Build is pressed.
+##
+## "Immediately" is the claim under test, so it is measured against a refresh rather than
+## against the end of the next turn: a bar that appears when the order resolves reads as a
+## button that did nothing, and a player who thinks the button is broken presses it again.
+func _step_immediate_progress_bars() -> void:
+	sup.begin("immediate progress bars")
+	if _client == null or _client.controller == null or _client.macros == null:
+		return
+	var c := _client.controller
+	var me := c.player()
+	var colony := _first_colony()
+	sup.ok(colony != null, "the player starts with a colony")
+	if colony == null or me == null:
+		return
+	_client.select_colony(colony.index)
+	c.select_planet(colony.index)
+
+	colony.building_queue.clear()
+	colony.build_metal = 0.0
+	colony.ship_queue.clear()
+	_client.macros.refresh()
+	sup.ok(not _client.macros.build_bar().visible,
+		"no bar is shown with nothing under construction")
+	sup.ok(not _client.macros.ship_bar().visible,
+		"and none for the shipyard either")
+
+	# Press Build and look at the very next refresh.
+	#
+	# The structure is taken from the selector rather than hard-coded: which structures a
+	# faction has unlocked is the generator's business, and hard-coding one here made this
+	# step fail on a seed where it was not offered -- which is a failure of the *fixture*, not
+	# of the button being tested.
+	var chosen := _first_offered_structure()
+	sup.ok(chosen != &"", "the build menu offers something", "nothing selectable")
+	var before := colony.count(chosen)
+	# The queue is emptied first: earlier steps stage orders on purpose, and a faction that
+	# has already used up this turn's allowance cannot stage another.
+	c.queue.clear()
+	_client.macros.select_build(chosen)
+	_client.macros.build_button().emit_signal("pressed")
+	sup.ok(not colony.building_queue.is_empty(),
+		"the Build button queues the selected structure")
+	_client.macros.refresh()
+	sup.ok(_client.macros.build_bar().visible,
+		"and the structure bar is on screen immediately, not after the next turn")
+	sup.near(_client.macros.build_bar().value, 0.0, 0.001,
+		"reading 0% on the turn it was queued")
+	sup.ok(_client.macros.build_bar().tooltip_text.contains("click to allocate"),
+		"with a tooltip that says the bar is clickable")
+	sup.eq(colony.count(&"granary"), before, "and the structure itself has not landed yet")
+
+	# Half-paid reads half-full, straight from the metal.
+	colony.build_metal = ColonySim.queued_cost(colony, _defs.get("buildings") as Dictionary) * 0.5
+	_client.macros.refresh()
+	sup.near(_client.macros.build_bar().value, 0.5, 0.001, "half the cost paid reads half full")
+
+	# A hull gets its own bar rather than sharing the structure one.
+	colony.building_queue.clear()
+	colony.build_metal = 0.0
+	colony.ship_queue = [{"hull": "corvette", "turns": 2, "metal": 25.0}]
+	var hulls: Dictionary = _defs.get("ship_hulls") as Dictionary
+	var corvette := _defs.call("ship_hull", &"corvette") as Resource
+	sup.ok(corvette != null, "the corvette has a definition")
+	if corvette != null:
+		_client.macros.refresh()
+		sup.ok(not _client.macros.build_bar().visible,
+			"a hull does not light the structure bar")
+		sup.ok(_client.macros.ship_bar().visible,
+			"the shipyard has its own bar")
+		sup.near(_client.macros.ship_bar().value,
+			25.0 / float(corvette.get("cost_metals")), 0.001,
+			"reading the hull's own paid-of-cost fraction")
+	colony.ship_queue.clear()
+	_client.macros.refresh()
+	sup.ok(not _client.macros.ship_bar().visible, "and it goes away when the yard empties")
+
+
+## The metal dialog over both a structure and a hull, in both directions.
+##
+## Applied through OK rather than by poking the controller, because the claim is that a player
+## can move metal *both ways* with the controls on screen.
+func _step_metal_allocation_modal() -> void:
+	sup.begin("metal allocation dialog")
+	if _client == null or _client.controller == null or _client.boost == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var granary := _defs.call("building", &"granary") as Resource
+	var cost := float(granary.get("cost_metals"))
+	_client.select_colony(colony.index)
+	colony.building_queue = {&"granary": 1}
+	colony.build_total_turns = int(granary.get("build_turns"))
+	colony.build_turns_remaining = int(granary.get("build_turns"))
+	colony.build_metal = 0.0
+	colony.reserve_metals = 500.0
+
+	sup.ok(_client.boost.open_for_selected_colony(), "it opens for a structure")
+	sup.eq(_client.boost.ok_button().text, "OK", "with an OK button")
+	sup.eq(_client.boost.cancel_button().text, "CANCEL", "and a CANCEL button")
+	sup.ok(_client.boost.refund_slider() != null, "and a second slider for the other direction")
+	sup.near(_client.boost.amount_slider().max_value, cost, 0.001,
+		"the add slider is capped at what the project owes")
+	# A slider whose range is 0..0 cannot be drawn or dragged, so its `max_value` is floored at
+	# 1. The ceiling is therefore asserted on the rule the dialog actually reads.
+	sup.near(_client.boost.ceiling(false), 0.0, 0.001,
+		"nothing is assigned yet, so there is nothing to take back out")
+	sup.near(float(_client.boost.refund_slider().value), 0.0, 0.001,
+		"and the remove slider opens at zero")
+
+	# Put the whole ceiling in and commit it.
+	_client.boost.amount_slider().set_value(cost)
+	_client.boost.ok_button().emit_signal("pressed")
+	sup.near(colony.build_metal, cost, 0.001, "OK moved metal into the project")
+	sup.near(colony.reserve_metals, 500.0 - cost, 0.001, "and took it out of storage")
+	sup.ok(not _client.boost.visible, "and closed the dialog")
+
+	# Reopen: now the *remove* direction is the one with a ceiling.
+	sup.ok(_client.boost.open_for_selected_colony(),
+		"a fully paid project still opens, because metal can come back out")
+	sup.near(_client.boost.refund_slider().max_value, cost, 0.001,
+		"the remove slider now offers everything assigned")
+	_client.boost.refund_slider().set_value(cost * 0.5)
+	_client.boost.ok_button().emit_signal("pressed")
+	sup.near(colony.build_metal, cost * 0.5, 0.001,
+		"OK moved half of it back out of the project")
+	sup.near(colony.reserve_metals, 500.0 - cost * 0.5, 0.001,
+		"and returned it to storage")
+
+	# CANCEL changes nothing.
+	_client.boost.open_for_selected_colony()
+	var held_metal := colony.build_metal
+	var held_store := colony.reserve_metals
+	_client.boost.amount_slider().set_value(cost)
+	_client.boost.cancel_button().emit_signal("pressed")
+	sup.near(colony.build_metal, held_metal, 0.001, "CANCEL moves no metal in")
+	sup.near(colony.reserve_metals, held_store, 0.001, "and none out")
+	sup.ok(not _client.boost.visible, "and closes the dialog")
+
+	# The same dialog, over a hull.
+	colony.building_queue.clear()
+	colony.build_metal = 0.0
+	colony.ship_queue = [{"hull": "corvette", "turns": 2, "metal": 0.0}]
+	var hulls: Dictionary = _defs.get("ship_hulls") as Dictionary
+	var corvette := _defs.call("ship_hull", &"corvette") as Resource
+	if corvette != null:
+		var hull_cost := float(corvette.get("cost_metals"))
+		sup.ok(_client.boost.open_for_selected_colony(),
+			"and over a hull in the yard: same dialog, same rules")
+		sup.near(_client.boost.amount_slider().max_value, hull_cost, 0.001,
+			"capped at the hull's metal cost rather than the structure's")
+		sup.ok(_client.boost.title_label().text.contains("SHIP"),
+			"and the title says which kind of project this is",
+			"reads '%s'" % _client.boost.title_label().text)
+		_client.boost.amount_slider().set_value(hull_cost)
+		_client.boost.ok_button().emit_signal("pressed")
+		sup.near(ColonySim.project_paid(colony), hull_cost, 0.001,
+			"OK moved metal into the hull")
+		_client.boost.open_for_selected_colony()
+		_client.boost.refund_slider().set_value(hull_cost)
+		_client.boost.ok_button().emit_signal("pressed")
+		sup.near(ColonySim.project_paid(colony), 0.0, 0.001,
+			"and OK took it all back out again")
+	colony.ship_queue.clear()
+	colony.reserve_metals = 500.0
+
+
+## Press Travel, then the two map clicks, then the manifest.
+##
+## Driven through the client's own handlers rather than by calling the controller, because the
+## claim under test is that the *sequence* works -- a workflow reachable only by three
+## separate controller calls is not a workflow.
+func _step_travel_flow() -> void:
+	sup.begin("interactive travel flow")
+	if _client == null or _client.controller == null or _client.manifest == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	c.select_planet(colony.index)
+
+	# The starting force is parked over the homeworld, so that is a legal source.
+	sup.ok(c.can_travel_from(colony.index),
+		"the homeworld is a legal source: the player has ships in orbit there")
+	sup.ok(not c.can_travel_from(_other_planet_index(colony.index)),
+		"an empty world is not")
+
+	# Step 1: press Travel. The flow must be waiting for a source, and the player told so.
+	_client.fleets.travel_button().emit_signal("pressed")
+	sup.eq(_client.travel_step, GameClient.TravelStep.SOURCE,
+		"pressing Travel starts the flow at 'Select Source Location'")
+
+	# A click on a world with nothing in orbit is refused and does not advance.
+	var empty := _other_planet_index(colony.index)
+	c.select_planet(empty)
+	_client._on_planet_picked(empty)
+	sup.eq(_client.travel_step, GameClient.TravelStep.SOURCE,
+		"clicking a world with no ships of yours in orbit does not advance the flow")
+
+	# Step 2: the source.
+	c.select_planet(colony.index)
+	_client._on_planet_picked(colony.index)
+	sup.eq(_client.travel_step, GameClient.TravelStep.DESTINATION,
+		"clicking a world with ships in orbit advances to 'Select Destination'")
+	sup.eq(_client.travel_source, colony.index, "and records it as the source")
+
+	# Clicking the source again as the destination is refused: it is not a journey.
+	_client._on_planet_picked(colony.index)
+	sup.eq(_client.travel_step, GameClient.TravelStep.DESTINATION,
+		"the source is not a legal destination for itself")
+
+	# Step 3: the destination opens the manifest.
+	var dest := _other_planet_index(colony.index)
+	_client._on_planet_picked(dest)
+	sup.ok(_client.manifest.visible, "choosing a destination opens the fleet manifest")
+	sup.eq(_client.travel_step, GameClient.TravelStep.NONE,
+		"and ends the flow -- the modal owns the rest")
+
+	# The roster is split by role, and each hull is in exactly one of them.
+	var starting := ColonySim.queued_hull_id  # keep the analyzer honest about unused helpers
+	sup.ok(starting != null, "the manifest modal is present")
+	var hulls := c.hulls_in_orbit_at(colony.index)
+	sup.ok(not hulls.is_empty(), "the source world has hulls in orbit")
+	for hull_id: StringName in hulls:
+		var def: Resource = _defs.call("ship_hull", hull_id) as Resource
+		sup.ok(def != null, "hull %s has a definition" % String(hull_id))
+		if def == null:
+			continue
+		var in_combat := _client.manifest.combat_rows().get_node_or_null(
+			NodePath("Row_%s" % String(hull_id))) != null
+		var in_support := _client.manifest.support_rows().get_node_or_null(
+			NodePath("Row_%s" % String(hull_id))) != null
+		sup.ok(in_combat != in_support,
+			"hull %s is in exactly one roster (%s)" % [
+				String(hull_id),
+				"combat" if in_combat else ("logistic" if in_support else "neither")])
+
+	# The `+`, `-`, All and None controls, and their effect on the counts.
+	var first_hull: StringName = &""
+	for hull_id: StringName in hulls:
+		first_hull = hull_id
+		break
+	if first_hull != &"":
+		var total := int(hulls.get(first_hull, 0))
+		sup.ok(_client.manifest.more_button(first_hull) != null,
+			"each hull has a + button")
+		sup.ok(_client.manifest.less_button(first_hull) != null,
+			"and a - button")
+		_client.manifest.set_all(false)
+		sup.eq(_client.manifest.manifest().size(), 0, "None clears the manifest")
+		_client.manifest.set_all(true)
+		sup.eq(int(_client.manifest.manifest().get(first_hull, 0)), total,
+			"All selects every hull in the orbit")
+		_client.manifest.less_button(first_hull).emit_signal("pressed")
+		sup.eq(int(_client.manifest.manifest().get(first_hull, 0)), total - 1,
+			"and - sends one fewer")
+		_client.manifest.more_button(first_hull).emit_signal("pressed")
+		sup.eq(int(_client.manifest.manifest().get(first_hull, 0)), total,
+			"and + sends one more")
+
+	# Logistics rows carry a cargo readout.
+	for hull_id: StringName in GameDB.LOGISTIC_HULLS:
+		if not hulls.has(hull_id):
+			continue
+		var label := _client.manifest.cargo_label(hull_id)
+		sup.ok(label != null, "a logistic hull shows its cargo")
+		if label != null:
+			sup.ok(not label.text.is_empty(), "with actual figures in it")
+
+	# CANCEL aborts without staging anything.
+	c.queue.clear()
+	_client.manifest.cancel_button().emit_signal("pressed")
+	sup.ok(not _client.manifest.visible, "CANCEL closes the manifest")
+	sup.eq(c.queue.orders_for(c.player_id).size(), 0,
+		"and stages no travel order at all")
+
+	# OK dispatches. A single hull is enough to prove the commit is real.
+	if first_hull != &"":
+		_client.fleets.travel_button().emit_signal("pressed")
+		c.select_planet(colony.index)
+		_client._on_planet_picked(colony.index)
+		_client._on_planet_picked(dest)
+		_client.manifest.set_all(false)
+		_client.manifest.adjust(first_hull, 1, hulls)
+		var before := c.orders_to_submit().size()
+		_client.manifest.ok_button().emit_signal("pressed")
+		sup.eq(c.orders_to_submit().size(), before + 1,
+			"OK stages exactly one travel order")
+		var staged: Order = c.orders_to_submit()[c.orders_to_submit().size() - 1]
+		sup.eq(staged.type, Enums.OrderType.TRAVEL, "and it is a TRAVEL order")
+		sup.eq(staged.target_planet, dest, "for the destination the flow chose")
+		var sent: Dictionary = staged.payload.get("ships", {}) as Dictionary
+		sup.eq(int(sent.get(first_hull, 0)), 1, "carrying the manifest that was chosen")
+	c.queue.clear()
+	# Cancel any flow still mid-way so later steps start clean.
+	_client._abandon_travel()
+
+
+## Load / Unload: the button's visibility, and what the dialog will and will not move.
+func _step_cargo_modal() -> void:
+	sup.begin("load / unload")
+	if _client == null or _client.controller == null or _client.cargo == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	var button := _client.fleets.cargo_button()
+	sup.ok(button != null, "the planet panel carries a Load / Unload button")
+	sup.eq(button.text, "Load / Unload", "labelled as such")
+	if button == null:
+		return
+
+	# The starting fleet is a Colony Ship, but earlier travel steps may legitimately have sent
+	# it away, and a test that depends on a fleet still being where generation put it is a test
+	# of the fixture. A transport is placed in orbit explicitly.
+	_ensure_transport(colony.index, &"colony_ship")
+	c.select_planet(colony.index)
+	sup.ok(c.has_transports_at(colony.index),
+		"a world with a Colony Ship in orbit qualifies")
+	sup.ok(button.visible, "so the control is shown")
+	sup.ok(c.hulls_in_orbit_at(colony.index).has(&"colony_ship"),
+		"and the orbit really does report it")
+
+	# A world with nothing in orbit hides it rather than offering a dead dialog.
+	var empty := _other_planet_index(colony.index)
+	c.select_planet(empty)
+	_client.fleets.refresh()
+	sup.ok(not button.visible, "a world with nothing in orbit hides the control")
+
+	# Population is seeded before the dialog is opened: earlier steps deliberately strip the
+	# colony of civilians to prove the panel reports zero rather than negative, and a colony
+	# with nobody on it correctly refuses to load anybody. The slider's range is derived when
+	# the dialog opens, so seeding it afterwards would leave every control pinned at zero.
+	colony.population = 12.0
+	c.select_planet(colony.index)
+	sup.ok(_client.cargo.open(colony.index), "pressing it opens the cargo dialog")
+	sup.ok(_client.cargo.visible, "which is shown")
+	# A Colony Ship lifts civilians, and nothing else.
+	sup.ok(_client.cargo.caption_label(TransferStage.KIND_CIVILIANS) != null,
+		"offering the passenger berths")
+	sup.ok(_client.cargo.load_button(TransferStage.KIND_CIVILIANS) != null,
+		"with a Load control")
+	sup.ok(_client.cargo.unload_button(TransferStage.KIND_CIVILIANS) != null,
+		"and an Unload one")
+	var caption := _client.cargo.caption_label(TransferStage.KIND_CIVILIANS)
+	sup.ok(caption != null and caption.text.contains("hold"),
+		"the row states what the colony holds and what the ship holds",
+		"reads '%s'" % ("" if caption == null else caption.text))
+	sup.ok(_client.cargo.caption_label(TransferStage.KIND_FOOD) == null,
+		"and no food slider, which this hull does not lift")
+
+	# Load passengers and confirm. Civilians are capped at five a ship.
+	var pop_before := colony.population
+	var held_before := _civs_aboard(colony.index)
+	var limit := 5.0
+	var slider := _client.cargo.amount_slider(TransferStage.KIND_CIVILIANS)
+	sup.ok(slider != null, "the passengers have a slider")
+	if slider != null:
+		slider.set_value(limit)
+		_client.cargo.ok_button().emit_signal("pressed")
+		sup.near(_civs_aboard(colony.index), held_before + limit, 0.001,
+			"OK moved the passengers aboard")
+		sup.near(colony.population, pop_before - limit, 0.001,
+			"and took them off the colony")
+
+		# Capacity is respected: asking for ten more than the berths can hold moves only
+		# what fits, rather than swallowing a colony's population.
+		_client.cargo.open(colony.index)
+		var full := _civs_aboard(colony.index)
+		_client.cargo.amount_slider(TransferStage.KIND_CIVILIANS).set_value(999.0)
+		_client.cargo.ok_button().emit_signal("pressed")
+		sup.ok(_civs_aboard(colony.index) <= 5.0 + 0.001,
+			"the berths fill to capacity and no further (aboard %.1f)" % _civs_aboard(colony.index))
+		sup.ok(colony.population >= 0.0, "and the colony cannot be left with negative pop")
+		sup.near(_civs_aboard(colony.index), full, 0.001,
+			"an already-full hold takes nothing more")
+
+		# Unload puts them back on the ground.
+		_client.cargo.open(colony.index)
+		_client.cargo.unload_button(TransferStage.KIND_CIVILIANS).emit_signal("pressed")
+		_client.cargo.ok_button().emit_signal("pressed")
+		sup.near(_civs_aboard(colony.index), 0.0, 0.001, "Unload empties the berths")
+		sup.near(colony.population, pop_before, 0.001,
+			"and the civilians are back on the colony")
+
+	# CANCEL leaves the colony alone.
+	_client.cargo.open(colony.index)
+	var pop_held := colony.population
+	_client.cargo.load_button(TransferStage.KIND_CIVILIANS).emit_signal("pressed")
+	_client.cargo.cancel_button().emit_signal("pressed")
+	sup.near(colony.population, pop_held, 0.001, "CANCEL moves nobody anywhere")
+	sup.ok(not _client.cargo.visible, "and closes the dialog")
+
+
+## Civilians aboard the transports over `planet_index`.
+func _civs_aboard(planet_index: int) -> float:
+	var total := 0.0
+	for f in _client.controller.fleets_in_orbit_at(planet_index):
+		total += TransferStage.carried(f, TransferStage.KIND_CIVILIANS)
+	return total
+
+
+## The star is drawn as a light source and the worlds as terrain, not as flat dots.
+func _step_map_visuals() -> void:
+	sup.begin("map visuals")
+	if _client == null or _client.map == null:
+		return
+
+	# The star: graded discs, brightest and smallest at the core, fading outward.
+	var star_colour := CC2Theme.star_color(2)
+	var layers := GalaxyMapView.star_layers(star_colour)
+	sup.ok(layers.size() >= 4,
+		"the star is drawn as several graded layers, not one disc (got %d)" % layers.size())
+	var radii := PackedFloat64Array()
+	var alphas := PackedFloat64Array()
+	for layer: Variant in layers:
+		var pair: Array = layer as Array
+		radii.append(float(pair[0]))
+		alphas.append(float((pair[1] as Color).a))
+	var ordered := true
+	for i in range(1, radii.size()):
+		if radii[i] <= radii[i - 1] or alphas[i] >= alphas[i - 1]:
+			ordered = false
+	sup.ok(ordered,
+		"running core-outward with radii growing and alpha falling -- a corona, "
+		+ "not a stack of identical discs",
+		"radii=%s alphas=%s" % [str(radii), str(alphas)])
+	sup.ok(radii[radii.size() - 1] > GalaxyMapView.PLANET_RADIUS,
+		"and the outermost corona reaches past the radius of any planet")
+	sup.ok(alphas[0] > 0.5,
+		"with an opaque core at the middle", "core alpha %.2f" % alphas[0])
+	sup.ok(alphas[alphas.size() - 1] < alphas[0],
+		"fading to a faint halo at the rim")
+
+	# Worlds: five procedural classes, deterministic, and different from each other.
+	var looks: Array = [
+		[&"ocean", PlanetVisuals.Look.WATER],
+		[&"desert", PlanetVisuals.Look.DESERT],
+		[&"ice", PlanetVisuals.Look.ICE],
+		[&"terrestrial", PlanetVisuals.Look.TEMPERATE],
+		[&"jungle", PlanetVisuals.Look.JUNGLE],
+	]
+	for case: Variant in looks:
+		var type_id := StringName(str(case[0]))
+		sup.eq(PlanetVisuals.look_for(type_id), int(case[1]),
+			"%s draws as the %s look" % [
+				String(type_id), PlanetVisuals.look_name(int(case[1]))])
+	sup.eq(PlanetVisuals.palette(&"ocean")[0], PlanetVisuals.palette(&"ocean")[0],
+		"a palette is a stable value, not a fresh roll each frame")
+	sup.ok(str(PlanetVisuals.landmasses(&"terrestrial", 2))
+		== str(PlanetVisuals.landmasses(&"terrestrial", 2)),
+		"and so are a world's continents")
+
+	# The generator assigns variants at random rather than deriving them from the type.
+	var variants: Dictionary = {}
+	for p in _galaxy.planets:
+		variants[p.visual_variant] = true
+	sup.ok(variants.size() > 1,
+		"generated worlds carry a randomised surface variant")
+
+	# The map draws the planet through the procedural path, not the old two-disc form.
+	var view_source := FileAccess.get_file_as_string("res://src/client/galaxy_map_view.gd")
+	sup.ok(view_source.contains("_draw_planet_body"),
+		"the map has a procedural planet draw routine")
+	sup.ok(view_source.contains("PlanetVisuals.landmasses"),
+		"and it draws the world's landmasses")
+
+
+## The left panel's economy rows: one line each, and the nets the brief asks for.
+func _step_panel_economy_rows() -> void:
+	sup.begin("panel economy rows")
+	if _client == null or _client.inspector == null:
+		return
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	colony.population = 8.0
+	colony.structures = {&"farm": 2, &"mine": 2, &"granary": 1}
+	colony.food_stock = 250.0
+	colony.power = 270.0
+	colony.troops = 0
+	_client.inspector.refresh()
+	var rows := _client.inspector.planet_label().text
+
+	# Food is one line: current over max with the net in brackets.
+	var food_line := _row_for(rows, "FOOD")
+	sup.ok(food_line.contains("/"), "Food is on one line with its capacity",
+		"reads '%s'" % food_line)
+	sup.ok(food_line.contains("(") and food_line.contains(")"),
+		"and carries the per-turn net in brackets", "reads '%s'" % food_line)
+	sup.ok(not rows.contains("FOOD BALANCE"),
+		"the separate Food Balance line is gone")
+
+	# Power is current/max with generation minus draw as a single net.
+	var power_line := _row_for(rows, "POWER")
+	sup.ok(power_line.contains("/"), "Power is on one line with its capacity",
+		"reads '%s'" % power_line)
+	sup.ok(not power_line.contains("-0"),
+		"and never prints a signed zero", "reads '%s'" % power_line)
+	# One signed figure, not the pair `(+40, -10)`. The bbcode is stripped first because the
+	# colour tag between the bracket and the sign is not part of the number.
+	var plain := _strip_bbcode(power_line)
+	sup.ok(plain.count("+") + plain.count("-") == 1,
+		"the net is a single signed figure, not generation and draw side by side",
+		"reads '%s'" % plain)
+
+	# Population is total (working/jobless).
+	var pop_line := _row_for(rows, "POPULATION")
+	sup.ok(pop_line.contains("8 ("), "Population reads total (working/jobless)",
+		"reads '%s'" % pop_line)
+
+	# And the net really is generation minus consumption, with no minus zero.
+	colony.power_generated = 40.0
+	colony.power_drawn = 10.0
+	_client.inspector.refresh()
+	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("+30"),
+		"a Nuclear plant's +40 against a City Complex's 10 reads +30",
+		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
+	colony.power_generated = 0.0
+	colony.power_drawn = 0.0
+	_client.inspector.refresh()
+	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("+0"),
+		"and a grid drawing nothing reads +0, not -0",
+		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
+
+	# A real deficit keeps its sign.
+	colony.power_generated = 0.0
+	colony.power_drawn = 12.0
+	_client.inspector.refresh()
+	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("-12"),
+		"while a genuine shortfall still reads negative",
+		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
+	colony.power_drawn = 0.0
+
+
+## The first structure the build menu is actually offering, or `&""`.
+func _first_offered_structure() -> StringName:
+	if _client == null or _client.macros == null:
+		return &""
+	var selector := _client.macros.build_selector()
+	if selector == null or selector.item_count <= 0:
+		return &""
+	var meta: Variant = selector.get_item_metadata(0)
+	return StringName(str(meta)) if meta != null else &""
+
+
+## Put one hull of `hull_id` into orbit over `planet_index`, for the player.
+func _ensure_transport(planet_index: int, hull_id: StringName) -> FleetState:
+	for f in _client.controller.fleets_in_orbit_at(planet_index):
+		if int(f.ships.get(hull_id, 0)) > 0:
+			return f
+	var fleet := FleetState.new()
+	fleet.bind_hulls(_defs.get("ship_hulls"))
+	fleet.owner = _client.controller.player_id
+	fleet.system = planet_index
+	fleet.name = "Test Orbital"
+	fleet.add_ships(hull_id, 1)
+	_client.controller.galaxy.add_fleet(fleet)
+	_client.controller.state_changed.emit()
+	return fleet
+
+
+## A readout line with its bbcode removed, so the signs in it can be counted.
+func _strip_bbcode(text: String) -> String:
+	var out := ""
+	var i := 0
+	while i < text.length():
+		if text[i] == "[":
+			var close := text.find("]", i)
+			if close > i:
+				i = close + 1
+				continue
+		out += text[i]
+		i += 1
+	return out
+
+
+## The single `LABEL ... value` row starting with `label`, or "".
+func _row_for(rows: String, label: String) -> String:
+	for line in rows.split("\n"):
+		if line.begins_with(label + " "):
+			return line.strip_edges()
+	return ""
 
 
 func _step_teardown() -> void:

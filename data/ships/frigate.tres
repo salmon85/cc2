@@ -8,6 +8,7 @@ id = &"frigate"
 display_name = "Frigate"
 role = 7
 cost_metals = 100.0
+build_turns = 2
 cost_rare = 0.0
 cost_energy = 0.0
 attack = 2.0
