@@ -200,9 +200,11 @@ static func star_layers(colour: Color) -> Array:
 ## no owner ring and no colony tick. That is the same bar the star markers already met, so
 ## making planets the clickable thing did not loosen it.
 func _draw_planet(galaxy: GalaxyState, p: PlanetState) -> void:
-	var known := p.surveyed or _ownership_known(galaxy, _system_of(galaxy, p))
 	var pos := p.position
-	if not known:
+	# Fog silhouette, and nothing else. No text of any kind is drawn for a body the player has
+	# not found: an "Unknown Planet" label on a dark disc is a label, and a hundred of them is
+	# a hundred strings covering the board the player is supposed to be discovering.
+	if not p.surveyed and not label_worth_drawing(p):
 		draw_arc(pos, UNKNOWN_MARKER_RADIUS, 0.0, TAU, 16, UNKNOWN_MARKER_COLOUR, 1.5)
 		return
 
@@ -338,32 +340,26 @@ func _label_worth_drawing(galaxy: GalaxyState, p: PlanetState) -> bool:
 ## The duplication is deliberate and one-directional: `_draw_planet` calls this, and the
 ## test calls this, so there is a single implementation that both the drawing and the test
 ## go through. A test that greps the source for a string only proves the string is there.
+## Whether a planet gets its name drawn beside it.
+##
+## Exactly two things earn one, and nothing else:
+##
+##   1. the player has settled it, or
+##   2. the player has a ship parked in orbit over it right now.
+##
+## The second is the whole of the discovery mechanic: putting a fleet on a world is how you
+## find out what it is called, and the name goes away again when the fleet leaves.
+##
+## A survey explicitly does **not** earn one. That clause was here, and it was the leak: a
+## scout that had swept a world left its name permanently on the board, so a map of the space
+## around your own empire slowly filled in with the names of places nobody had ever set foot
+## on -- and the only thing standing between the player and the full catalogue was a few turns
+## of scouting, which is not fog.
+##
+## The whole rule is `SessionController.knows_name_of`, which already states it. The map does
+## not keep a second copy to disagree with.
 func label_worth_drawing(p: PlanetState) -> bool:
-	if _controller == null:
-		return false
-	if _controller.knows_name_of(p.index):
-		return true
-	# A world the player has their own ships over is named, and stops being named when they
-	# leave -- unless it is theirs, in which case the name stays.
-	#
-	# The asymmetry is the point. A colony is a place you know; a transit stop is somewhere
-	# you have been, and once your fleet leaves there is nothing on the board saying it was
-	# ever more than an unnamed rock. That is also the fog rule working rather than being
-	# circumvented: putting a ship in orbit is the documented way to earn the right to see a
-	# world, and it is how a player is meant to discover the board.
-	return p.surveyed or _friendly_fleet_in_orbit(p)
-
-
-## Whether the player has a stationary ship of their own over `p`.
-func _friendly_fleet_in_orbit(p: PlanetState) -> bool:
-	if _controller == null or _controller.galaxy == null:
-		return false
-	for key: int in _controller.galaxy.fleets:
-		var f: FleetState = _controller.galaxy.fleets[key]
-		if f.active and f.owner == _controller.player_id \
-				and f.destination < 0 and f.system == p.index:
-			return true
-	return false
+	return _controller != null and _controller.knows_name_of(p.index)
 
 
 ## Fleet markers. Travelling fleets are drawn at their interpolated position with a

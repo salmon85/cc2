@@ -17,6 +17,19 @@ const START_TECH_POINTS := 0.0
 ## Population is measured in millions of colonists.
 const START_POPULATION := 3.0
 
+## Stockpiles a founding colony is guaranteed to open with, whatever its orbit.
+##
+## Floors rather than values. `seed_reserves` scales reserves by an orbit penalty that can be
+## as severe as 0.45, so a homeworld on a cold outer ring would otherwise open with less than
+## the baseline and a first farm it could not pay for.
+##
+## Twenty food is more than the three starting colonists eat in a turn with both farms worked,
+## so an empire that builds nothing at all is in surplus and not counting down -- which is the
+## difference between "you must build something" and "you starve while deciding what to build".
+const STARTING_FOOD := 20.0
+const STARTING_METALS := 50.0
+const STARTING_POWER := 10.0
+
 ## Growth and consumption.
 ##
 ## Phase 8 replaces the old fractional model with the integer one the design document

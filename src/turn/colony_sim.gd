@@ -366,8 +366,11 @@ static func simulate_colony(
 	report.food_produced = food_produced
 	report.food_consumed = food_consumed
 
-	# A surplus banks, a deficit draws the bank down. The bank is hard-capped, and the
-	# overflow is reported *next* turn rather than this one -- see `_bank_food`.
+	# `net = gross - consumption`, and `consumption` is exactly one food per civilian --
+	# troops are excluded, so a garrison is not a mouth.
+	#
+	# The bank is then `clamp(stored + net, 0, capacity)` and the surplus is reported *next*
+	# turn rather than this one -- see `_bank_food`.
 	var net := food_produced - food_consumed
 	_bank_food(planet, net, db, report)
 
@@ -393,8 +396,13 @@ static func simulate_colony(
 			report.houses_added = 1
 
 	# --- Starvation ------------------------------------------------------------
-	# Only once the bank is dry. Each turn with an empty bank and a shortfall, one pop
-	# dies on a 50% roll, repeating until the colony reaches equilibrium or empties.
+	# Only when the bank is dry *and* the colony is still going backwards.
+	#
+	# The two conditions are not redundant, and collapsing them is how a colony starves on a
+	# turn it is making food: `_bank_food` has just clamped the bank, so a colony whose net is
+	# positive always ends this line above zero however empty it started. `net < 0` alone would
+	# kill people in a colony that is drawing down a stockpile it can still afford to spend;
+	# `stock <= 0` alone would kill them on the turn a last delivery arrives.
 	if net < 0.0 and planet.food_stock <= 0.0:
 		report.starving = true
 		report.food_starved = true
@@ -580,12 +588,46 @@ static func _add_warning(planet: PlanetState, key: StringName) -> void:
 ## A farm produces only while a civilian is posted to it. That is the whole of what "requires
 ## 1 pop" means, and the number of workers is the player's decision rather than a side effect
 ## of an iteration order -- so three farms with two farmhands produce for two, not three.
+##
+## The landed Colony Ship's own +5 is included here rather than added by the caller.
+##
+## It used to be left out of the resolver entirely and added by hand in the panel, which is
+## exactly the bug this pair of lines is the fix for: the panel showed a net of `+3` while the
+## turn resolver banked a net of `-2`, and the colony bled food every turn while the readout
+## claimed it was gaining. One function, two readers.
 static func _food_output(planet: PlanetState, buildings: Dictionary) -> float:
-	return _output_for(planet, buildings, &"farm", "yield_amount")
+	return _output_for(planet, buildings, &"farm", "yield_amount") \
+		+ _unattended_output(planet, buildings, "yield_amount")
+
+
+## Output from structures nobody is posted to, because they run themselves.
+##
+## A landed Colony Ship feeds its five colonists from its own stores; there is no job to fill
+## and no `+` button to press. Only structures whose *kind* carries no staffing -- checked by
+## `pop_required`, which is the field that distinguishes "needs a worker" from "does not" -- so
+## a future staffed structure cannot silently start producing for free.
+static func _unattended_output(
+	planet: PlanetState, buildings: Dictionary, yield_field: StringName
+) -> float:
+	var total := 0.0
+	if planet == null:
+		return total
+	for building_id: StringName in planet.structures:
+		if STAFFABLE.has(building_id):
+			continue
+		var count := int(planet.structures[building_id])
+		if count <= 0:
+			continue
+		var def: Resource = buildings.get(building_id, null) as Resource
+		if def == null or int(def.get("pop_required")) > 0:
+			continue
+		total += float(def.get(yield_field)) * count
+	return total
 
 
 static func _metal_output(planet: PlanetState, buildings: Dictionary) -> float:
-	return _output_for(planet, buildings, &"mine", "metal_per_turn")
+	return _output_for(planet, buildings, &"mine", "metal_per_turn") \
+		+ _unattended_output(planet, buildings, "metal_per_turn")
 
 
 ## Output from the worked copies of one structure kind.

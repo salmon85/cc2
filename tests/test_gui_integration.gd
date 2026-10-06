@@ -62,7 +62,8 @@ func _initialize() -> void:
 		"build_button", "landing_button", "travel_modal",
 		"immediate_bars", "metal_dialog", "travel_flow", "cargo_modal",
 		"map_visuals", "economy_rows", "background_music",
-		"worker_scrap_ui", "live_capacity", "travel_prompt_paths", "camera_snap_uncolonized",
+		"worker_scrap_ui", "live_capacity", "food_net_sync", "undiscovered_labels",
+		"travel_prompt_paths", "camera_snap_uncolonized",
 		"orbit_labels", "cargo_slider",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
@@ -121,6 +122,8 @@ func _process(_delta: float) -> bool:
 		"background_music": _step_background_music()
 		"worker_scrap_ui": _step_worker_and_scrap_ui()
 		"live_capacity": _step_live_capacity_display()
+		"food_net_sync": _step_food_net_matches_the_turn()
+		"undiscovered_labels": _step_undiscovered_world_labels()
 		"travel_prompt_paths": _step_travel_prompt_and_paths()
 		"camera_snap_uncolonized": _step_camera_snap_and_uncolonized()
 		"orbit_labels": _step_orbit_labels()
@@ -4017,7 +4020,14 @@ func _step_camera_snap_and_uncolonized() -> void:
 	# An unclaimed world reports nothing it does not have -- once the player is close enough
 	# to be told anything at all. Unsurveyed, the panel says UNSURVEYED and stops, which is
 	# the stronger statement and the one it has always made.
-	var empty := _unowned_body(c.galaxy)
+	# Picked by what is absent, not by being the first unowned body: an earlier step may have
+	# surveyed or visited whichever body that was, and the fixture would then be asserting
+	# about a world the panel is entitled to describe.
+	var empty := -1
+	for p in c.galaxy.planets:
+		if p.owner < 0 and not p.colonized and not p.surveyed:
+			empty = p.index
+			break
 	if empty >= 0:
 		c.select_planet(empty)
 		_client.inspector.refresh()
@@ -4312,6 +4322,146 @@ func _step_live_capacity_display() -> void:
 	sup.ok(_client.inspector.planet_label().text.contains("300/1050"),
 		"which the panel agrees with",
 		"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+
+
+## The reported bug, exactly: food decreasing while the panel shows a positive net.
+func _step_food_net_matches_the_turn() -> void:
+	sup.begin("food net matches the turn")
+	if _client == null or _client.controller == null or _client.inspector == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var farm := _defs.call("building", &"farm") as Resource
+	var per_farm := float(farm.get("yield_amount"))
+
+	# Two farms and a mine with one colonist each, plus the Colony Ship: a colony whose net is
+	# plainly positive, which is the state the report says drained anyway.
+	colony.population = 2.0
+	colony.food_stock = 0.0
+	colony.building_queue.clear()
+	colony.build_metal = 0.0
+	colony.ship_queue.clear()
+	colony.structures = {&"farm": 2, &"mine": 1,
+		&"colony_ship_building": 1, &"granary": 1}
+	colony.worker_assignment = {}
+	ColonySim.assign_worker(colony, &"farm")
+	ColonySim.assign_worker(colony, &"mine")
+	_colonyRecount(colony, c)
+	c.select_planet(colony.index)
+	_client.inspector.refresh()
+
+	# What the panel shows, and what the turn will do, side by side.
+	var shown := _row_for(_client.inspector.planet_label().text, "FOOD")
+	var shown_net := _signed_in(shown)
+	# One worked farm (5) + the kit's own 5 - two civilians.
+	var resolver_net := per_farm + 5.0 - 2.0
+	sup.ok(shown_net > 0.0, "the panel reports a surplus",
+		"reads '%s'" % shown)
+	sup.ok(absf(shown_net - resolver_net) <= 0.001,
+		"and that surplus is the figure the turn resolver will use",
+		"panel %.1f, resolver %.1f" % [shown_net, resolver_net])
+
+	# And now actually run turns: the bank must grow by exactly what the panel promised,
+	# which is the assertion the original bug failed.
+	for _i in 5:
+		var bank := colony.food_stock
+		var people := colony.population
+		var net_now := ColonySim._food_output(colony, buildings) - people
+		c.end_turn()
+		sup.ok(absf(colony.food_stock - (bank + net_now)) <= 1.01,
+			"a turn in surplus moved the bank by exactly the promised net",
+			"promised %.1f, moved %.1f" % [net_now, colony.food_stock - bank])
+	sup.ok(colony.food_stock > 0.0, "so after five turns the colony is better off, not worse",
+		"stock %.1f" % colony.food_stock)
+
+	# A colony that is genuinely short must say so, with the same arithmetic.
+	colony.population = 30.0
+	colony.food_stock = 0.0
+	colony.structures = {&"granary": 1, &"colony_ship_building": 1}
+	colony.worker_assignment = {}
+	_colonyRecount(colony, c)
+	_client.inspector.refresh()
+	shown = _row_for(_client.inspector.planet_label().text, "FOOD")
+	sup.ok(_signed_in(shown) < 0.0, "and a colony with nobody on its farms shows a deficit",
+		"reads '%s'" % shown)
+	sup.near(_signed_in(shown), 5.0 - 30.0, 0.001,
+		"of exactly the kit's output less thirty mouths")
+
+
+## Undiscovered worlds carry no name on the map and no real name anywhere.
+func _step_undiscovered_world_labels() -> void:
+	sup.begin("undiscovered worlds carry no labels")
+	if _client == null or _client.controller == null or _client.map == null:
+		return
+	var c := _client.controller
+	var view := _client.map.view()
+
+	var unseen := -1
+	for p in c.galaxy.planets:
+		if p.owner < 0 and not p.colonized and not p.surveyed:
+			unseen = p.index
+			break
+	sup.ok(unseen >= 0, "an unclaimed, unexplored world exists")
+	if unseen < 0:
+		return
+	var body: PlanetState = c.galaxy.planet(unseen)
+	sup.ok(not view.label_worth_drawing(body),
+		"an undiscovered world gets no map label")
+	sup.ok(not c.knows_name_of(unseen), "and the controller agrees it is not knowable")
+	sup.eq(c.display_name(unseen), GalaxyMapView.UNKNOWN_NAME,
+		"so every reader falls back to the one placeholder")
+
+	# A survey is not presence. It was the leak: a swept world kept its name for ever.
+	body.surveyed = true
+	sup.ok(not view.label_worth_drawing(body),
+		"a surveyed world the player has never visited still gets no label")
+	sup.ok(not c.knows_name_of(unseen),
+		"and the controller still withholds its name")
+	var body_surveyed := body.surveyed
+	body.surveyed = body_surveyed
+
+	# Presence does earn one, and losing it takes the name back.
+	_ensure_transport(unseen, &"corvette")
+	sup.ok(view.label_worth_drawing(body), "a fleet in orbit earns the label")
+	sup.ok(c.knows_name_of(unseen), "and the controller agrees")
+	for f in c.fleets_in_orbit_at(unseen):
+		c.galaxy.remove_fleet(f.id)
+	sup.ok(not view.label_worth_drawing(body),
+		"and leaving takes the label away again")
+
+	# The session log never printed the real name in the first place.
+	sup.ok(not _client.log_text().contains(body.name) or body.name.is_empty(),
+		"and the session log never printed it either")
+
+
+## The signed figure inside a readout row's brackets, or 0.
+func _signed_in(row: String) -> float:
+	var open := row.find("(")
+	var close := row.rfind(")")
+	if open < 0 or close <= open:
+		return 0.0
+	var inner := row.substr(open + 1, close - open - 1)
+	# Strip any bbcode the row carries.
+	var clean := ""
+	var i := 0
+	while i < inner.length():
+		if inner[i] == "[":
+			var end := inner.find("]", i)
+			if end > i:
+				i = end + 1
+				continue
+		clean += inner[i]
+		i += 1
+	return float(clean.strip_edges())
+
+
+## Recount a colony's capacities through the controller's own tables.
+func _colonyRecount(colony: PlanetState, c: SessionController) -> void:
+	ColonySim.recount_capacity(colony, c.defs.get("buildings") as Dictionary, c.db)
 
 
 func _step_teardown() -> void:

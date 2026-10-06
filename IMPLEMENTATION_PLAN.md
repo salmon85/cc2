@@ -1771,3 +1771,92 @@ through the controller -- rather than through a helper invented for the test.
   and the pantry outliving the kit.
 - `test_defs`: 244 -- the kit's berths asserted as an absence, so the double count cannot come
   back quietly.
+
+---
+
+# Phase 8 corrections V: persistence, food sync, fog, opening state
+
+## The panel and the resolver were computing different food
+
+The reported symptom -- food falling while the panel reads `+3` -- was two arithmetic paths
+five apart. `ColonySim._food_output` counted worked farms only, while `InspectorPanel`
+counted those *and* added the Colony Ship's `+5` by hand. So the resolver banked `net - 5`
+every turn while the readout said `net`, and the colony bled food permanently.
+
+The kit's output now comes from `_unattended_output`, inside `_food_output`, and the panel
+reads `ColonySim._food_output` directly. One function, two readers, no second derivation.
+
+`gross = worked_farms * farm_output + unattended`, `consumption = population * 1`, `net` is the
+difference, and the bank is `clamp(stored + net, 0, max_food)` -- exactly the terms the brief
+specifies, asserted term by term rather than as a total (a colony in surplus *grows*, so every
+birth raises consumption and a thirty-turn total is a different number each run).
+
+Starvation already required both `net < 0` and an empty bank, which is the correct gate and is
+now asserted in both directions: thirty turns in surplus from an empty bank kills nobody, a
+colony that exactly breaks even never runs down, and only a genuinely negative net with an
+empty bank rolls the 50%.
+
+## Every founding colony had three people and nobody on its farms
+
+The previous change made staffing manual, and nothing in the turn pipeline assigns anybody --
+which is right, and left every *generated* homeworld with two farms, a mine, three colonists
+and an empty workforce. Those colonies produced nothing, went short on turn one, and began
+rolling deaths while the panel showed them in surplus.
+
+`_founding_colony` now posts its colonists once, at founding: two to farms, the rest to mines.
+That is a colony's initial condition, not an auto-assignment -- it is written once, and
+`reconcile_workers` leaves it alone until the player presses `+` / `-` or somebody dies.
+`STARTING_FOOD`, `STARTING_METALS` and `STARTING_POWER` floor the stockpiles too, because
+`seed_reserves` scales reserves by an orbit penalty as severe as 0.45 and a homeworld on a cold
+outer ring could otherwise open unable to afford its first farm.
+
+## A survey no longer earns a name
+
+`label_worth_drawing` had grown a `p.surveyed` clause: that a world the player had swept keeps
+its name on the board for ever. That is the leak. A scout sent out near your own empire slowly
+filled the map with the names of places nobody had ever set foot on, and the only thing between
+the player and the whole catalogue was a few turns of scouting -- which is not fog.
+
+The rule is back to the strict two the brief names: a world is named if the player has settled
+it, or has a ship in orbit over it right now. Presence is the whole of the discovery mechanic,
+and the name goes away when the fleet leaves. The rule is `SessionController.knows_name_of`
+itself, so the map keeps no second copy to disagree with.
+
+Undiscovered bodies also draw a fog ring and nothing else. "Unknown Planet" as a floating label
+on a dark disc is still a label, and a hundred of them is a hundred strings covering the board
+the player is meant to be discovering.
+
+## Homeworlds are distinct *and* apart
+
+Distinctness was already enforced by a `taken` list, but the fallback -- taken when rejection
+sampling exhausts -- skipped it and could seat a second empire on a world the first one already
+owns. That is a joining player taking over somebody's homeworld, which is the reported failure,
+so the fallback now checks `owner < 0` as well.
+
+Separation is new: homeworlds are drawn at least `MIN_HOMEWORLD_SEPARATION` parsecs apart,
+measured over *orbiting distance* rather than orbit ring, because with one star two empires on
+rings three and four are neighbours while two on opposite sides are not. The retry budget means
+a crowded map degrades to "as far apart as possible" rather than refusing to seat anybody.
+
+## Worker assignments persist
+
+They mostly did already: nothing in the turn pipeline overwrote them. What the tests pin down
+now is that they *stay put* -- an uneven two-farms-one-mine split surviving ten turns with a
+population moving underneath, growth posting nobody by itself, a death taking exactly one post,
+and `+` / `-` as the only other way to move one.
+
+The fixture helper matters here: `_staff_all` *sets* the roster, so a persistence test that
+called it before every turn would be asserting that its own assignment survived. `_staff_all_keep`
+clamps only, exactly as the turn pipeline does.
+
+## Verification
+
+- `tools/verify.sh`: **12 suites, 3144 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_turn_engine`: 1107 -- assignments locked across ten turns, the food arithmetic term by
+  term, surplus and break-even killing nobody, real starvation killing one person at a time and
+  reporting it, four empires each opening stocked and staffed with distinct homeworlds, five
+  unattended turns costing nobody a colonist, and the label rule refusing surveyed-but-unvisited
+  worlds.
+- `test_gui_integration`: 645 -- the panel's net against the resolver's across five live turns,
+  the bank moving by exactly the promised amount, and undiscovered worlds carrying no label on
+  the map and no real name in the log.

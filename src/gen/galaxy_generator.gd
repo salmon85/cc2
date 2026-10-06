@@ -375,6 +375,16 @@ static func _pick_weighted(rng: RandomNumberGenerator, weights: Dictionary) -> V
 	return weights.keys().back()
 
 
+## Minimum distance, in parsecs, between two empires' homeworlds.
+##
+## A playability figure rather than an aesthetic one: with one star and a hundred bodies, two
+## empires whose worlds sit a few hundred parsecs apart can see each other's fleets on turn one
+## and spend the opening of the game defending instead of building. Beyond this the draw just
+## prefers whatever is far away, and accepts a crowded board rather than refusing to seat
+## anybody.
+const MIN_HOMEWORLD_SEPARATION := 2400.0
+
+
 ## Give every empire a starting world, picked at random.
 ##
 ## The old rule placed homeworlds in separate *systems*, as far apart as the map allowed, so
@@ -404,25 +414,7 @@ static func _seed_factions(
 
 	var taken := PackedInt32Array()
 	for ordinal in faction_count:
-		var pick := -1
-		# Rejection sampling: draw until an unclaimed world comes up. With far more planets
-		# than empires this terminates immediately in practice; the retry cap stops a
-		# pathological case (more empires than planets) from spinning forever.
-		var attempts := 0
-		var cap := candidates.size() * 4
-		while attempts < cap:
-			var candidate: int = candidates[rng.randi_range(0, candidates.size() - 1)]
-			if not taken.has(candidate):
-				pick = candidate
-				break
-			attempts += 1
-		# Every colonisable world is gone: fall back to any body at all so the empire is
-		# still created, and let the founding colony report the shortfall.
-		if pick < 0:
-			for p in candidates:
-				if not taken.has(p):
-					pick = p
-					break
+		var pick := _pick_homeworld(galaxy, candidates, taken, rng)
 		if pick < 0:
 			break
 		taken.append(pick)
@@ -431,6 +423,58 @@ static func _seed_factions(
 	# One empire owns the star system; the rest are tenants of the same map.
 	if galaxy.factions.size() > 0:
 		galaxy.claim_system(0, 0)
+
+
+## Pick an unclaimed homeworld for the next empire, as far from the others as the draw allows.
+##
+## Distinctness is the hard requirement: an empire must never be handed a world another empire
+## already owns, or one already handed out in this pass, because that is a joining player
+## taking over somebody's homeworld.
+##
+## Separation is the soft one. The draw is over *orbiting distance* rather than over an orbit
+## ring, because with one system two empires on rings three and four are neighbours while two
+## on opposite sides of the star are not. The retry budget means a crowded map degrades to "as
+## far apart as possible" rather than failing to seat anybody.
+static func _pick_homeworld(
+	galaxy: GalaxyState, candidates: PackedInt32Array, taken: PackedInt32Array,
+	rng: RandomNumberGenerator
+) -> int:
+	var claimable: Array[int] = []
+	for p in candidates:
+		var body: PlanetState = galaxy.planet(p)
+		if body != null and body.owner < 0 and not taken.has(p):
+			claimable.append(p)
+	if claimable.is_empty():
+		return -1
+
+	var separation := float(MIN_HOMEWORLD_SEPARATION)
+	var budget := claimable.size() * 4
+	var attempts := 0
+	var best := claimable[0]
+	while attempts < budget:
+		var candidate: int = claimable[rng.randi_range(0, claimable.size() - 1)]
+		best = candidate
+		if _is_sufficiently_far(galaxy, candidate, taken, separation):
+			return candidate
+		attempts += 1
+	# Nothing was far enough: take the last draw, which at least is unclaimed and distinct.
+	return best
+
+
+## Whether `candidate` is at least `separation` parsecs from every world already handed out.
+static func _is_sufficiently_far(
+	galaxy: GalaxyState, candidate: int, taken: PackedInt32Array, separation: float
+) -> bool:
+	var body: PlanetState = galaxy.planet(candidate)
+	if body == null:
+		return false
+	for other in taken:
+		var rival: PlanetState = galaxy.planet(other)
+		if rival == null:
+			continue
+		if body.position.distance_to(rival.position) < separation:
+			return false
+	return true
 
 
 ## Indices of every planet a faction could start on.
@@ -507,8 +551,30 @@ static func _founding_colony(
 	p.structures[&"colony_ship_building"] = 1
 	p.structures[&"farm"] = 2
 	p.structures[&"mine"] = 1
-	p.food_stock = 20.0
-	p.power = 5.0
+	# Posted explicitly, once, here at founding.
+	#
+	# Workers are assigned by hand everywhere else, and nothing in the turn pipeline assigns
+	# them -- which is right, and left every generated homeworld with three colonists and
+	# nobody on either farm. Those colonies produced nothing, went short on turn one, and
+	# started rolling deaths while the panel showed them in surplus. The founding assignment is
+	# the colony's initial condition, not an auto-assignment: it is written once and then
+	# `reconcile_workers` leaves it alone until the player touches `+` / `-` or somebody dies.
+	var hands := int(floor(p.population))
+	var on_farms := mini(2, hands)
+	p.worker_assignment[&"farm"] = on_farms
+	p.worker_assignment[&"mine"] = mini(1, maxi(0, hands - on_farms))
+
+	# Stockpiles floored rather than left to `seed_reserves`. The orbit penalty scales a
+	# homeworld's reserves by as little as 0.45, so a starting colony on a cold outer ring
+	# could open with less metal than the brief calls a baseline -- and a colony that opens
+	# unable to build its first farm is a colony that opens losing.
+	p.food_stock = maxf(p.food_stock, float(db.get("STARTING_FOOD")))
+	p.reserve_metals = maxf(p.reserve_metals, float(db.get("STARTING_METALS")))
+	p.power = maxf(p.power, float(db.get("STARTING_POWER")))
+
+	# The colony's own capacities are settled now, rather than at the top of the first turn.
+	# A player who opens the panel on turn one has to be shown a colony that exists.
+	ColonySim.recount_capacity(p, defs.get("buildings") as Dictionary, db)
 
 
 ## A new empire starts with nothing in orbit.

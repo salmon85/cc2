@@ -257,10 +257,11 @@ func _food_balance(p: PlanetState) -> float:
 	if _controller == null or _controller.defs == null:
 		return 0.0
 	var buildings: Dictionary = _controller.defs.get("buildings") as Dictionary
-	var produced := ColonySim._food_output(p, buildings)
-	if p.count(&"colony_ship_building") > 0:
-		produced += 5.0
-	return produced - p.population
+	# Read straight from the resolver's arithmetic: worked farms, plus what the colony runs
+	# unattended, less one food per civilian. The panel used to add the Colony Ship's five by
+	# hand while the resolver did not count them at all, so the readout and the turn disagreed
+	# by five every turn and the colony starved while the panel said it was in surplus.
+	return ColonySim._food_output(p, buildings) - p.population
 
 
 ## Power balance: what the colony generates minus what its structures draw.

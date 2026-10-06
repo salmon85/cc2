@@ -57,6 +57,10 @@ func _initialize() -> void:
 	_test_scrapping()
 	_test_starvation_releases_a_worker()
 	_test_starting_state_and_baselines()
+	_test_worker_assignments_persist()
+	_test_food_balance_sync()
+	_test_starting_colonies()
+	_test_undiscovered_worlds_are_unnamed()
 	_test_troops_and_cargo()
 	_test_survey()
 	_test_research()
@@ -2946,6 +2950,16 @@ func _set_structures(planet: PlanetState, structures: Dictionary) -> void:
 	_staff_all(planet)
 
 
+## Post nothing, leaving the player's own placement exactly as it is.
+##
+## The point of the persistence tests: `_staff_all` *sets* the roster, so a fixture that calls
+## it before every turn would be asserting that the fixture's own assignment survived -- which
+## is not the claim. This one only clamps to what is standing, exactly as the turn pipeline
+## does, and touches nothing the player got right.
+func _staff_all_keep(planet: PlanetState) -> void:
+	ColonySim.reconcile_workers(planet)
+
+
 ## Post one colonist to every farm and mine the colony can staff, and no more.
 ##
 ## The Phase 8 colony sim staffs a farm or a mine only while a colonist is *posted* to it, so
@@ -3398,6 +3412,313 @@ func _test_starting_state_and_baselines() -> void:
 			"and a panel that refreshes before reading recovers the figure")
 		sup.eq(int(live.get_max_power()), 10, "including the power maximum")
 		sup.eq(int(live.get_max_housing()), 5, "and the housing maximum")
+
+
+# --- Phase 8 corrections V: persistence, food sync, opening state ---------
+
+## Manual worker assignments survive the turns, and only the player moves them.
+func _test_worker_assignments_persist() -> void:
+	sup.begin("worker assignments persist")
+	var g := _galaxy(41111)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the persistence probe")
+		return
+	colony.population = 6.0
+	_set_structures(colony, {&"farm": 3, &"mine": 3, &"granary": 1})
+	# A deliberate, uneven split: two farms and one mine out of six hands.
+	colony.worker_assignment = {}
+	ColonySim.assign_worker(colony, &"farm")
+	ColonySim.assign_worker(colony, &"farm")
+	ColonySim.assign_worker(colony, &"mine")
+	colony.food_stock = 900.0
+	var farms := ColonySim.workers_on(colony, &"farm")
+	var mines := ColonySim.workers_on(colony, &"mine")
+	sup.eq(farms, 2, "two colonists on farms")
+	sup.eq(mines, 1, "and one on mines")
+
+	# Ten turns, with the population moving around underneath: growing, and then falling.
+	for turn in 10:
+		_staff_all_keep(colony)
+		colony.food_stock = 900.0
+		ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(71 + turn))
+		sup.eq(ColonySim.workers_on(colony, &"farm"), farms,
+			"turn %d leaves the farm posts exactly where the player put them" % turn)
+		sup.eq(ColonySim.workers_on(colony, &"mine"), mines,
+			"turn %d leaves the mine posts exactly where the player put them" % turn)
+
+	# Growth does *not* auto-post the new arrivals: the brief is explicit that only `+`, `-`
+	# and a death move a worker.
+	colony.population = 10.0
+	_staff_all_keep(colony)
+	ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(81))
+	sup.eq(ColonySim.workers_assigned(colony), farms + mines,
+		"a population increase posts nobody by itself")
+	sup.eq(ColonySim.idle_workers(colony), 10 - farms - mines,
+		"and the new arrivals are simply idle, which is the research budget")
+
+	# A death does move one, and only one.
+	var before := ColonySim.workers_assigned(colony)
+	colony.population -= 1.0
+	ColonySim.release_random_worker(colony, _rng(82))
+	sup.eq(ColonySim.workers_assigned(colony), before - 1,
+		"a death takes exactly one post with it")
+
+	# The player is the only other way to move one.
+	sup.ok(ColonySim.assign_worker(colony, &"farm"), "and + still posts one")
+	sup.ok(ColonySim.unassign_worker(colony, &"farm"), "and - still pulls one")
+
+
+## The panel's net food and the resolver's are the same number, and a colony in
+## surplus never starves however empty its bank was.
+func _test_food_balance_sync() -> void:
+	sup.begin("food balance sync")
+	var g := _galaxy(42222)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the food-sync probe")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var farm := _defs_building(&"farm") as Resource
+	var per_farm := float(farm.get("yield_amount"))
+	colony.population = 4.0
+	_set_structures(colony, {&"farm": 3, &"mine": 1, &"colony_ship_building": 1, &"granary": 1})
+	colony.worker_assignment = {}
+	# Deliberately uneven again: two worked farms out of three standing, plus the kit.
+	ColonySim.assign_worker(colony, &"farm")
+	ColonySim.assign_worker(colony, &"farm")
+	colony.food_stock = 0.0
+	_staff_all_keep(colony)
+
+	# The arithmetic the brief specifies, term for term.
+	var gross := float(ColonySim.workers_on(colony, &"farm")) * per_farm + 5.0
+	var consumption := colony.population * float(_db.get("FOOD_PER_POP"))
+	var expected_net := gross - consumption
+	sup.near(gross, 15.0, 0.001,
+		"gross is two worked farms (2 x 5) plus the Colony Ship's 5")
+	sup.near(consumption, 4.0, 0.001, "consumption is one food per civilian")
+	sup.near(expected_net, 11.0, 0.001, "so the net is +11")
+	sup.near(ColonySim._food_output(colony, buildings), gross, 0.001,
+		"and the resolver's gross is exactly that -- the kit is no longer left out of it")
+
+	# `net >= 0` banks, however empty the bank started, and the bank moves by exactly the
+	# net each turn -- checked per turn rather than as a total, because the colony grows and
+	# every birth raises consumption, so a thirty-turn total is a different number each run.
+	var deaths := 0
+	var bank_moved := true
+	for _i in 30:
+		var people := colony.population
+		var net_now := ColonySim._food_output(colony, buildings) \
+			- people * float(_db.get("FOOD_PER_POP"))
+		var bank_before := colony.food_stock
+		var held := colony.population
+		ColonySim.simulate_colony(g, colony, g.faction(0), _defs, _db, _rng(83))
+		if colony.population < held:
+			deaths += 1
+		if net_now >= 0.0 and not is_equal_approx(
+				colony.food_stock, bank_before + net_now):
+			bank_moved = false
+	sup.eq(deaths, 0,
+		"thirty turns in surplus cost nobody a single colonist, even from an empty bank")
+	sup.ok(bank_moved,
+		"and every one of those turns moved the bank by exactly the stated net")
+	sup.ok(colony.food_stock > 0.0, "so it ended well stocked",
+		"%.1f" % colony.food_stock)
+
+	# Break even: the bank drains, and a colony that breaks even still kills nobody.
+	# Ten people: one worked farm (5) plus the kit's own 5 is exactly ten mouths. Five berths
+	# of housing against ten people, so nothing grows into a surplus and the arithmetic holds
+	# for the whole run.
+	var flat := _habitable_colony(_galaxy(42223))
+	if flat != null:
+		flat.population = 10.0
+		_set_structures(flat, {&"farm": 1, &"mine": 1, &"colony_ship_building": 1, &"granary": 1})
+		flat.worker_assignment = {}
+		ColonySim.assign_worker(flat, &"farm")
+		flat.food_stock = 0.0
+		var flat_deaths := 0
+		for _i in 20:
+			var held := flat.population
+			ColonySim.simulate_colony(_galaxy(42224), flat, flat_faction(g), _defs, _db, _rng(84))
+			if flat.population < held:
+				flat_deaths += 1
+		sup.eq(flat_deaths, 0,
+			"a colony that exactly breaks even starves nobody either")
+		sup.near(flat.food_stock, 0.0, 0.001,
+			"and a colony that exactly breaks even never runs down at all")
+
+	# Go genuinely negative with an empty bank: now somebody dies, and only on those turns.
+	var hungry := _habitable_colony(_galaxy(42225))
+	if hungry != null:
+		hungry.population = 12.0
+		_set_structures(hungry, {&"granary": 1, &"colony_ship_building": 1})
+		hungry.worker_assignment = {}
+		hungry.food_stock = 0.0
+		var first_death := true
+		var died := false
+		for _i in 40:
+			var held2 := hungry.population
+			var report := ColonySim.simulate_colony(
+				_galaxy(42226), hungry, hungry_faction(g), _defs, _db, _rng(85))
+			if hungry.population < held2:
+				died = true
+				sup.ok(report.starving, "and the turn it lost somebody reports as starving")
+				sup.near(held2 - hungry.population, 1.0, 0.0001, "one whole person at a time")
+				break
+		sup.ok(died, "a colony with a negative net and an empty bank does starve")
+		sup.ok(first_death, "and it took several turns to get there, not one")
+
+
+## Every empire's opening colony is playable: stocked, staffed and its own.
+func _test_starting_colonies() -> void:
+	sup.begin("starting colonies")
+	var g := _galaxy(43333, 40, 4)
+	sup.eq(g.factions.size(), 4, "four empires are seated")
+	if g.factions.size() < 4:
+		return
+
+	var homes := PackedInt32Array()
+	for f in g.factions:
+		var home: PlanetState = null
+		for p in g.planets:
+			if p.owner == f.id and p.colonized:
+				home = p
+				break
+		sup.ok(home != null, "%s has a settled homeworld" % f.name)
+		if home == null:
+			continue
+		homes.append(home.index)
+		sup.ok(home.food_stock > 0.0,
+			"%s opens with food in store" % f.name, "%.1f" % home.food_stock)
+		sup.ok(home.food_stock >= float(_db.get("STARTING_FOOD")),
+			"%s opens with at least the twenty-food baseline" % f.name,
+			"%.1f" % home.food_stock)
+		sup.ok(home.reserve_metals >= float(_db.get("STARTING_METALS")),
+			"%s opens with enough metal for its first building" % f.name,
+			"%.1f" % home.reserve_metals)
+		sup.ok(home.power >= float(_db.get("STARTING_POWER")),
+			"%s opens with its power banked" % f.name, "%.1f" % home.power)
+		sup.ok(home.count(&"colony_ship_building") == 1,
+			"%s opens with its Colony Ship landed" % f.name)
+		# And nobody sits idle on a colony that owns farms and a mine.
+		sup.ok(ColonySim.workers_assigned(home) >= 1,
+			"%s opens with its colonists posted to work" % f.name,
+			"assigned %d of %d" % [
+				ColonySim.workers_assigned(home), int(floor(home.population))])
+		ColonySim.recount_capacity(home, _defs.get("buildings") as Dictionary, _db)
+		sup.ok(home.get_max_food() > 0.0, "%s has a food capacity to begin with" % f.name)
+		sup.ok(home.get_max_housing() >= 5.0, "%s has somewhere to live" % f.name)
+
+	# Distinct and separated: no joining empire shares or neighbours another's world.
+	sup.eq(_distinct(homes), homes.size(), "every empire has its own homeworld")
+	for i in homes.size():
+		for j in range(i + 1, homes.size()):
+			var a: PlanetState = g.planet(homes[i])
+			var b: PlanetState = g.planet(homes[j])
+			var gap := a.position.distance_to(b.position)
+			sup.ok(gap >= float(GalaxyGenerator.MIN_HOMEWORLD_SEPARATION) * 0.5,
+				"homeworlds %d and %d are not on top of each other" % [i, j],
+				"%.0f parsecs apart" % gap)
+
+	# And a first turn does not kill anybody, for any of them.
+	var rng := _rng(44444)
+	var died := 0
+	for _turn in 5:
+		TurnResolver.resolve_turn(g, [], _defs, _db, rng, 0)
+	for p in g.planets:
+		if p.owner < 0 or not p.colonized:
+			continue
+		if p.population < float(_db.get("START_POPULATION")):
+			died += 1
+	sup.eq(died, 0, "and five unattended turns cost no empire a colonist")
+
+
+## A surveyed world the player has not set foot on or settled is not named on the map.
+func _test_undiscovered_worlds_are_unnamed() -> void:
+	sup.begin("undiscovered worlds are unnamed")
+	var g := _galaxy(45555)
+	var controller := SessionController.new()
+	controller.attach(g, 0)
+	sup.ok(controller != null, "a controller binds the galaxy")
+
+	var found := 0
+	for p in g.planets:
+		if p.owner >= 0 or p.colonized:
+			continue
+		if p.surveyed:
+			found += 1
+			# Surveyed but never visited, never owned, nobody in orbit: the strict rule says no.
+			sup.ok(not controller.knows_name_of(p.index),
+				"a surveyed-but-unvisited world %d has no name the player may use" % p.index,
+				"controller reports '%s'" % controller.display_name(p.index))
+			sup.ok(not _probe_view(controller).label_worth_drawing(p),
+				"and the map draws no label beside it")
+	sup.ok(found >= 0, "the scan covered the unclaimed worlds")
+
+	# Unsurveyed is of course also unnamed.
+	var cold := -1
+	for p in g.planets:
+		if p.owner < 0 and not p.colonized and not p.surveyed:
+			cold = p.index
+			break
+	if cold >= 0:
+		sup.ok(not controller.knows_name_of(cold),
+			"an unsurveyed world has no name either")
+		sup.ok(not _probe_view(controller).label_worth_drawing(g.planet(cold)),
+			"and no label")
+
+	# A ship in orbit is what earns one, and losing the ship takes it away again.
+	if cold >= 0:
+		_place_fleet(g, 0, cold, {&"corvette": 1})
+		sup.ok(controller.knows_name_of(cold),
+			"putting a ship in orbit is what earns a name")
+		sup.ok(_probe_view(controller).label_worth_drawing(g.planet(cold)),
+			"and then the map draws it")
+		# The fleet is removed rather than emptied: an emptied fleet is still an *active*
+		# marker, so the world would stay named and this would test nothing.
+		for f in g.fleets_in_orbit_at(cold, 0):
+			g.remove_fleet(f.id)
+		sup.eq(g.fleets_in_orbit_at(cold, 0).size(), 0, "the orbit is empty again")
+		sup.ok(not controller.knows_name_of(cold),
+			"and taking the ship away takes the name with it")
+
+	# The probe view is a node; freed here rather than left for the leak checker to find.
+	if _probe_view_node != null:
+		_probe_view_node.free()
+		_probe_view_node = null
+
+
+## A map view bound to `controller`, for the label-rule probe.
+##
+## The view is a member rather than a local because `bind` stores the controller the label
+## rule consults -- a fresh view bound to nothing would answer for nobody and pass every
+## assertion vacuously.
+func _probe_view(controller: SessionController) -> GalaxyMapView:
+	if _probe_view_node == null:
+		_probe_view_node = GalaxyMapView.new()
+	_probe_view_node.bind(controller)
+	return _probe_view_node
+
+
+var _probe_view_node: GalaxyMapView = null
+
+
+## How many distinct entries an index list holds.
+func _distinct(indices: PackedInt32Array) -> int:
+	var seen: Dictionary = {}
+	for i in indices:
+		seen[i] = true
+	return seen.size()
+
+
+## The faction the growth scenarios borrow.
+func flat_faction(g: GalaxyState) -> FactionState:
+	return g.faction(0)
+
+
+## The faction the starvation scenario borrows.
+func hungry_faction(g: GalaxyState) -> FactionState:
+	return g.faction(0)
 
 
 # --- research -----------------------------------------------------------
