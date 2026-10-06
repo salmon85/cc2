@@ -194,12 +194,42 @@ static func _apply_order(
 			_apply_worker(galaxy, faction, order, false)
 		Enums.OrderType.SCRAP_STRUCTURE:
 			_apply_scrap_structure(galaxy, faction, order, defs, db)
+		Enums.OrderType.LAND_COLONY_SHIP:
+			_apply_land_colony_ship(galaxy, faction, order, defs, db)
 		_:
 			# SET_TAX and SET_RESEARCH were Phase 7 orders and are now inert: the tax slider
 			# and the research allocation sliders are both gone from the UI, and research is
 			# driven by population. They are still accepted on the wire so a client from
 			# before this phase does not crash the resolver -- it just does nothing.
 			pass
+
+
+## Settle a world with the Colony Ship parked over it.
+##
+## The authority's half of a landing the client has already mirrored. Landing used to be a
+## purely client-side mutation with no order behind it, which meant it worked perfectly in a
+## one-window game and silently reverted the moment a snapshot arrived: the client had settled
+## the world, the server had not heard about it, and the server's copy -- the one that counts --
+## replaced the colony with the empty rock it had been sent. The player watched a colony
+## disappear between turns.
+##
+## Applied twice by design and harmless the second time. The client mirrors the order locally
+## so the map updates on the same press, then submits it; if both are the same galaxy the
+## resolver's copy finds no Colony Ship left to spend and the world already settled, and
+## `land_colony_ship` refuses both. That is the same idempotence the worker and boost orders
+## get from carrying an absolute payload rather than a delta.
+static func _apply_land_colony_ship(
+	galaxy: GalaxyState, faction: FactionState, order: Order, defs: Node, db: Node
+) -> void:
+	if faction == null or faction.defeated:
+		return
+	var fleet: FleetState = galaxy.fleet(order.fleet) as FleetState
+	if fleet == null or fleet.owner != faction.id:
+		return
+	var planet: PlanetState = galaxy.planet(order.target_planet) as PlanetState
+	if planet == null or planet.index != fleet.system:
+		return
+	InvasionStage.land_colony_ship(galaxy, fleet, planet, faction, defs, db)
 
 
 ## Move a chosen set of ships from their current world to a destination.

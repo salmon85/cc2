@@ -82,10 +82,11 @@ enum OrderType {
 	ASSIGN_WORKER, ## Post one more civilian to a staffable structure.
 	UNASSIGN_WORKER, ## Pull one civilian off a staffable structure.
 	SCRAP_STRUCTURE, ## Scrap a standing structure, refunding half its cost.
+	LAND_COLONY_SHIP, ## Spend an orbital Colony Ship to settle the world beneath it.
 }
 
 ## The highest `OrderType` ordinal the wire format accepts.
-const MAX_ORDER_TYPE: int = 19
+const MAX_ORDER_TYPE: int = 20
 
 ## How a colony spends its per-turn construction allowance.
 enum BuildMode {

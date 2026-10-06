@@ -516,6 +516,18 @@ func land_colony_ship() -> bool:
 	var faction := player()
 	if faction == null:
 		return false
+	# Applied locally *and* queued, which is the idiom every other colony action here uses.
+	#
+	# Landing used to mutate this galaxy and stop. That is invisible in a one-window game and
+	# fatal in a networked one: the client settled the world, the server never heard about it,
+	# and the server's copy -- the one that counts -- replaced the colony with the empty rock
+	# on the next snapshot. The colony vanished between turns, which is the whole of the
+	# report. Applying locally gives the player the world on this frame; the order is what
+	# makes it survive the turn.
+	#
+	# Applied first, queued second, so a refused landing leaves nothing behind on the wire --
+	# the mirror is also the test of whether the landing is legal, and queuing before it would
+	# put an order the resolver is bound to refuse into the turn.
 	if not InvasionStage.land_colony_ship(galaxy, f, planet, faction, defs, db):
 		if not f.has_colony_ship():
 			action_rejected.emit("that fleet carries no Colony Ship")
@@ -524,6 +536,8 @@ func land_colony_ship() -> bool:
 		else:
 			action_rejected.emit("that world already has a landed Colony Ship")
 		return false
+	if queue != null:
+		queue.submit(Order.make_land_colony_ship(player_id, f.id, planet.index))
 	# The ship is consumed and the structure replaces it, so a fleet that existed only to
 	# carry it has to go with it. It used to survive as an empty marker on the roster: still
 	# selectable, still offered to the cargo dialog, and offering nothing. Leaving the hull in

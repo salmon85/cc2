@@ -52,6 +52,15 @@ var _pre_scrap_metals: float = 0.0
 ## The reference captured before the turn, so identity can be asserted rather than assumed.
 var _homeworld: int = -1
 
+## The world the Colony Ship was landed on, and what it held afterwards.
+##
+## A second, separate colony rather than an action on the homeworld: the landing is the one
+## mutation that *creates* a world, so it is the one the snapshot can most obviously replace
+## with the empty rock the server still holds. Asserting it on the homeworld would fold that
+## into the other checks and hide which mutation broke.
+var _settled: int = -1
+var _settled_pop: float = 0.0
+
 
 func _initialize() -> void:
 	_t = TestSupport.new()
@@ -119,6 +128,8 @@ func _start_scenario() -> void:
 		_t.ok(false, "empire 0 has a homeworld to act on")
 		return
 	_homeworld = home
+	_settled = _seed_landing_site(galaxy, db)
+	_t.ok(_settled >= 0, "and an unclaimed world with a Colony Ship parked over it")
 
 	var port := NetworkManager.reserve_ephemeral_port()
 	_server_net = NetworkManagerScript.new() as NetworkManager
@@ -186,6 +197,31 @@ func _seed_homeworld(galaxy: GalaxyState, db: Node) -> int:
 	return home.index
 
 
+## Park a Colony Ship, and settlers in its hold, over a world neither empire owns.
+##
+## Written to the authority *before* the snapshot is taken, so both ends begin agreeing that
+## the ship is there. The client replica is written from the same call through the shared
+## galaxy rather than by a second, separately-written block.
+func _seed_landing_site(galaxy: GalaxyState, db: Node) -> int:
+	for p in galaxy.planets:
+		if p.owner >= 0 or p.colonized:
+			continue
+		var hull: Resource = root.get_node_or_null("Defs").call(
+			"ship_hull", &"colony_ship") as Resource
+		if hull == null:
+			return -1
+		var fleet := FleetState.new()
+		fleet.bind_hulls(root.get_node_or_null("Defs").get("ship_hulls") as Dictionary)
+		fleet.owner = 0
+		fleet.system = p.index
+		fleet.name = "Settler"
+		fleet.add_ships(&"colony_ship", 1)
+		fleet.cargo[&"civilians"] = 5.0
+		galaxy.add_fleet(fleet)
+		return p.index
+	return -1
+
+
 ## Seat the client and perform every mutation the GUI can perform on a colony.
 func _seat_and_act() -> void:
 	var slot := _server_net.slot_of(_client_net.unique_id())
@@ -224,12 +260,26 @@ func _seat_and_act() -> void:
 
 	_expected_metals = _colony.reserve_metals
 
+	# The landing, which is the one mutation that *creates* a world and so the one a snapshot
+	# can most obviously replace with the empty rock the authority still holds.
+	if _settled >= 0:
+		_controller.select_planet(_settled)
+		_t.ok(_controller.can_land_colony_ship(),
+			"the Colony Ship over the unclaimed world is landable")
+		_t.ok(_controller.land_colony_ship(), "and the client settles it")
+		var now: PlanetState = _controller.galaxy.planet(_settled)
+		_settled_pop = now.population
+		_t.ok(now.colonized, "the client shows the world settled at once")
+		_t.ok(_settled_pop >= 5.0,
+			"with the settlers from the hold", "pop=%.1f" % _settled_pop)
+		_controller.select_planet(_homeworld)
+
 	# Every action must have produced an order. This is the assertion that fails against the
 	# old code even before any turn is resolved: the mutations were real and nothing was
 	# queued.
 	var queued: Array[Order] = _controller.orders_to_submit()
-	_t.eq(queued.size(), 6,
-		"all six colony actions queued an order for the wire (%d)" % queued.size())
+	_t.eq(queued.size(), 7,
+		"all seven colony actions queued an order for the wire (%d)" % queued.size())
 	var kinds := PackedStringArray()
 	for o in queued:
 		kinds.append(str(o.type))
@@ -241,6 +291,9 @@ func _seat_and_act() -> void:
 		"a scrap reached the queue")
 	_t.ok(kinds.has(str(Enums.OrderType.BOOST_BUILD)),
 		"the construction boost reached the queue")
+	_t.ok(kinds.has(str(Enums.OrderType.LAND_COLONY_SHIP)),
+		"and the Colony Ship landing reached the queue",
+		"kinds=%s" % str(kinds))
 
 	_acted = true
 	_t.ok(_controller.set_ready(true), "the client commits its turn to the server")
@@ -287,6 +340,24 @@ func _assert_survival() -> void:
 	_t.ok(replica.build_metal > 0.0 or replica.build_turns_remaining <= 0,
 		"the construction project still carries the metal that was put into it",
 		"paid %.2f, %d turns left" % [replica.build_metal, replica.build_turns_remaining])
+
+	# The landing specifically: the client settled a world, and the authority has to have
+	# heard about it. This is the reported failure -- the colony vanished between turns --
+	# and it is invisible to every other assertion here, all of which read the homeworld.
+	if _settled >= 0:
+		var settled_replica: PlanetState = _controller.galaxy.planet(_settled)
+		var authority: PlanetState = _server_sync.galaxy.planet(_settled)
+		_t.ok(authority != null, "the authority still holds the settled world")
+		if authority != null:
+			_t.ok(authority.colonized,
+				"the authority settled it too, rather than still holding an empty rock")
+			_t.eq(authority.owner, 0, "and set its owner")
+			_t.eq(int(authority.structures.get(&"colony_ship_building", 0)), 1,
+				"and left the structure the ship becomes")
+			_t.near(authority.population, _settled_pop, 0.001,
+				"with the same settlers the client had")
+			_t.eq(settled_replica.colonized, true,
+				"and the client's copy survived the snapshot instead of being rolled back")
 
 	# The whole point of the pipeline: the client and the authority agree.
 	_t.eq(_controller.galaxy.state_hash(), _server_sync.galaxy.state_hash(),

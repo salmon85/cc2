@@ -240,6 +240,21 @@ static func make_unassign_worker(
 
 
 ## Scrap one standing copy of `building_id` on `planet_index`, refunding half its cost.
+## Settle `planet_index` with the Colony Ship carried by `fleet_id`.
+##
+## Names the fleet rather than just the world because the hull is the thing being spent: the
+## landing both settles the world *and* consumes the ship, so an order that identified its
+## target only by world would be applied twice -- the client mirrors it locally, then the
+## authority resolves it -- and the second application would have no ship left to spend.
+static func make_land_colony_ship(faction_id: int, fleet_id: int, planet_index: int) -> Order:
+	var o := Order.new()
+	o.type = 20  # LAND_COLONY_SHIP
+	o.faction = faction_id
+	o.fleet = fleet_id
+	o.target_planet = planet_index
+	return o
+
+
 static func make_scrap_structure(
 	faction_id: int, planet_index: int, building_id: StringName
 ) -> Order:
@@ -281,6 +296,7 @@ func describe() -> String:
 		18: return "Pull a worker off %s at planet %d" % [
 			payload.get("building", "?"), target_planet]
 		19: return "Scrap %s at planet %d" % [payload.get("building", "?"), target_planet]
+		20: return "Land the Colony Ship of fleet %d at planet %d" % [fleet, target_planet]
 	return "Unknown order"
 
 
