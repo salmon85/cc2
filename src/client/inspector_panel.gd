@@ -280,11 +280,14 @@ func _food_balance(p: PlanetState) -> float:
 	if _controller == null or _controller.defs == null:
 		return 0.0
 	var buildings: Dictionary = _controller.defs.get("buildings") as Dictionary
-	# Read straight from the resolver's arithmetic: worked farms, plus what the colony runs
-	# unattended, less one food per civilian. The panel used to add the Colony Ship's five by
-	# hand while the resolver did not count them at all, so the readout and the turn disagreed
-	# by five every turn and the colony starved while the panel said it was in surplus.
-	return ColonySim._food_output(p, buildings) - p.population
+	# Read straight from the resolver's own projection, tech bonus and all.
+	#
+	# This panel used to compute the net itself -- `worked_farms - population` -- which was the
+	# resolver's arithmetic from before `food_bonus` existed. An empire with `hydroponics` was
+	# shown `(+6)` while the turn banked `(+8.5)`, and the shortfall grew with every bonus the
+	# player researched: the readout was least accurate exactly when they had earned the most.
+	# The constant and the bonus now live in one place and the panel asks.
+	return ColonySim.get_projected_food_delta(p, buildings, _controller.player(), _controller.db)
 
 
 ## Power balance: what the colony generates minus what its structures draw.
@@ -354,7 +357,14 @@ func _metal_per_turn(p: PlanetState) -> float:
 	if _controller == null or _controller.defs == null or p == null:
 		return 0.0
 	var buildings: Dictionary = _controller.defs.get("buildings") as Dictionary
-	return TurnResolver.metal_output_per_turn(p, buildings)
+	# The resolver's projection, not the raw mine yield.
+	#
+	# `metal_output_per_turn` answers "what do the mines produce", which is the right question
+	# for the `PER_TURN` build gate -- it gates on the colony's own production. The panel is
+	# asking something different: what will my stockpile gain, which is the same number plus
+	# `mining_bonus`. It used to read the former, so an empire with `automated_mining` was shown
+	# `METAL 599 (+10)` and banked `+12.5`.
+	return ColonySim.get_projected_metal_delta(p, buildings, _controller.player())
 
 
 func _is_economic(id: StringName) -> bool:

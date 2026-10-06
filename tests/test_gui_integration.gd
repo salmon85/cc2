@@ -64,7 +64,8 @@ func _initialize() -> void:
 		"map_visuals", "economy_rows", "background_music",
 		"worker_scrap_ui", "live_capacity", "food_net_sync", "metal_rate_sync",
 		"undiscovered_labels",
-		"transit_resolution", "flight_path_toggle", "space_port_gating",
+		"transit_resolution", "transit_persistence",
+		"flight_path_toggle", "space_port_gating",
 		"travel_prompt_paths", "camera_snap_uncolonized",
 		"orbit_labels", "cargo_slider",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
@@ -128,6 +129,7 @@ func _process(_delta: float) -> bool:
 		"metal_rate_sync": _step_mine_worker_moves_the_metal_rate()
 		"undiscovered_labels": _step_undiscovered_world_labels()
 		"transit_resolution": _step_transit_resolves_and_docks()
+		"transit_persistence": _step_transit_persists_and_draws()
 		"flight_path_toggle": _step_flight_path_toggle()
 		"space_port_gating": _step_space_port_gates_the_ship_list()
 		"travel_prompt_paths": _step_travel_prompt_and_paths()
@@ -1588,22 +1590,27 @@ func _step_planet_and_research_readouts() -> void:
 
 	# --- metal: stock and per-turn production -----------------------------------
 	#
-	# Three *worked* mines make fifteen a turn, so the row reads `599 (+15)`. The workers are
-	# posted explicitly because a mine produces while somebody is on it: three mines standing
-	# with nobody posted is a colony earning nothing, and the panel used to quote fifteen for it
-	# because it counted structures rather than assignments.
+	# Three *worked* mines, so the row reads `599 (+15)` -- or `(+19)` once `mining_bonus` is
+	# applied. The expected figures are read from the resolver's own projection rather than
+	# written out as literals, which is the whole point of the fix: a hard-coded `+15` here was
+	# an assertion that the panel *omits* the empire's tech bonus, so it kept passing while the
+	# readout under-reported, and it would have started failing the moment the bonus landed
+	# rather than telling anyone why.
+	var buildings: Dictionary = c.defs.get("buildings") as Dictionary
 	colony.structures = {&"mine": 3, &"granary": 1}
 	colony.population = 6.0
 	colony.reserve_metals = 599.0
 	_post_workers(colony, 0, 3)
 	_client.inspector.refresh()
+	var three_mines := _metal_rate_text(colony, buildings, me)
+	sup.ok(three_mines != "(+0)", "three worked mines produce metal at all")
 	var detail := _client.inspector.planet_label().text
 	sup.ok(detail.contains("METAL"),
 		"the detail panel shows metal", "shown=%s" % detail.replace("\n", " | "))
 	sup.ok(detail.contains("599"), "and the stockpile", "shown=%s" % detail.replace("\n", " | "))
-	sup.ok(detail.contains("+15"),
-		"and the per-turn production beside it",
-		"shown=%s" % detail.replace("\n", " | "))
+	sup.ok(detail.contains(three_mines),
+		"and the per-turn production beside it, tech bonus included",
+		"expected %s, shown=%s" % [three_mines, detail.replace("\n", " | ")])
 
 	# Pulling a worker off is the other half, and the one the report was actually about: the
 	# turn credited the difference, so the displayed rate has to fall on the same press.
@@ -1614,24 +1621,30 @@ func _step_planet_and_research_readouts() -> void:
 	sup.ok(less != null, "the mine has a worker row to pull from")
 	if less != null:
 		less.emit_signal("pressed")
-		sup.ok(_client.inspector.planet_label().text.contains("+10"),
+		var two_mines := _metal_rate_text(colony, buildings, me)
+		sup.ok(_client.inspector.planet_label().text.contains(two_mines),
 			"pulling one mineworker drops the displayed rate immediately",
-			"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+			"expected %s, shown=%s" % [
+				two_mines, _client.inspector.planet_label().text.replace("\n", " | ")])
 		var more := _client.macros.staffing_more_button(&"mine")
 		if more != null:
 			more.emit_signal("pressed")
-		sup.ok(_client.inspector.planet_label().text.contains("+15"),
+		sup.ok(_client.inspector.planet_label().text.contains(three_mines),
 			"and posting it back restores the rate without waiting for a turn",
-			"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+			"expected %s, shown=%s" % [
+				three_mines, _client.inspector.planet_label().text.replace("\n", " | ")])
 
 	# An unstaffed mine produces nothing, so the delta has to fall with the workforce --
 	# otherwise the panel is quoting a figure the turn will not credit.
 	colony.population = 0.0
+	_post_workers(colony, 0, 0)
 	_client.inspector.refresh()
 	var idle := _client.inspector.planet_label().text
 	sup.ok(idle.contains("METAL"), "the metal row is still present with no civilians")
-	sup.ok(not idle.contains("+15"),
-		"but a colony with nobody to work its mines shows no production",
+	sup.eq(_metal_rate_text(colony, buildings, me), "(+0)",
+		"but a colony with nobody to work its mines projects no production")
+	sup.ok(not idle.contains(three_mines),
+		"and the panel agrees rather than still quoting the staffed figure",
 		"shown=%s" % idle.replace("\n", " | "))
 
 	# --- population: total, employed, idle ---------------------------------------
@@ -4665,6 +4678,122 @@ func _step_mine_worker_moves_the_metal_rate() -> void:
 		"and the panel still agrees with the figure the turn will credit")
 
 
+## A dispatched fleet stays in transit across turn advances, draws its line when the overlay
+## is on, and docks into the destination orbit with its ships intact.
+##
+## This is the report's Bug 1, and the parts worth pinning down are the ones that could each
+## fail alone while leaving the fleet looking fine:
+##
+##   - The order has to reach the *resolver*, not just the client's local mirror. The client
+##     mirrors a move onto its own replica so the map draws the line immediately, which means a
+##     broken order path would still show a fleet under way on the client and lose it the turn
+##     the server resolved. Driving the turn through the real `MOVE_FLEET` order is what makes
+##     this an assertion about persistence rather than about the mirror.
+##   - Transit has to survive a turn *and* a save/load, since `destination`/`travelled` are the
+##     only record of a crossing in progress.
+##   - The overlay has to draw the line from the controller's canonical fleet list, not from a
+##     copy the toggle button kept.
+func _step_transit_persists_and_draws() -> void:
+	sup.begin("fleet transit persists, draws, and docks")
+	if _client == null or _client.controller == null or _client.map == null:
+		return
+	var c := _client.controller
+	var home := _first_colony()
+	if home == null:
+		sup.ok(false, "the player starts with a colony to fly from")
+		return
+
+	# The nearest other world, so the crossing is a handful of turns rather than a soak.
+	var target := -1
+	var nearest := INF
+	for p in c.galaxy.planets:
+		if p.index == home.index:
+			continue
+		var gap := MovementStage.orbit_distance(home, p)
+		if gap > 0.0 and gap < nearest:
+			nearest = gap
+			target = p.index
+	sup.ok(target >= 0, "a second world exists to fly to")
+	if target < 0:
+		return
+
+	var fleet := _ensure_transport(home.index, &"corvette")
+	if fleet == null:
+		sup.ok(false, "a fleet is available to dispatch")
+		return
+	fleet.destination = -1
+	fleet.travelled = 0.0
+	c.select_fleet(fleet.id)
+
+	var quoted := MovementStage.transit_turns(c.galaxy, home.index, target)
+	sup.ok(quoted >= 1, "the crossing is quoted at least one turn")
+
+	# The order itself, inspected rather than assumed. `queue_move` submits this and then
+	# mirrors it locally; both are asserted here so a regression in either is visible.
+	#
+	# The queue is emptied first: earlier steps stage orders on purpose, and what is under test
+	# is what *this* dispatch stages, not what the previous step left behind.
+	c.queue.clear()
+	sup.ok(c.queue_move(target), "the dispatch is accepted")
+	var staged: Array[Order] = c.pending_orders() as Array[Order]
+	sup.eq(staged.size(), 1, "and stages exactly one order for the turn")
+	if staged.size() == 1:
+		sup.eq(staged[0].type, int(Enums.OrderType.MOVE_FLEET),
+			"which is a MOVE_FLEET the resolver will act on")
+		sup.eq(staged[0].fleet, fleet.id, "naming the fleet that was dispatched")
+		sup.eq(staged[0].target_planet, target, "and the world it was sent to")
+	sup.eq(fleet.destination, target, "the client mirror shows it under way at once")
+
+	# The overlay, while the fleet is genuinely in transit: a line is only drawable if there
+	# is something to draw it between.
+	_client.set_flight_paths(true)
+	sup.ok(c.flight_paths_shown(), "the overlay is on")
+	sup.ok(c.galaxy.fleets_of(c.player_id).has(fleet),
+		"the fleet is in the controller's canonical list the overlay reads")
+
+	# Turn one: past the order, into pure transit state. This is where a fleet that only ever
+	# lived in the client's mirror would evaporate.
+	c.end_turn()
+	sup.eq(fleet.destination, target, "it is still under way after the turn that ordered it")
+	sup.ok(fleet.travelled > 0.0, "and has begun covering the leg",
+		"travelled=%f" % fleet.travelled)
+
+	# Save/load mid-crossing. A save that dropped `destination` would silently park the fleet
+	# at its origin and the rest of the game would believe it had arrived.
+	var restored := GalaxyState.new()
+	sup.ok(restored.from_json(c.galaxy.to_json()), "the galaxy saves and reloads mid-transit")
+	var reloaded: FleetState = restored.fleet(fleet.id)
+	sup.ok(reloaded != null, "the reloaded galaxy still holds the fleet")
+	if reloaded != null:
+		sup.eq(reloaded.destination, target, "still bound for the same world after the reload")
+		sup.near(reloaded.travelled, fleet.travelled, 0.001,
+			"and still carrying its progress across the leg")
+
+	# Now run it in. One turn at a time, so a fleet that reset or stalled is caught rather
+	# than merely arriving late.
+	for _turn in quoted + 2:
+		if fleet.destination < 0:
+			break
+		c.end_turn()
+	sup.eq(fleet.destination, -1, "it arrives rather than crossing for ever")
+	sup.eq(fleet.system, target, "and is docked at the destination")
+	sup.near(fleet.travelled, 0.0, 0.001, "with its progress counter cleared for the next order")
+
+	# The ships, specifically. "Arrived" is true of the fleet's own fields long before the
+	# rest of the game agrees, so the garrison and the hull count are checked directly.
+	sup.ok(c.fleets_in_orbit_at(target).has(fleet),
+		"the destination's orbit holds that same fleet")
+	sup.ok(int(fleet.ships.get(&"corvette", 0)) > 0,
+		"and it still has its corvette", "ships=%s" % str(fleet.ships))
+
+	# With the fleet docked there is nothing in transit, so the overlay has no line to draw
+	# for it -- which is the correct behaviour, and distinguishes "hides when off" from
+	# "draws a stale line forever".
+	_client.set_flight_paths(false)
+	sup.ok(not c.flight_paths_shown(), "the controller reports the overlay off")
+	sup.ok(not _client.map.flight_paths_enabled(), "and so does the map that draws it")
+
+
 ## The Show/Hide Flight Paths toggle, beneath Travel, drives the map's overlay.
 ##
 ## The overlay itself was drawn but nothing on screen reached it: the flag existed on the map
@@ -4781,6 +4910,18 @@ func _step_space_port_gates_the_ship_list() -> void:
 
 
 ## The signed figure inside a readout row's brackets, or 0.
+## The `(+N)` figure the panel should be showing for this colony's metal rate right now.
+##
+## Formatted the same way `InspectorPanel` formats it, and derived from the resolver's own
+## projection, so an assertion about the displayed rate cannot drift away from the arithmetic
+## that is supposed to produce it.
+func _metal_rate_text(
+	colony: PlanetState, buildings: Dictionary, faction: FactionState
+) -> String:
+	var delta := ColonySim.get_projected_metal_delta(colony, buildings, faction)
+	return "(%s)" % Format.signed(delta, 0)
+
+
 func _signed_in(row: String) -> float:
 	var open := row.find("(")
 	var close := row.rfind(")")

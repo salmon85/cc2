@@ -54,6 +54,7 @@ func _initialize() -> void:
 	_test_landed_colony_ship_entity()
 	_test_capacity_sync()
 	_test_worker_assignment()
+	_test_projected_rate_projections()
 	_test_scrapping()
 	_test_starvation_releases_a_worker()
 	_test_starting_state_and_baselines()
@@ -3175,6 +3176,117 @@ func _test_worker_assignment() -> void:
 		"with nobody free a farm would land unworked")
 	sup.ok(ColonySim.would_be_staffed(colony, &"city_complex"),
 		"while a city complex needs no hands and is always fine")
+
+
+## The projected rates are what the left panel quotes, so they have to be what the turn pays.
+##
+## The bug this covers: the panel computed its own metal and food nets from the *pre-bonus*
+## arithmetic, while the resolver applied `mining_bonus` and `food_bonus` on top. An empire with
+## `hydroponics` and `automated_mining` was shown `(+10)`/`(+6)` and banked `(+12.5)`/`(+8.5)`,
+## and the gap widened with every bonus researched -- the readout was least accurate exactly
+## when the player had earned the most.
+##
+## Each projected rate is compared against the report from the turn that actually applies it,
+## for a colony with the bonuses and one without, so neither the bonus nor the constant can
+## drift out from under the panel unnoticed.
+func _test_projected_rate_projections() -> void:
+	sup.begin("projected metal and food rates")
+	var g := _galaxy(31341)
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists for the rate projection probe")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+	var mine_def := _defs_building(&"mine") as Resource
+	var farm_def := _defs_building(&"farm") as Resource
+	sup.ok(mine_def != null and farm_def != null, "the roster has a mine and a farm")
+	if mine_def == null or farm_def == null:
+		return
+	var per_mine := float(mine_def.get("metal_per_turn"))
+	var per_farm := float(farm_def.get("yield_amount"))
+
+	colony.population = 4.0
+	colony.food_stock = 1000.0
+	_set_structures(colony, {&"mine": 2, &"farm": 2, &"granary": 1})
+	_staff_all(colony)
+
+	# Sit at exactly the housing ceiling, so the turn cannot grow the colony.
+	#
+	# Growth is what makes this fixture self-defeating: `simulate_colony` can add a colonist,
+	# and food consumption is per head, so the projection taken after the turn would be one
+	# mouth below the net that turn reported -- a difference caused by the colony's own
+	# success rather than by any arithmetic under test. `BASE_HOUSING` is a tuned constant, so
+	# it is read from the same `capacity_for` the turn reads rather than written out here.
+	var housed := float((ColonySim.capacity_for(colony, buildings, _db)).get("housing", 0.0))
+	colony.population = maxf(4.0, housed)
+	sup.near(ColonySim.idle_workers(colony), colony.population - 4.0, 0.001,
+		"the fixture can staff all four jobs and has no room to grow")
+	var mouths := colony.population
+
+	var me: FactionState = g.faction(0)
+	# An unbonused control faction, so the bonus-free case is asserted on its own and a
+	# passing assertion cannot be explained by the bonus happening to be zero.
+	var plain := FactionState.new()
+	plain.id = me.id
+
+	# --- with no economy tech -----------------------------------------------------
+	sup.near(ColonySim.get_projected_metal_delta(colony, buildings, plain), 2.0 * per_mine,
+		0.001, "two worked mines project two mines of metal with no bonus")
+	sup.near(ColonySim.get_projected_food_delta(colony, buildings, plain, _db),
+		2.0 * per_farm - mouths, 0.001, "and two worked farms less every mouth")
+
+	var plain_report := ColonySim.simulate_colony(g, colony, plain, _defs, _db, _rng(1))
+	sup.near(colony.population, mouths, 0.001, "and the turn did not change the headcount")
+	sup.near(ColonySim.get_projected_metal_delta(colony, buildings, plain),
+		plain_report.metals_mined, 0.001, "which is exactly the metal that turn credited")
+	sup.near(ColonySim.get_projected_food_delta(colony, buildings, plain, _db),
+		plain_report.food_produced - plain_report.food_consumed, 0.001,
+		"and the projection is exactly the food that turn credited")
+
+	# --- with both economy bonuses researched -------------------------------------
+	var tech: Dictionary = _defs.get("tech_nodes") as Dictionary
+	for id: StringName in [&"hydroponics", &"automated_mining"]:
+		me.researched[id] = true
+		me.cache_tech_node(id, tech.get(id, null) as Resource)
+	sup.near(me.tech_effect(&"food_bonus"), 0.25, 0.001, "the empire has hydroponics")
+	sup.near(me.tech_effect(&"mining_bonus"), 0.25, 0.001, "and automated mining")
+
+	sup.near(ColonySim.get_projected_metal_delta(colony, buildings, me),
+		2.0 * per_mine * 1.25, 0.001, "the mining bonus is in the projected metal rate")
+	sup.near(ColonySim.get_projected_food_delta(colony, buildings, me, _db),
+		2.0 * per_farm * 1.25 - mouths, 0.001, "and the food bonus is in the projected food rate")
+
+	var report := ColonySim.simulate_colony(g, colony, me, _defs, _db, _rng(1))
+	sup.near(report.metals_mined, 2.0 * per_mine * 1.25, 0.001,
+		"and the turn credited that bonused metal")
+	sup.near(ColonySim.get_projected_metal_delta(colony, buildings, me),
+		report.metals_mined, 0.001,
+		"so the panel's rate and the turn's credit are the same number")
+	sup.near(ColonySim.get_projected_food_delta(colony, buildings, me, _db),
+		report.food_produced - report.food_consumed, 0.001,
+		"and likewise for food, which is the whole claim")
+
+	# A faction of null means "no bonus", so a caller that has no empire to hand still gets
+	# the raw production rather than a crash or a silent zero.
+	sup.near(ColonySim.get_projected_metal_delta(colony, buildings, null), 2.0 * per_mine,
+		0.001, "a null faction projects the unbonused metal rate")
+	sup.near(ColonySim.get_projected_food_delta(colony, buildings, null, _db),
+		2.0 * per_farm - mouths, 0.001, "and the unbonused food rate")
+	sup.near(ColonySim.get_projected_metal_delta(null, buildings, me), 0.0, 0.001,
+		"a null planet projects nothing rather than crashing")
+	sup.near(ColonySim.get_projected_food_delta(null, buildings, me, _db), 0.0, 0.001,
+		"for food as well")
+
+	# Staffing still moves the projection, which is what makes the panel's `+`/`-` buttons
+	# worth pressing: the rate tracks the posting, not the standing structure.
+	var before_staff := ColonySim.get_projected_metal_delta(colony, buildings, me)
+	sup.ok(ColonySim.unassign_worker(colony, &"mine"), "a worker can be pulled off a mine")
+	sup.near(ColonySim.get_projected_metal_delta(colony, buildings, me),
+		before_staff - per_mine * 1.25, 0.001,
+		"and the projected metal rate falls by exactly that mine, bonus included")
+	sup.ok(ColonySim.assign_worker(colony, &"mine"), "and posted back again")
+	sup.near(ColonySim.get_projected_metal_delta(colony, buildings, me), before_staff, 0.001,
+		"which restores the rate exactly")
 
 
 ## Scrapping returns half the metal and hands the job back.

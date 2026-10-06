@@ -421,8 +421,9 @@ static func simulate_colony(
 	_power_turn(planet, buildings, report)
 
 	# --- Mining ----------------------------------------------------------------
-	var mining_bonus := 1.0 + faction.tech_effect(&"mining_bonus")
-	var metal_per_turn := _metal_output(planet, buildings) * mining_bonus
+	# Read through the same helper the panel reads, so the quoted rate and the credited rate
+	# are one expression rather than two that happen to agree today.
+	var metal_per_turn := get_projected_metal_delta(planet, buildings, faction)
 	report.metals_mined = metal_per_turn
 	# The old mine yield scaled with population, which made output depend on a value that
 	# is now a count of people rather than a growth multiplier. The Phase 8 roster states
@@ -656,6 +657,52 @@ static func metal_output(planet: PlanetState, buildings: Dictionary) -> float:
 	if planet == null:
 		return 0.0
 	return _metal_output(planet, buildings)
+
+
+## The metal this colony's stockpile will gain next turn. **The** projected metal rate.
+##
+## This is the figure `simulate_colony` credits, tech bonus included, so it is the number the
+## panel quotes and the number the turn delivers. The bug it fixes: the panel read the raw mine
+## output while the resolver applied `mining_bonus` on top, so an empire with `automated_mining`
+## was shown `METAL 599 (+10)` and banked `+12.5`. The rate under-read by exactly the bonus the
+## player had researched -- the more technology they earned, the further the readout drifted,
+## which is the worst possible direction for a figure meant to predict the turn.
+##
+## `_metal_output` is still the right answer to "what do the mines produce", which is a
+## different question and has its own callers. This is "what will the bank gain".
+static func get_projected_metal_delta(
+	planet: PlanetState, buildings: Dictionary, faction: FactionState = null
+) -> float:
+	if planet == null:
+		return 0.0
+	var bonus := 1.0
+	if faction != null:
+		bonus += faction.tech_effect(&"mining_bonus")
+	return _metal_output(planet, buildings) * bonus
+
+
+## The food this colony's pantry will gain next turn. **The** projected food rate.
+##
+## The twin of `get_projected_metal_delta`, and fixed for the same reason. The panel computed
+## `worked_farms - population` while the resolver computed
+## `(worked_farms * (1 + food_bonus)) - population * FOOD_PER_POP`, so a hydroponics empire was
+## told it had `+6` coming when `+8.5` was on its way.
+##
+## Consumption goes through `FOOD_PER_POP` rather than a literal `1.0`, because that is what
+## the resolver multiplies by. Both readers taking the constant from the same place is what
+## makes them agree when the constant is not one.
+static func get_projected_food_delta(
+	planet: PlanetState, buildings: Dictionary, faction: FactionState = null, db: Node = null
+) -> float:
+	if planet == null:
+		return 0.0
+	var bonus := 1.0
+	if faction != null:
+		bonus += faction.tech_effect(&"food_bonus")
+	var per_pop := 1.0
+	if db != null:
+		per_pop = float(db.get("FOOD_PER_POP"))
+	return _food_output(planet, buildings) * bonus - planet.population * per_pop
 
 
 ## Output from the worked copies of one structure kind.
