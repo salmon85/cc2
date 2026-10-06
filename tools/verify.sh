@@ -87,6 +87,7 @@ Parse JSON failed
 [GalaxyGenerator] generate: RNG stream is null
 [GalaxyGenerator] no planet type for class
 [GalaxyGenerator] no ship hull definitions
+[AssetPaths] refusing to save a null image
 [GalaxyGenerator] GameDB tuning constants unavailable
 [Order] payload missing 'type'
 [Order] payload has an unknown type

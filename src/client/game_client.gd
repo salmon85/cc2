@@ -55,6 +55,11 @@ enum TravelStep {
 ## The world chosen as the travel source, or -1.
 var travel_source: int = -1
 
+## Background music. Present as a node in every run so the accessor is never null, but it
+## holds no `AudioStreamPlayer` at all unless the run is allowed to open an audio device --
+## see `BackgroundMusic`.
+var music: BackgroundMusic = null
+
 var _log: RichTextLabel = null
 ## Every line the session log has shown, kept as plain strings.
 ##
@@ -75,6 +80,7 @@ func _ready() -> void:
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
 	bg.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(bg)
+	_build_music()
 	_build_layout()
 	_build_travel_overlay()
 	_build_boost_overlay()
@@ -84,6 +90,18 @@ func _ready() -> void:
 	# panels it needs did not exist yet.
 	if _pending_galaxy != null:
 		_attach_session()
+
+
+## Mount the background music.
+##
+## Added before the layout so it is the first thing in the tree, and it starts itself from its
+## own `_ready`. In a headless run `start()` returns immediately and the node stays empty, so
+## this call is safe from `app.gd`, from a dedicated server that never builds a client, and
+## from the GUI suite alike -- there is no mode in which adding it is not the right thing.
+func _build_music() -> void:
+	music = BackgroundMusic.new()
+	music.name = "BackgroundMusic"
+	add_child(music)
 
 
 func _build_layout() -> void:

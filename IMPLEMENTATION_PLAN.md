@@ -1483,3 +1483,78 @@ rolled by the generator and serialised.
   bidirectional dialog over a structure and over a hull, the three-step travel flow driven
   through the client's own handlers, Load/Unload visibility and validation, the star's layers,
   and the panel's Food/Power/Population rows.
+
+---
+
+# Asset directories and guarded background music
+
+## One place names every asset path
+
+`AssetPaths` is a `RefCounted` of pure static functions and nothing else: `GRAPHICS_DIR`,
+`SOUNDS_DIR`, `DATA_DIR`, and `graphics_path` / `sounds_path` / `save_texture` / `list_graphics`.
+It is a `RefCounted` with no autoload behind it on purpose -- the test suites run with
+`-s res://tests/test_*.gd` and stand in for the project's autoloads themselves, so a path
+constant behind a live node would be untestable in exactly the place a path most needs
+checking.
+
+The rule it enforces is one-directional: **generated** imagery (procedural image saves, sprite
+assets) is written to `res://data/graphics/`, and only *authored* `.tres` definitions sit in
+the sibling directories beside it. `save_texture` takes a bare file name and no destination, so
+a caller cannot write generated pixels anywhere else -- there is no argument to get wrong. A
+generator that drops a PNG beside the definitions it was reading makes the asset tree a build
+artefact, and a checked-in build artefact is a binary that can drift from the code that
+produces it without anything failing.
+
+Names are reduced with `String.get_file()` rather than concatenated, so `../../etc/passwd` and
+`/etc/passwd` both become `passwd` and land in the directory. A helper that takes a path is a
+convention; one that cannot leave its directory is a policy.
+
+`PlanetVisuals.export_texture` renders a world's look to a PNG through that helper. It is
+optional and nothing in the running game calls it -- drawing a five-pixel disc sixty times a
+turn is not worth encoding to disk -- but it exists so a look can be exported for a screenshot
+without going around the policy to do it.
+
+## Background music, and the run that must not have it
+
+`BackgroundMusic` owns an `AudioStreamPlayer` and loops `res://data/sounds/music.ogg` from its
+first frame. The loop flag is set on the *resource* rather than by re-`play()`ing on
+`finished`, because restarting a player re-seeks and costs a frame of silence -- audible as a
+click once a minute in a track meant to be seamless. The `finished` handler stays as a backstop
+for an import whose loop flag did not take. Both the Ogg Vorbis and the WAV spellings of
+"repeat" are handled, since they are a bool-and-offset and an enum-and-range respectively.
+
+The guard is the substance of the class. A headless run has no audio hardware, and touching
+`AudioStreamPlayer` there asks the engine to open a device that does not exist -- a warning, a
+stream of errors, or a hard failure that takes the whole run down over a background track. So
+the player is not muted headlessly, it is **never constructed**: `start()` returns before it
+builds anything and the node stays an empty `Node`.
+
+Three disqualifiers, because they are three situations that share one consequence:
+
+| Condition | Covers |
+|---|---|
+| `DisplayServer.get_name() == "headless"` | `--headless`, every test suite, the dedicated server |
+| `-s` / `--script` / a `res://tests/` path | a test run launched *without* `--headless` on a machine with a sound card |
+| `Engine.is_editor_hint()` | the editor, which plays audio on its own terms |
+
+`OS.has_feature("template")` is deliberately **not** a disqualifier on its own. It is true of
+every exported build, desktop included, so testing for it would mute exactly the players this
+class exists to serve; it only ever means something in combination with the headless check,
+where it identifies an exported *server*.
+
+`music_allowed()` is a static pure function, so the decision is testable without an audio
+device. A guard that can only be exercised by running audio is a guard nobody exercises.
+
+## Verification
+
+- `tools/verify.sh`: **12 suites, 2887 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_assets` (new, 44 checks) -- both directories exist and the authored `.tres`
+  subdirectories are untouched; names cannot escape their directory, including `../` and
+  absolute paths; a saved texture lands in `data/graphics/` and appears in the listing; a
+  null image is refused; the procedural export round-trips through the policy; the track
+  resolves through `SOUNDS_DIR` and loads as an `AudioStream` headlessly; the guard refuses
+  this run and says why; adding the node and calling `start()` both leave `player()` null and
+  put zero `AudioStreamPlayer`s in the scene tree; and the loop configuration sets both
+  spellings of "repeat".
+- `test_gui_integration` (580) -- the client has a music node that holds no player, refuses an
+  explicit start, and the client tree contains no `AudioStreamPlayer` at all.

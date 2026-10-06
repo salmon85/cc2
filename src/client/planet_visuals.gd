@@ -174,6 +174,45 @@ static func land_fraction(type_id: StringName) -> float:
 	return 0.30
 
 
+## Render this world's appearance to a PNG in `res://data/graphics/`, and return the path.
+##
+## The destination is not a parameter: the graphics policy is that *generated* imagery lands
+## in one directory, and a writer that accepts a path is a writer that eventually writes
+## somewhere else. `AssetPaths.save_texture` is what enforces that.
+##
+## Optional rather than automatic -- drawing a five-pixel disc sixty times a turn is not worth
+## encoding to disk -- so nothing calls this in the running game. It exists so a look can be
+## exported for a screenshot or a style sheet without going around the policy to do it.
+static func export_texture(type_id: StringName, variant: int = 0, size: int = 64) -> String:
+	if size <= 0:
+		return ""
+	var image := Image.create(size, size, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0.0, 0.0, 0.0, 0.0))
+	var palette := PlanetVisuals.palette(type_id, variant)
+	var centre := Vector2(size * 0.5, size * 0.5)
+	var radius := float(size) * 0.46
+	for blob: Variant in PlanetVisuals.landmasses(type_id, variant):
+		_fill_disc(image, centre + (blob as PackedVector2Array)[0] * radius * 0.35,
+			radius * 0.3, palette[2])
+	for y in size:
+		for x in size:
+			if Vector2(x + 0.5, y + 0.5).distance_to(centre) > radius:
+				continue
+			image.set_pixel(x, y, palette[0])
+	return AssetPaths.save_texture(image, "%s_v%d.png" % [String(type_id), variant])
+
+
+## Paint an opaque disc of `colour` into `image`, clipped to its bounds.
+static func _fill_disc(image: Image, centre: Vector2, radius: float, colour: Color) -> void:
+	var lo := Vector2i(maxi(0, int(centre.x - radius)), maxi(0, int(centre.y - radius)))
+	var hi := Vector2i(mini(image.get_width() - 1, int(centre.x + radius)),
+		mini(image.get_height() - 1, int(centre.y + radius)))
+	for y in range(lo.y, hi.y + 1):
+		for x in range(lo.x, hi.x + 1):
+			if Vector2(x + 0.5, y + 0.5).distance_to(centre) <= radius:
+				image.set_pixel(x, y, colour)
+
+
 ## A stable per-world seed, from the type and the variant.
 static func _seed_for(type_id: StringName, variant: int) -> int:
 	return absi(str(type_id).hash() + variant * 2654435761) + 1

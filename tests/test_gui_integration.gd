@@ -61,7 +61,7 @@ func _initialize() -> void:
 		"no_tax_or_research", "macro_progress_bar", "boost_modal",
 		"build_button", "landing_button", "travel_modal",
 		"immediate_bars", "metal_dialog", "travel_flow", "cargo_modal",
-		"map_visuals", "economy_rows",
+		"map_visuals", "economy_rows", "background_music",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
 		"resolution_panels", "peer_departure", "fog_ownership", "fog_colony_markers",
@@ -116,6 +116,7 @@ func _process(_delta: float) -> bool:
 		"cargo_modal": _step_cargo_modal()
 		"map_visuals": _step_map_visuals()
 		"economy_rows": _step_panel_economy_rows()
+		"background_music": _step_background_music()
 		"macro_build": _step_macro_build()
 		"macro_map_stable": _step_macro_does_not_move_the_map()
 		"ready_button": _step_ready_button()
@@ -3640,6 +3641,35 @@ func _step_panel_economy_rows() -> void:
 		"while a genuine shortfall still reads negative",
 		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
 	colony.power_drawn = 0.0
+
+
+## The client owns the music, and owns it without forcing an audio device on.
+##
+## This suite is itself a headless run, so it can assert the guard rather than describe it:
+## if a player were being constructed here, the tree walk below would find it.
+func _step_background_music() -> void:
+	sup.begin("background music is mounted but dormant")
+	if _client == null:
+		return
+	sup.ok(_client.music != null, "the client has a music node")
+	if _client.music == null:
+		return
+	sup.eq(_client.music.player(), null,
+		"which holds no AudioStreamPlayer under a headless run")
+	sup.ok(not _client.music.is_playing_music(), "and nothing is playing")
+	sup.ok(not BackgroundMusic.music_allowed(),
+		"the guard agrees that this run must not play audio")
+	sup.ok(not _client.music.start(), "and an explicit start is refused")
+
+	# Nothing audio-shaped anywhere in the client tree. Walked rather than checked at one
+	# known path, because the claim is about the whole tree.
+	var players := 0
+	for child: Node in _client.get_children():
+		if child is AudioStreamPlayer:
+			players += 1
+	sup.eq(players, 0, "the client tree contains no AudioStreamPlayer at all")
+	sup.eq(_client.music.player(), null,
+		"and still none after the refused start")
 
 
 ## The first structure the build menu is actually offering, or `&""`.
