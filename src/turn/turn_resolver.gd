@@ -188,6 +188,12 @@ static func _apply_order(
 				planet.building_queue.clear()
 				planet.build_turns_remaining = 0
 				planet.build_metal = 0.0
+		Enums.OrderType.ASSIGN_WORKER:
+			_apply_worker(galaxy, faction, order, true)
+		Enums.OrderType.UNASSIGN_WORKER:
+			_apply_worker(galaxy, faction, order, false)
+		Enums.OrderType.SCRAP_STRUCTURE:
+			_apply_scrap_structure(galaxy, faction, order, defs, db)
 		_:
 			# SET_TAX and SET_RESEARCH were Phase 7 orders and are now inert: the tax slider
 			# and the research allocation sliders are both gone from the UI, and research is
@@ -263,6 +269,56 @@ static func _apply_recruit_troop(
 	planet.troops += 1
 
 
+## Post or pull one civilian on the colony the order names, as the order names the structure.
+##
+## The payload carries the count the colony should end up with rather than the press that got
+## it there, so a client which has already mirrored the change locally and then hands the
+## order over lands on the same posting either way. See `ColonySim.set_worker_count`.
+static func _apply_worker(
+	galaxy: GalaxyState, faction: FactionState, order: Order, adding: bool
+) -> void:
+	var planet: PlanetState = galaxy.planet(order.target_planet) as PlanetState
+	if planet == null or planet.owner != order.faction or not planet.colonized:
+		return
+	var building_id := StringName(str(order.payload.get("building", "")))
+	if order.payload.has("workers"):
+		ColonySim.set_worker_count(
+			planet, building_id, int(order.payload.get("workers", 0)))
+		return
+	ColonySim.nudge_worker(planet, building_id, adding)
+
+
+## Scrap one structure or hull from the colony the order names, refunding half its cost.
+##
+## The payload carries the count that should remain, for the same idempotence reason as
+## `_apply_worker`: a client that has already removed the copy locally and shipped the order
+## must not remove a second one when the authority applies it. `building` names a structure
+## and `hull` names a hull, which is how the two halves of the Destroy menu stay apart --
+## they are separate `StringName` spaces and `scrap_targets` already labels them.
+static func _apply_scrap_structure(
+	galaxy: GalaxyState, faction: FactionState, order: Order, defs: Node, db: Node
+) -> void:
+	var planet: PlanetState = galaxy.planet(order.target_planet) as PlanetState
+	if planet == null or planet.owner != order.faction:
+		return
+	var hull_id := StringName(str(order.payload.get("hull", "")))
+	if hull_id != &"":
+		var hulls := {} as Dictionary
+		if defs != null:
+			hulls = defs.get("ship_hulls") as Dictionary
+		ColonySim.set_hull_count(
+			galaxy, planet, faction, hull_id, int(order.payload.get("count", 0)), hulls)
+		return
+	var building_id := StringName(str(order.payload.get("building", "")))
+	if building_id == &"":
+		return
+	var buildings := {} as Dictionary
+	if defs != null:
+		buildings = defs.get("buildings") as Dictionary
+	ColonySim.set_structure_count(
+		planet, building_id, int(order.payload.get("count", 0)), buildings, db)
+
+
 ## Spend stored metal against the construction in progress.
 ##
 ## The building table is passed so the transfer is capped by what the project still owes.
@@ -276,10 +332,12 @@ static func _apply_boost_build(
 	if planet == null or planet.owner != order.faction:
 		return
 	var buildings := {} as Dictionary
+	var hulls := {} as Dictionary
 	if defs != null:
 		buildings = defs.get("buildings") as Dictionary
-	ColonySim.boost_construction(
-		planet, float(order.payload.get("metals", 0.0)), buildings)
+		hulls = defs.get("ship_hulls") as Dictionary
+	ColonySim.bring_project_paid_to(
+		planet, float(order.payload.get("paid", 0.0)), buildings, hulls)
 
 
 ## Take metal back out of the construction in progress and return it to the colony.
@@ -294,7 +352,7 @@ static func _apply_refund_build(
 	var planet: PlanetState = galaxy.planet(order.target_planet) as PlanetState
 	if planet == null or planet.owner != order.faction:
 		return
-	ColonySim.refund_construction(planet, float(order.payload.get("metals", 0.0)))
+	ColonySim.bring_project_paid_to(planet, float(order.payload.get("paid", 0.0)))
 
 
 ## Move food, metal, power or troops between a world and a fleet parked over it.

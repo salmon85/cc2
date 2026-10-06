@@ -114,6 +114,11 @@ static func complete_available(faction: FactionState, defs: Node) -> Array[Strin
 				var node2: Resource = tech[best] as Resource
 				faction.tech_points[int(node2.get("field"))] -= float(node2.get("cost"))
 				faction.researched[best] = true
+				# The cache is what `tech_effect` reads, so it is written here too. Without
+				# it a node's effects only appeared after the next `rebind_definitions` --
+				# which fires on a load, and nowhere else -- so a save/reload run and an
+				# uninterrupted one disagreed about a whole turn of bonuses.
+				faction.cache_tech_node(best, node2)
 				_apply_unlocks(faction, node2, defs)
 				completed.append(best)
 				progressed = true

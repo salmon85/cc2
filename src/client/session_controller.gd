@@ -566,6 +566,16 @@ func _recount_and_announce(planet: PlanetState) -> void:
 
 
 ## Post one more civilian to `building_id` on the selected colony.
+##
+## Applied locally *and* queued, which is the same mirror-the-move idiom `queue_move` and
+## `queue_build_structure` use. The local application is what the player sees on this frame;
+## the queued order is what makes it survive the turn in a networked session, where the
+## authority holds the copy of this colony that counts. Without it the server's next snapshot
+## replaced the posting with the one it still had, and the press simply vanished.
+##
+## The order carries the posting the colony ended up with rather than "add one", so applying
+## it on the authority -- and applying it a second time there, if the client's mirror and the
+## order both land -- leaves the same number. See `ColonySim.set_worker_count`.
 func assign_worker(building_id: StringName) -> bool:
 	var planet := _selected_owned_planet()
 	if planet == null:
@@ -576,6 +586,7 @@ func assign_worker(building_id: StringName) -> bool:
 		else:
 			action_rejected.emit("every one of those is already worked")
 		return false
+	_queue_worker_posting(planet, building_id, true)
 	# Posting a worker does not move a capacity, but it does change who the colony is, and a
 	# panel that only redraws on `capacities_changed` would otherwise keep showing the old
 	# worked counts until something else happened.
@@ -585,6 +596,8 @@ func assign_worker(building_id: StringName) -> bool:
 
 
 ## Pull one civilian off `building_id` on the selected colony.
+##
+## Queued for the same reason as `assign_worker`, and with the same absolute payload.
 func unassign_worker(building_id: StringName) -> bool:
 	var planet := _selected_owned_planet()
 	if planet == null:
@@ -592,8 +605,25 @@ func unassign_worker(building_id: StringName) -> bool:
 	if not ColonySim.unassign_worker(planet, building_id):
 		action_rejected.emit("nobody is posted there")
 		return false
+	_queue_worker_posting(planet, building_id, false)
 	state_changed.emit()
 	return true
+
+
+## Stage the order that carries a staffing change to the authority.
+##
+## Reads the posting the colony actually landed on, so the order states a result rather than
+## an intention. Queued in the same submission order as everything else, which is what makes
+## the replay deterministic.
+func _queue_worker_posting(
+	planet: PlanetState, building_id: StringName, adding: bool
+) -> void:
+	if queue == null:
+		return
+	var order := Order.make_assign_worker(player_id, planet.index, building_id) if adding \
+		else Order.make_unassign_worker(player_id, planet.index, building_id)
+	order.payload["workers"] = ColonySim.workers_on(planet, building_id)
+	queue.submit(order)
 
 
 ## Convert one civilian on the selected colony into one troop.
@@ -637,6 +667,13 @@ func boost_construction(metals: float) -> float:
 	if spent <= 0.0:
 		action_rejected.emit("nothing more to spend on this project")
 		return 0.0
+	# Queued as well as applied. The resolver already understood `BOOST_BUILD`; what was
+	# missing was anything shipping it, so in a networked session the metal the player moved
+	# was credited here and then overwritten by the server's copy of the same colony a turn
+	# later.
+	if queue != null:
+		queue.submit(Order.make_boost_build(
+			player_id, planet.index, ColonySim.project_paid(planet)))
 	state_changed.emit()
 	return spent
 
@@ -656,6 +693,10 @@ func refund_construction(metals: float) -> float:
 	if returned <= 0.0:
 		action_rejected.emit("no metal is assigned to this project")
 		return 0.0
+	# Queued as well as applied, for the same reason as `boost_construction`.
+	if queue != null:
+		queue.submit(Order.make_refund_build(
+			player_id, planet.index, ColonySim.project_paid(planet)))
 	state_changed.emit()
 	return returned
 
@@ -693,6 +734,11 @@ func is_ship_scrap(entry: StringName) -> bool:
 
 
 ## Scrap a structure or a hull from the selected colony, refunding half its metal cost.
+##
+## Applied locally *and* queued. The order carries the count that should remain rather than a
+## request to remove one, so the authority applying it -- which is what happens in a networked
+## session, where the client already mirrored the removal locally -- lands on the same colony
+## rather than scrapping a second copy. See `ColonySim.set_structure_count`.
 func scrap(entry: StringName) -> float:
 	var planet := _selected_owned_planet()
 	if planet == null:
@@ -707,9 +753,30 @@ func scrap(entry: StringName) -> float:
 	if refund <= 0.0:
 		action_rejected.emit("nothing was scrapped")
 		return 0.0
+	_queue_scrap(planet, entry)
 	_recount_and_announce(planet)
 	state_changed.emit()
 	return refund
+
+
+## Stage the order that carries a scrap to the authority.
+##
+## The two halves of the Destroy menu go into the same order type with different payload keys,
+## because `is_ship_scrap` already draws that line and the wire has no room for a second
+## ordinal that would mean the same thing.
+func _queue_scrap(planet: PlanetState, entry: StringName) -> void:
+	if queue == null:
+		return
+	var order := Order.make_scrap_structure(player_id, planet.index, entry)
+	if is_ship_scrap(entry):
+		var orbiter := orbital_fleet(planet.index)
+		order.payload.erase("building")
+		order.payload["hull"] = entry
+		order.payload["count"] = 0 if orbiter == null \
+			else int(orbiter.ships.get(entry, 0))
+	else:
+		order.payload["count"] = maxi(0, int(planet.structures.get(entry, 0)))
+	queue.submit(order)
 
 
 ## The non-blocking notice shown when a queued building would land with nobody to work it.

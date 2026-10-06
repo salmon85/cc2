@@ -660,6 +660,133 @@ static func _output_for(
 	return per_copy * float(_staffed(planet, def, building_id))
 
 
+## Post exactly `count` civilians to `building_id`. Returns the posting that stands.
+##
+## Absolute rather than a delta, which is what makes it safe to apply twice.
+##
+## Every colony order is queued *and* mirrored onto the client's own replica, so the resolver
+## can be handed an order whose effect the sender has already applied locally. A
+## `+1`/`-1` delta applied to both copies moves the posting twice; a target applied to both
+## copies lands in the same place either way. `SessionController.assign_worker` therefore
+## submits the count it just produced rather than the press that produced it, and this is
+## what actually commits it on the authority.
+##
+## Clamped exactly as `assign_worker` clamps: never past the structures standing, never past
+## the idle civilians. A count that cannot be honoured is accepted as far as it can be, and
+## the shortfall is corrected by `reconcile_workers` at the top of the next colony turn
+## rather than by refusing the whole order here.
+static func set_worker_count(
+	planet: PlanetState, building_id: StringName, count: int
+) -> int:
+	if planet == null or not STAFFABLE.has(building_id):
+		return 0
+	var standing := int(planet.structures.get(building_id, 0))
+	if standing <= 0:
+		return 0
+	# What the rest of the colony is already employing is not available to this structure.
+	var committed := 0
+	for id: StringName in planet.worker_assignment:
+		if id != building_id:
+			committed += int(planet.worker_assignment[id])
+	var hands := int(floor(planet.population))
+	var wanted := clampi(count, 0, mini(standing, maxi(0, hands - committed)))
+	if wanted <= 0:
+		planet.worker_assignment.erase(building_id)
+	else:
+		planet.worker_assignment[building_id] = wanted
+	return workers_on(planet, building_id)
+
+
+## Post or pull one civilian, then say what the posting is now.
+##
+## `ColonySim.assign_worker` and `ColonySim.unassign_worker` already answer "is that
+## allowed"; this answers "and what does the colony look like afterwards", which is what a
+## client has to put on the wire so the authority can land on the same posting it did.
+static func nudge_worker(
+	planet: PlanetState, building_id: StringName, adding: bool
+) -> int:
+	if planet == null or not STAFFABLE.has(building_id):
+		return 0
+	if adding:
+		assign_worker(planet, building_id)
+	else:
+		unassign_worker(planet, building_id)
+	return workers_on(planet, building_id)
+
+
+## Leave exactly `count` copies of `building_id` standing. Returns the metal refunded.
+##
+## Absolute for the same reason `set_worker_count` is: the sender has already mirrored the
+## scrap locally, so re-applying it must be a no-op rather than a second structure gone.
+## Scrapping down to `count` refunds half the original cost per copy removed, matching
+## `destroy_structure` exactly -- it is that function expressed as a target.
+##
+## A structure still in `building_queue` is cancelled rather than scrapped, as everywhere
+## else: a half-finished project that is stopped refunds nothing, or a player works out
+## that stopping early is cheaper than finishing.
+static func set_structure_count(
+	planet: PlanetState, building_id: StringName, count: int,
+	buildings: Dictionary, db: Node
+) -> float:
+	if planet == null or building_id == &"":
+		return 0.0
+	var current := int(planet.structures.get(building_id, 0))
+	var wanted := maxi(0, count)
+	if wanted >= current:
+		return 0.0
+	if int(planet.building_queue.get(building_id, 0)) > 0:
+		planet.building_queue.erase(building_id)
+		planet.build_metal = 0.0
+		planet.build_turns_remaining = 0
+		planet.build_total_turns = 0
+		recount_capacity(planet, buildings, db)
+		return 0.0
+	var def: Resource = buildings.get(building_id, null) as Resource
+	if def == null:
+		return 0.0
+	var removed := current - wanted
+	var refund := float(def.get("cost_metals")) * GameDB.SCRAP_REFUND_RATE * float(removed)
+	if wanted <= 0:
+		planet.structures.erase(building_id)
+		planet.worker_assignment.erase(building_id)
+	else:
+		planet.structures[building_id] = wanted
+	# The posting cannot exceed what is left standing; `recount_capacity` runs the clamp.
+	planet.reserve_metals += refund
+	recount_capacity(planet, buildings, db)
+	return refund
+
+
+## Leave exactly `count` copies of `hull_id` in the orbit over `planet_index`.
+##
+## The ship half of `set_structure_count`, and idempotent for the same reason. Returns the
+## metal refunded, which is half the original cost per hull removed.
+static func set_hull_count(
+	galaxy: GalaxyState, planet: PlanetState, faction: FactionState,
+	hull_id: StringName, count: int, hulls: Dictionary
+) -> float:
+	if planet == null or hull_id == &"":
+		return 0.0
+	var orbiter := galactic_orbital_fleet(galaxy, planet.index, faction.id) if faction != null \
+		else null
+	if orbiter == null:
+		return 0.0
+	var current := int(orbiter.ships.get(hull_id, 0))
+	var wanted := maxi(0, count)
+	if wanted >= current:
+		return 0.0
+	var removed := current - wanted
+	orbiter.remove_ships(hull_id, removed)
+	var def: Resource = hulls.get(hull_id, null) as Resource
+	var refund := 0.0
+	if def != null:
+		refund = float(def.get("cost_metals")) * GameDB.SCRAP_REFUND_RATE * float(removed)
+	planet.reserve_metals += refund
+	if orbiter.ship_count() <= 0 and galaxy != null:
+		galaxy.remove_fleet(orbiter.id)
+	return refund
+
+
 ## Whether one copy of `def` is worked and therefore producing.
 ##
 ## For a farm or a mine the answer is *is anyone posted to it*, read from the assignment table.
@@ -931,6 +1058,36 @@ static func boost_construction(
 	planet.reserve_metals -= available
 	set_project_paid(planet, project_paid(planet) + available)
 	return available
+
+
+## Bring the project's assigned metal to exactly `paid`, moving the difference either way.
+##
+## A target rather than a transfer, which is what makes it safe to apply twice.
+##
+## `boost_construction` and `refund_construction` are deltas, and every one of them is
+## mirrored onto the client's own copy of the colony *and* shipped as an order -- so the
+## authority applies an order whose effect the sender has already applied locally, and a
+## delta would move the metal a second time. A target converges instead of accumulating, so
+## a mirrored boost, a retried submission and an honest single application all land on the
+## same figure. Same reasoning as `set_worker_count`.
+##
+## Named beside `project_paid` and `set_project_paid` rather than over either: those read the
+## pool and write it, and this is the one that decides the difference between them and moves
+## it. The upward direction is still bounded by storage and by what the project still owes,
+## and the downward direction only by what is banked against it, so neither cap has moved:
+## this is the two existing functions composed, not a third rule.
+static func bring_project_paid_to(
+	planet: PlanetState, paid: float, buildings: Dictionary = {}, hulls: Dictionary = {}
+) -> float:
+	if planet == null:
+		return 0.0
+	if project_kind(planet) == ProjectKind.NONE:
+		return 0.0
+	var current := project_paid(planet)
+	var wanted := maxf(0.0, paid)
+	if wanted <= current:
+		return refund_construction(planet, current - wanted)
+	return boost_construction(planet, wanted - current, buildings, hulls)
 
 
 ## Take `amount` metal back *out* of the project and return it to the colony's storage.

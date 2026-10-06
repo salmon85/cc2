@@ -3600,11 +3600,17 @@ func _test_starting_colonies() -> void:
 			"%s opens with its power banked" % f.name, "%.1f" % home.power)
 		sup.ok(home.count(&"colony_ship_building") == 1,
 			"%s opens with its Colony Ship landed" % f.name)
-		# And nobody sits idle on a colony that owns farms and a mine.
-		sup.ok(ColonySim.workers_assigned(home) >= 1,
-			"%s opens with its colonists posted to work" % f.name,
-			"assigned %d of %d" % [
-				ColonySim.workers_assigned(home), int(floor(home.population))])
+		# Farms and mines are built, so a founding colony owns neither, and nobody is posted
+		# anywhere: the first posting is a decision the player makes rather than a figure the
+		# generator handed them. This is the assertion the old starting roster could not make.
+		sup.eq(ColonySim.workers_assigned(home), 0,
+			"%s opens with nobody posted to work" % f.name)
+		sup.eq(home.count(&"farm"), 0, "%s opens with no farms" % f.name)
+		sup.eq(home.count(&"mine"), 0, "%s opens with no mines" % f.name)
+		# Every one of its colonists is therefore idle and available to post, which is the
+		# other half of the same claim.
+		sup.eq(ColonySim.idle_workers(home), int(floor(home.population)),
+			"%s opens with every colonist free to post" % f.name)
 		ColonySim.recount_capacity(home, _defs.get("buildings") as Dictionary, _db)
 		sup.ok(home.get_max_food() > 0.0, "%s has a food capacity to begin with" % f.name)
 		sup.ok(home.get_max_housing() >= 5.0, "%s has somewhere to live" % f.name)

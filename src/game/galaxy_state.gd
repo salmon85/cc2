@@ -282,12 +282,37 @@ func from_dict(data: Dictionary) -> bool:
 			return false
 		systems.append(s)
 
-	planets.clear()
-	for entry: Dictionary in data["planets"]:
-		var p := PlanetState.new()
-		if not p.from_dict(entry):
+	# Planets are updated in place rather than replaced.
+	#
+	# Everything bound to this galaxy holds this exact object and reaches bodies through
+	# `planet(index)`, but a panel or a caller that resolved one once is holding the
+	# `PlanetState` itself: `selected_planet` is an index while the map's hover, the boost
+	# dialog's opening figures and the travel flow's source are all a resolved body. Clearing
+	# the array and constructing fresh instances leaves every one of them pointing at an
+	# orphan that no longer appears in `galaxy.planets` -- reads that still work, because the
+	# orphan carries its own copy of every field, and are quietly a turn out of date forever.
+	#
+	# Matching on `index` is enough because a body is identified by its slot for the whole of
+	# its life: the generator assigns `index` from its position in this array and nothing
+	# reorders it. A body present here and absent from the payload is dropped; one in the
+	# payload and absent here is created.
+	var incoming: Array = data["planets"] as Array
+	for slot in incoming.size():
+		var entry: Dictionary = incoming[slot] as Dictionary
+		var target: PlanetState = null
+		if slot < planets.size():
+			target = planets[slot]
+		if target == null or target.index != int(entry.get("index", -1)):
+			target = PlanetState.new()
+			target.index = int(entry.get("index", slot))
+		if not target.from_dict(entry):
 			return false
-		planets.append(p)
+		if slot < planets.size():
+			planets[slot] = target
+		else:
+			planets.append(target)
+	while planets.size() > incoming.size():
+		planets.remove_at(planets.size() - 1)
 
 	fleets.clear()
 	for entry: Dictionary in data.get("fleets", []):

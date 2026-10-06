@@ -122,6 +122,25 @@ func bind_tech(nodes: Dictionary) -> void:
 			_tech_cache[id] = node
 
 
+## Cache one node as researched, so `tech_effect()` sees it on the very next turn.
+##
+## `researched[best] = true` on its own is not enough, and the gap was invisible for a long
+## time. `_tech_cache` is what every bonus reads, and it was only ever populated by
+## `GalaxyState.rebind_definitions` -- which happens on a load and at generation, and nowhere
+## else. So a node completed during turn 12 granted its unlocks immediately but its *effects*
+## only from the next galaxy reload: a save/reload run had the food bonus a turn earlier than
+## an uninterrupted one, and two runs of the same seed produced different games.
+##
+## With the founding colony no longer carrying a farm surplus, the colony bank stopped
+## saturating at its pantry cap and the one-turn difference became visible as a real
+## divergence rather than being absorbed by a clamp. The cache is a mirror of `researched`,
+## so it has to be written wherever `researched` is.
+func cache_tech_node(id: StringName, node: Resource) -> void:
+	if id == &"" or node == null:
+		return
+	_tech_cache[id] = node
+
+
 ## Sum of a `TechNodeData` effect across everything this faction has researched.
 func tech_effect(key: StringName) -> float:
 	var total := 0.0

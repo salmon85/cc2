@@ -1774,6 +1774,88 @@ through the controller -- rather than through a helper invented for the test.
 
 ---
 
+# Phase 8 corrections VI: colony orders on the wire, and snapshot identity
+
+## Colony actions were local mutations, so the network threw them away
+
+`SessionController.assign_worker`, `unassign_worker`, `scrap`, `boost_construction` and
+`refund_construction` all wrote straight to the client's own `PlanetState` and submitted
+nothing. In single player that is invisible -- the client *is* the authority -- and in a
+networked session it is a rollback: the server holds its own copy of the colony, it never
+heard about the press, and the snapshot it broadcasts after resolving the turn replaces the
+client's figure with the one it still had. Worker postings snapped back to the generator's
+founding defaults, scrapped structures reappeared, and refunded metal vanished. Every turn,
+with no error anywhere.
+
+`Enums.OrderType` gains `ASSIGN_WORKER`, `UNASSIGN_WORKER` and `SCRAP_STRUCTURE`, and the two
+build-metal orders are finally shipped rather than only applied. Each is applied at press
+time *and* queued, the same mirror-the-move idiom `queue_move` and `queue_build_structure`
+already used -- and that idiom is why every payload is a **target rather than a delta**.
+
+A `+1`/`-1` delta applied to the client's copy and then again by the authority moves twice.
+`ColonySim.set_worker_count`, `set_structure_count`, `set_hull_count` and
+`bring_project_paid_to` all take the posting, the count that should remain, or the total the
+project should be carrying, so an order that lands twice lands in the same place. It also
+makes a retried submission harmless rather than a second deduction, which is the property an
+authoritative pipeline needs anyway. The upward and downward clamps have not moved: the
+targets are the existing delta functions composed, not a third rule.
+
+`BOOST_BUILD` and `REFUND_BUILD` changed payload from `{metals: <transfer>}` to
+`{paid: <total>}` for the same reason. The wire form was already understood by the resolver;
+what was missing was anything submitting it.
+
+## A snapshot no longer orphans every panel holding a body
+
+`GalaxyState.from_dict` did `planets.clear()` and constructed a fresh `PlanetState` per
+entry. The galaxy object itself is mutated in place on purpose -- `apply_snapshot` says so,
+and it is right -- but the *bodies* inside it were being replaced. A panel, a modal or a
+caller that had resolved one once was left holding an orphan: reads still worked, because the
+orphan carries its own copy of every field, and were quietly a turn out of date for ever.
+
+Bodies are now matched by `index` and updated through `from_dict`, created only where the
+payload has one this array does not, and dropped where it does not. A body's index *is* its
+slot -- the generator assigns it from its position and nothing reorders it -- so the match is
+exact rather than best-effort.
+
+## Farms and mines are built, not granted
+
+`_founding_colony` wrote `farm: 2, mine: 1` and posted two colonists to the farms and one to
+the mine. That was a decision dressed as a default: the colonies opened pre-staffed and
+nobody ever pressed `+`, which teaches the player that the staffing panel is a readout rather
+than a decision. A founding colony now holds only its landed Colony Ship and three idle
+colonists. It is still playable -- the Colony Ship's own pantry carries them, `STARTING_FOOD`
+banks slack, and the first farm is affordable -- and it produces nothing until somebody posts
+somebody to something.
+
+## The tech cache went stale for exactly one turn
+
+Removing the starting farm exposed a determinism failure that had been hiding behind a
+clamp: thirty turns of save/reload hashed differently from thirty uninterrupted turns.
+
+The cause was old. `FactionState._tech_cache` is what every bonus reads, and it was only ever
+populated by `GalaxyState.rebind_definitions` -- which fires on a load and at generation and
+nowhere else. So a node completed during turn 12 granted its unlocks immediately but its
+*effects* only from the next reload: a save/reload run had Hydroponics' `food_bonus` a turn
+earlier than a straight run. With a farm surplus the colony bank saturated at its pantry cap
+and absorbed the one-turn difference; with no farm it did not, and the divergence became a
+real difference in the state hash.
+
+`FactionState.cache_tech_node` writes the cache wherever `researched` is written, so the
+mirror cannot fall a turn behind the thing it mirrors.
+
+## Verification
+
+- `tools/verify.sh`: **13 suites, ALL GREEN**, exit 0.
+- `test_colony_persistence` (new): 41 checks over genuine ENet -- a real `TurnSyncServer`, a
+  real `TurnSyncClient` and a real `SessionController` posting workers, scrapping a mine and
+  boosting a project, then asserting all of it is still true after the server resolves and
+  broadcasts, twice more, with the body object identical throughout and both sides agreeing
+  on the hash.
+- `test_turn_engine`: the founding-colony assertions rewritten as the claims they can now
+  make: nobody posted anywhere, no farms, no mines, every colonist free to post.
+
+---
+
 # Phase 8 corrections V: persistence, food sync, fog, opening state
 
 ## The panel and the resolver were computing different food

@@ -40,6 +40,15 @@ var target_planet: int = -1
 ##   LOAD_CARGO     {"kind": String, "amount": float}
 ##   UNLOAD_CARGO   {"kind": String, "amount": float}
 ##   REFUND_BUILD   {"metals": float}
+##   ASSIGN_WORKER  {"building": StringName}
+##   UNASSIGN_WORKER{"building": StringName}
+##   SCRAP_STRUCTURE{"building": StringName}
+##
+## The three colony-staffing orders exist because those actions used to be pure local
+## mutations: a networked client applied them to its own replica and shipped nothing, so the
+## server's next snapshot simply overwrote them and the player's work vanished. Anything a
+## player does to a colony is now an order, and the client applies it locally *and* queues
+## it, exactly as `BUILD_STRUCTURE` already does.
 ##
 ## `SET_TAX` and `SET_RESEARCH` are retained rather than removed: the tax slider and the
 ## research allocation sliders are both gone from the UI, so nothing produces these any more,
@@ -154,13 +163,19 @@ static func make_recruit_troop(faction_id: int, planet_index: int) -> Order:
 	return o
 
 
-## Spend `metals` of a colony's stored metal against the construction in progress.
-static func make_boost_build(faction_id: int, planet_index: int, metals: float) -> Order:
+## Have `paid` metal assigned to the construction in progress on `planet_index`.
+##
+## `paid` is the *total* the project should be carrying, not a transfer to make, and that is
+## deliberate. The client mirrors every action onto its own copy of the colony and then ships
+## the order, so the authority applies an order whose effect the sender has already applied;
+## a delta would move the metal twice and a target lands in the same place either way. It
+## also makes a retried submission harmless rather than a second deduction.
+static func make_boost_build(faction_id: int, planet_index: int, paid: float) -> Order:
 	var o := Order.new()
 	o.type = 12  # BOOST_BUILD
 	o.faction = faction_id
 	o.target_planet = planet_index
-	o.payload = {"metals": metals}
+	o.payload = {"paid": paid}
 	return o
 
 
@@ -186,18 +201,53 @@ static func make_cargo(
 	return o
 
 
-## Pull `metals` back *out* of the construction in progress and back into storage.
+## Have `paid` metal assigned to the construction in progress on `planet_index`.
 ##
 ## The mirror of `make_boost_build`, and deliberately a separate type rather than a negative
-## `metals`: a signed payload is how a refund turns into a silent free grant the first time a
+## amount: a signed payload is how a refund turns into a silent free grant the first time a
 ## sign is lost, and the two directions have different caps (one is bounded by storage, the
-## other by what has already been assigned).
-static func make_refund_build(faction_id: int, planet_index: int, metals: float) -> Order:
+## other by what has already been assigned). `paid` is again a target rather than a transfer,
+## for the same idempotence reason.
+static func make_refund_build(faction_id: int, planet_index: int, paid: float) -> Order:
 	var o := Order.new()
 	o.type = 16  # REFUND_BUILD
 	o.faction = faction_id
 	o.target_planet = planet_index
-	o.payload = {"metals": metals}
+	o.payload = {"paid": paid}
+	return o
+
+
+## Post one more civilian to `building_id` on `planet_index`.
+static func make_assign_worker(faction_id: int, planet_index: int, building_id: StringName) -> Order:
+	var o := Order.new()
+	o.type = 17  # ASSIGN_WORKER
+	o.faction = faction_id
+	o.target_planet = planet_index
+	o.payload = {"building": building_id}
+	return o
+
+
+## Pull one civilian off `building_id` on `planet_index`.
+static func make_unassign_worker(
+	faction_id: int, planet_index: int, building_id: StringName
+) -> Order:
+	var o := Order.new()
+	o.type = 18  # UNASSIGN_WORKER
+	o.faction = faction_id
+	o.target_planet = planet_index
+	o.payload = {"building": building_id}
+	return o
+
+
+## Scrap one standing copy of `building_id` on `planet_index`, refunding half its cost.
+static func make_scrap_structure(
+	faction_id: int, planet_index: int, building_id: StringName
+) -> Order:
+	var o := Order.new()
+	o.type = 19  # SCRAP_STRUCTURE
+	o.faction = faction_id
+	o.target_planet = planet_index
+	o.payload = {"building": building_id}
 	return o
 
 
@@ -226,6 +276,11 @@ func describe() -> String:
 		15: return "Unload %s from fleet %d" % [payload.get("kind", "?"), fleet]
 		16: return "Refund %d metal from construction at planet %d" % [
 			int(payload.get("metals", 0.0)), target_planet]
+		17: return "Post a worker to %s at planet %d" % [
+			payload.get("building", "?"), target_planet]
+		18: return "Pull a worker off %s at planet %d" % [
+			payload.get("building", "?"), target_planet]
+		19: return "Scrap %s at planet %d" % [payload.get("building", "?"), target_planet]
 	return "Unknown order"
 
 

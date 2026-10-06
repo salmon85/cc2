@@ -544,25 +544,20 @@ static func _founding_colony(
 	p.surveyed = true
 	p.population = float(db.get("START_POPULATION"))
 
-	# A starting colony is never barren: it comes with a landed Colony Ship (which is where
-	# its housing and its first turn of food come from), a farm, a mine and enough power to
-	# run one City Complex once it is built. The exact composition follows the Phase 8
-	# roster: the Colony Ship is the only structure a colony cannot build for itself.
-	p.structures[&"colony_ship_building"] = 1
-	p.structures[&"farm"] = 2
-	p.structures[&"mine"] = 1
-	# Posted explicitly, once, here at founding.
+	# Only the landed Colony Ship. Farms and mines are built, not granted.
 	#
-	# Workers are assigned by hand everywhere else, and nothing in the turn pipeline assigns
-	# them -- which is right, and left every generated homeworld with three colonists and
-	# nobody on either farm. Those colonies produced nothing, went short on turn one, and
-	# started rolling deaths while the panel showed them in surplus. The founding assignment is
-	# the colony's initial condition, not an auto-assignment: it is written once and then
-	# `reconcile_workers` leaves it alone until the player touches `+` / `-` or somebody dies.
-	var hands := int(floor(p.population))
-	var on_farms := mini(2, hands)
-	p.worker_assignment[&"farm"] = on_farms
-	p.worker_assignment[&"mine"] = mini(1, maxi(0, hands - on_farms))
+	# The two farms and one mine that used to be written here were not a starting *condition*
+	# so much as a substitute for the player making one: the colonies came pre-staffed and
+	# nobody ever pressed `+`. That is a decision dressed as a default, and it hid the whole
+	# mechanic -- a colony that opens with its labour already posted teaches the player that
+	# the panel is a readout rather than a decision.
+	#
+	# Three colonists on a bare world is still playable: the Colony Ship's own pantry carries
+	# them, `STARTING_FOOD` banks three turns of slack, and the first farm is affordable out
+	# of `STARTING_METALS`. What the colony does not do is produce anything until somebody
+	# posts somebody to something.
+	p.structures[&"colony_ship_building"] = 1
+	p.worker_assignment.clear()
 
 	# Stockpiles floored rather than left to `seed_reserves`. The orbit penalty scales a
 	# homeworld's reserves by as little as 0.45, so a starting colony on a cold outer ring

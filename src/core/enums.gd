@@ -79,10 +79,13 @@ enum OrderType {
 	LOAD_CARGO,   ## Load food / metal / power / troops from a planet.
 	UNLOAD_CARGO, ## Unload the same back onto a planet.
 	REFUND_BUILD, ## Pull metal back out of the construction in progress.
+	ASSIGN_WORKER, ## Post one more civilian to a staffable structure.
+	UNASSIGN_WORKER, ## Pull one civilian off a staffable structure.
+	SCRAP_STRUCTURE, ## Scrap a standing structure, refunding half its cost.
 }
 
 ## The highest `OrderType` ordinal the wire format accepts.
-const MAX_ORDER_TYPE: int = 16
+const MAX_ORDER_TYPE: int = 19
 
 ## How a colony spends its per-turn construction allowance.
 enum BuildMode {
