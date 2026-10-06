@@ -109,6 +109,15 @@ func _refresh_planet() -> void:
 
 	lines.append(Format.field("TYPE", String(p.type_id).capitalize()))
 
+	# Recomputed here, not read from the cache as it happens to stand.
+	#
+	# The panel is the only reader that can be looking at a colony mid-turn -- the player has
+	# just pressed Build, or just scrapped something, and the resolver has not run since -- so
+	# a panel that trusts a cache is a panel that prints the previous turn's numbers. It cost
+	# `Food 300/0` once because nothing had ever written the cached figure at all; the fix is
+	# to ask the colony rather than to trust that somebody remembered to tell the panel.
+	p.refresh_capacities(_controller.db)
+
 	# A world the player has merely visited reports no economy at all.
 	#
 	# It used to print `POPULATION 0 (0/0)` and `METAL 0 (+0)` -- zeros that were true, but
@@ -136,7 +145,7 @@ func _refresh_planet() -> void:
 	lines.append(Format.field("POPULATION", "%d (%d/%d)" % [
 		int(round(p.population)), employed, idle_population(p)]))
 	lines.append(Format.field("TROOPS", str(p.troops)))
-	lines.append(Format.field("HOUSING", "%d" % int(p.housing)))
+	lines.append(Format.field("HOUSING", "%d" % int(p.get_max_housing())))
 
 	# Food: one line, current over max, with the per-turn net in brackets.
 	#
@@ -145,7 +154,7 @@ func _refresh_planet() -> void:
 	# the reader's eye went to the static part and the moving part scrolled past unremarked.
 	# `(+7)` next to the bank it will change is the same information in one glance.
 	lines.append(Format.field("FOOD", "%d/%d (%s)" % [
-		int(p.food_stock), int(p.food_capacity), Format.signed_colored(_food_balance(p))]))
+		int(p.food_stock), int(p.get_max_food()), Format.signed_colored(_food_balance(p))]))
 
 	# Power: current over max, with generation minus draw in brackets.
 	#
@@ -154,7 +163,7 @@ func _refresh_planet() -> void:
 	# nothing -- the format printed the sign of zero as a minus sign. One net figure, computed
 	# the way a player would: a Nuclear plant at +40 against a City Complex at 10 is +30.
 	lines.append(Format.field("POWER", "%d/%d (%s)" % [
-		int(p.power), int(p.power_capacity), Format.signed_colored(_power_balance(p))]))
+		int(p.power), int(p.get_max_power()), Format.signed_colored(_power_balance(p))]))
 
 	# The Phase 8 building roster, in the order a player thinks about it. `space_port` is in
 	# `_ROSTER` and so is in `_is_economic`: it used to be printed on its own line here *and*

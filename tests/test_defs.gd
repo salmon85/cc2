@@ -238,7 +238,11 @@ func _test_buildings(defs: Node) -> void:
 	_t.eq(int(pad.get("max_per_colony")), 1, "one Colony Ship per world")
 	_t.near(pad.get("yield_amount"), 5.0, 0.001, "a Colony Ship makes 5 food per turn")
 	_t.near(pad.get("metal_per_turn"), 5.0, 0.001, "a Colony Ship makes 5 metal per turn")
-	_t.eq(int(pad.get("pop_housed")), 5, "a Colony Ship houses 5 pop")
+	# The five berths are `BASE_HOUSING`, not a structure field. Asserted here as an absence
+	# because the failure it would cause is silent: a kit holding five *on top of* a base of
+	# five houses ten, and every printed housing figure stops matching the colony.
+	_t.eq(int(pad.get("pop_housed")), 0,
+		"a Colony Ship's berths are the base housing, not a second five on top")
 
 	var port := defs.call("building", &"space_port") as Resource
 	_t.near(port.get("cost_metals"), 100.0, 0.001, "a Space Port costs 100 metal")

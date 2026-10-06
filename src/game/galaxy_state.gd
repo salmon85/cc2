@@ -326,6 +326,9 @@ func rebind_definitions(defs: Node = null) -> bool:
 	var planet_types := registry.get("planet_types") as Dictionary
 	var hulls := registry.get("ship_hulls") as Dictionary
 	var tech := registry.get("tech_nodes") as Dictionary
+	# Bound onto every body alongside its type, so `get_max_food` and friends need no registry
+	# handed to them and a panel cannot accidentally ask without one.
+	var buildings := registry.get("buildings") as Dictionary
 	var complete := true
 
 	for p in planets:
@@ -334,6 +337,7 @@ func rebind_definitions(defs: Node = null) -> bool:
 			push_error("[GalaxyState] planet %d references unknown type '%s'" % [p.index, p.type_id])
 			complete = false
 		p.bind_type(type_res)
+		p.bind_buildings(buildings)
 
 	for id: int in fleets:
 		(fleets[id] as FleetState).bind_hulls(hulls)

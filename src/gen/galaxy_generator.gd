@@ -306,6 +306,10 @@ static func _populate_planets(
 		body.reserve_metals *= orbit_penalty
 		body.reserve_rare *= orbit_penalty
 		body.bind_type(types[chosen_cls])
+		# Bound here as well as in `rebind_definitions`: generation is complete before the
+		# caller rebinds, and a colony that cannot answer `get_max_food` between the two is a
+		# colony whose panel reads zero.
+		body.bind_buildings(defs.get("buildings") as Dictionary)
 		galaxy.planets.append(body)
 
 		types_here.append(types[chosen_cls])
@@ -507,28 +511,28 @@ static func _founding_colony(
 	p.power = 5.0
 
 
-## Give each faction a starting force, so turn 1 always has a legal move.
+## A new empire starts with nothing in orbit.
 ##
-## One Colony Ship (to settle a second world) and one Exploration Ship (to survey this one),
-## parked over the homeworld. Deliberately small: the Phase 8 roster is a *ladder* the player
-## climbs by population, so handing out a destroyer here would skip the first four rungs of
-## it and the milestone unlocks would have nothing left to give.
+## There used to be a hard-coded starting force here: a Colony Ship and an Exploration Ship
+## over every homeworld, granted by the generator rather than by anything the player did. It
+## was a gift, and it made three claims untrue at once -- that a colony ship is something you
+## begin with rather than something you launch, that scouting is free, and that the Space Port
+## is where hulls come from. It also meant the orbital fleet a player had was never entirely
+## theirs, which is the same complaint that has been made about the map's other gifts.
+##
+## The consequence is worth stating plainly: a new empire cannot settle a second world until
+## it has built a Space Port and laid down a Colony Ship, and cannot survey until it has an
+## Exploration Ship. That is the cost of the change, and it is the intended one -- the first
+## hull a player owns should be one they chose to build.
+##
+## Kept as a named, empty stage rather than deleted, because "generate a galaxy" is a sequence
+## of named stages and removing one changes the shape of the call it sits in. It also leaves an
+## obvious place for a scenario that *does* want to seed fleets.
 static func _establish_starting_forces(
-	galaxy: GalaxyState, rng: RandomNumberGenerator, defs: Node
+	_galaxy: GalaxyState, _rng: RandomNumberGenerator, _defs: Node
 ) -> void:
-	var hulls := defs.get("ship_hulls") as Dictionary
-	for f in galaxy.factions:
-		var home := _homeworld_of(galaxy, f.id)
-		if home == -1:
-			continue
-		var starting := FleetState.new()
-		starting.bind_hulls(hulls)
-		starting.owner = f.id
-		starting.system = home
-		starting.name = "%s Fleet" % f.name
-		starting.add_ships(&"colony_ship", 1)
-		starting.add_ships(&"exploration_ship", 1)
-		galaxy.add_fleet(starting)
+	# Intentionally empty. Every faction's orbit is empty at generation.
+	return
 
 
 ## A faction's homeworld planet index, or -1.

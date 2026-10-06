@@ -110,21 +110,47 @@ const COLONY_SENSOR_RANGE := 300.0
 ## nagged about it.
 const FOOD_STORAGE_PER_GRANARY := 1000.0
 
-## Food every colony can keep without a granary: the landed Colony Ship's own hold. Without
-## it a brand new colony would have zero capacity and would overflow its very first meal.
-const BASE_FOOD_STORAGE := 100.0
-
-## Power every colony can bank without an Energy Storage structure.
-const BASE_POWER_STORAGE := 100.0
-
-## Housing a colony has before it builds anything.
+## Food every colony can keep without a granary: the landed Colony Ship's own pantry.
 ##
-## Zero, and named anyway. The colony ship's own berths are the only housing a new colony
-## has, and a colony with no City Complex and no landed Colony Ship genuinely has nowhere for
-## a new person to live -- so a positive floor would let a colony grow out of a body it never
-## built. The constant exists so the capacity calculation reads as `base + contributions`
-## rather than as "just the contributions", which is what it looks like otherwise.
-const BASE_HOUSING := 0.0
+## Fifty, not a hundred, and the number matters because it is the *starting* figure a player
+## reads on turn one. A colony that began able to hold a hundred food had three weeks of slack
+## it never had to think about; fifty is the kit's pantry and nothing more, so the first
+## Granary is a real decision rather than a formality.
+##
+## As with `BASE_HOUSING`, the kit's contribution is folded into the base rather than left on
+## the structure: the printed formula is `50 + granaries * 1000`, and a colony that still had
+## to *also* add the kit's own 50 to that would be storing a hundred before building anything.
+const BASE_FOOD_STORAGE := 50.0
+
+## Power every colony can bank without an Energy Storage structure: the landed kit's cells.
+##
+## Ten, and deliberately *small*. Ten power is about one City Complex. A colony starting with
+## a hundred could feed four complexes before anyone had to build a reactor, which is how the
+## grid ends up free and power stops being a constraint. Folded into the base for the same
+## reason as the food figure.
+const BASE_POWER_STORAGE := 10.0
+
+## Food the landed Colony Ship itself contributes, per copy.
+##
+## Named rather than folded into `BASE_FOOD_STORAGE`, because the two are different things:
+## this is what the *structure* is worth, so a colony whose colony ship was scrapped loses it,
+## while the base is what any colony has before it builds anything. Both are 50 for a starting
+## colony, which is the point -- the baseline a player sees is the kit they landed with.
+
+
+
+## Housing a colony has before it builds anything: five.
+##
+## These are the landed Colony Ship's five berths, held as a *base* rather than as the
+## structure's own `pop_housed`. That is a deliberate choice of where the number lives: with
+## the kit contributing the five, the housing figure would be "the kit's berths, if you still
+## have your kit" -- which is a colony that never grows from two people because it lost a
+## building, and it makes the printed formula a two-term sum with a conditional.
+##
+## As a base it reads the way the player thinks: `5 + city complexes * 20`, with the five being
+## what you arrived with. A colony that has been invaded, or whose kit was scrapped, still
+## houses five -- and has to build its first City Complex before it grows past that.
+const BASE_HOUSING := 5.0
 
 ## Share of a structure's original metal cost returned when it is scrapped.
 ##

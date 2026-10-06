@@ -56,6 +56,7 @@ func _initialize() -> void:
 	_test_worker_assignment()
 	_test_scrapping()
 	_test_starvation_releases_a_worker()
+	_test_starting_state_and_baselines()
 	_test_troops_and_cargo()
 	_test_survey()
 	_test_research()
@@ -842,17 +843,18 @@ func _test_growth_curve() -> void:
 	if colony == null:
 		return
 
-	# No housing: never grows, whatever the curve says.
+	# Housing the baseline is full: never grows, whatever the curve says.
 	var homeless := _habitable_colony(g)
+	homeless.population = 8.0
 	_set_structures(homeless, {&"farm": 8, &"granary": 1})
-	homeless.population = 4.0
 	homeless.food_stock = 500.0
 	var held := homeless.population
 	for _i in 40:
 		_staff_all(homeless)
 		ColonySim.simulate_colony(g, homeless, faction, _defs, _db, _rng(300 + _i))
 		homeless.food_stock = 500.0
-	sup.eq(homeless.population, held, "no housing means no growth, whatever the chance")
+	sup.eq(homeless.population, held,
+		"housing the baseline five is not enough for eight people, whatever the chance")
 
 	# Below two pop: never grows.
 	var tiny := _habitable_colony(g)
@@ -1138,7 +1140,10 @@ func _test_storage_capacity() -> void:
 		housing_probe.food_stock = 500.0
 		_staff_all(housing_probe)
 		ColonySim.simulate_colony(g, housing_probe, faction, _defs, _db, _rng(40))
-		sup.near(housing_probe.housing, 0.0, 0.001, "a bare colony houses nobody")
+		# Five, not zero: the base *is* the landed kit's five berths, folded in so the
+		# printed formula reads `5 + city complexes * 20` whatever the colony still owns.
+		sup.near(housing_probe.housing, float(_db.get("BASE_HOUSING")), 0.001,
+			"a bare colony houses the baseline five")
 		# Growth is impossible without housing, which is what makes the Complex worth building.
 		var held := housing_probe.population
 		for _i in 10:
@@ -1157,7 +1162,7 @@ func _test_storage_capacity() -> void:
 			if housing_probe.count(&"city_complex") > 0:
 				break
 		sup.eq(housing_probe.count(&"city_complex"), 1, "the City Complex is built")
-		sup.near(housing_probe.housing, 20.0, 0.001,
+		sup.near(housing_probe.housing, float(_db.get("BASE_HOUSING")) + 20.0, 0.001,
 			"and raises housing by 20 in the same turn")
 		# And now it can grow, which is the point of the capacity.
 		sup.ok(housing_probe.housing > housing_probe.population,
@@ -1213,8 +1218,8 @@ func _test_storage_capacity() -> void:
 			"granaries raise food storage only")
 		sup.near(mixed.power_capacity, base_power + 1000.0, 0.001,
 			"and energy storage raises power storage only")
-		sup.near(mixed.housing, 0.0, 0.001,
-			"and neither houses anybody")
+		sup.near(mixed.housing, float(_db.get("BASE_HOUSING")), 0.001,
+			"and neither houses anybody beyond the baseline five")
 
 
 # --- construction economics ----------------------------------------------
@@ -1362,8 +1367,8 @@ func _test_structure_capacity_contributions() -> void:
 		"a colony with no granaries stores exactly the base food capacity")
 	sup.near(float(base.get("power", 0.0)), float(_db.get("BASE_POWER_STORAGE")), 0.001,
 		"and exactly the base power capacity")
-	sup.near(float(base.get("housing", 0.0)), 0.0, 0.001,
-		"and houses nobody, because a landed colony ship is the only baseline housing")
+	sup.near(float(base.get("housing", 0.0)), float(_db.get("BASE_HOUSING")), 0.001,
+		"and houses the baseline five, which is what the colony ship arrived with")
 
 	# One at a time, each measured as the delta it is responsible for.
 	var cases: Array = [
@@ -1391,7 +1396,8 @@ func _test_structure_capacity_contributions() -> void:
 		"two granaries put 2000 food above the base on the planet itself")
 	sup.near(colony.power_capacity, float(_db.get("BASE_POWER_STORAGE")) + 3000.0, 0.001,
 		"three energy stores put 3000 power above the base")
-	sup.near(colony.housing, 20.0, 0.001, "and one city complex houses 20")
+	sup.near(colony.housing, float(_db.get("BASE_HOUSING")) + 20.0, 0.001,
+		"and one city complex adds its 20 on top of the baseline five")
 
 
 ## Taking assigned metal back out returns it to storage, and bottoms out at zero assigned.
@@ -2440,7 +2446,8 @@ func _test_colony_sim() -> void:
 	# City Complexes worth building.
 	var homeless := _habitable_colony(g)
 	_set_structures(homeless, {&"farm": 4, &"granary": 1})
-	homeless.population = 4.0
+	# Eight against the baseline five, so housing is the gate rather than food.
+	homeless.population = 8.0
 	homeless.food_stock = 100.0
 	var homeless_pop := homeless.population
 	for _i in 20:
@@ -2448,8 +2455,9 @@ func _test_colony_sim() -> void:
 		ColonySim.simulate_colony(g, homeless, fa, _defs, _db, _rng(31000 + _i))
 		homeless.food_stock = 100.0
 	sup.eq(homeless.population, homeless_pop,
-		"a colony with no housing never grows, however well fed it is")
-	sup.near(homeless.housing, 0.0, 0.001, "and it really has no housing")
+		"a colony with no city complex never grows, however well fed it is")
+	sup.near(homeless.housing, float(_db.get("BASE_HOUSING")), 0.001,
+		"and it really is living in the baseline five")
 
 	# Below two pop there is nothing to grow from.
 	var tiny := _habitable_colony(g)
@@ -2480,8 +2488,8 @@ func _test_colony_sim() -> void:
 	full.population = 12.0
 	full.food_stock = 0.0
 	# A granary plus the colony's own pantry, per GameDB's base holds.
-	sup.near(float(_db.get("BASE_FOOD_STORAGE")) + 1000.0, 1100.0, 0.001,
-		"a granary adds its 1000 to the colony's base pantry")
+	sup.near(float(_db.get("BASE_FOOD_STORAGE")) + 1000.0, 1050.0, 0.001,
+		"a granary adds its 1000 to the colony's base pantry: 50 + 1000 = 1050")
 
 	# Farms are capped per colony, so a colony cannot overflow in one turn; it banks a
 	# surplus turn after turn until the store fills. That is the ordinary way a player meets
@@ -2568,12 +2576,21 @@ func _test_colony_sim() -> void:
 		gpower, powered, gpower.faction(0), _defs, _db, _rng(41))
 	sup.near(twelve.power_generated, 12.0, 0.001, "twelve solar arrays generate 12 power")
 	sup.near(twelve.power_drawn, 0.0, 0.001, "and with no City Complex, nothing draws any")
-	sup.near(powered.power, 12.0, 0.001, "so it all banks")
+	# Twelve units into a ten-unit battery leaves two behind. The clamp is the point: the
+	# base bank is deliberately small, so a colony that over-generates without building an
+	# Energy Storage is losing most of what it makes.
+	sup.near(powered.power, minf(12.0, float(_db.get("BASE_POWER_STORAGE"))), 0.001,
+		"so it banks until the base battery is full and no further")
 	sup.ok(not twelve.power_short, "and a colony with power to spare is not short")
 
 	# A City Complex draws 10. Two of them on 12 units of generation is a shortfall, and it
-	# must be reported rather than silently tolerated. It takes several turns to drain the
+	# must be reported rather than silently tolerated. It takes a couple of turns to drain the
 	# bank: the colony spends what it has before it starts missing.
+	#
+	# The Energy Storage matters here. Without one the battery holds ten, the surplus is
+	# clamped away, and the colony is short on its *first* turn -- which is a true statement
+	# about the base bank but says nothing about draining a bank over time.
+	powered.structures[&"energy_storage"] = 1
 	powered.structures[&"city_complex"] = 2
 	var drew_power := 0
 	var short := false
@@ -2607,7 +2624,10 @@ func _test_colony_sim() -> void:
 	var over := ColonySim.simulate_colony(
 		gpower2, flooded, gpower2.faction(0), _defs, _db, _rng(43))
 	sup.near(over.power_generated, 20.0, 0.001, "twenty arrays generate 20 power")
-	sup.near(flooded.power_capacity, 100.0, 0.001,
+	# Ten power is the base battery -- the landed Colony Ship's own cells, about one City
+	# Complex. Twenty arrays generating into it lose almost all of their output, which is the
+	# pressure that points a player at Energy Storage.
+	sup.near(flooded.power_capacity, float(_db.get("BASE_POWER_STORAGE")), 0.001,
 		"with nowhere to put it but the base battery")
 	# Fill the base battery, then keep generating: the surplus is lost, silently.
 	var capped := false
@@ -2617,7 +2637,8 @@ func _test_colony_sim() -> void:
 		if is_equal_approx(flooded.power, flooded.power_capacity):
 			capped = true
 	sup.ok(capped, "the bank fills to its capacity")
-	sup.near(flooded.power, 100.0, 0.001, "and no further, so surplus power is lost")
+	sup.near(flooded.power, float(_db.get("BASE_POWER_STORAGE")), 0.001,
+		"and no further, so surplus power is lost")
 	sup.ok(not _warns(flooded, &"food_overflow"),
 		"and power overflow raises NO warning")
 
@@ -2626,9 +2647,9 @@ func _test_colony_sim() -> void:
 	flooded.structures[&"energy_storage"] = 1
 	var banked := ColonySim.simulate_colony(
 		gpower2, flooded, gpower2.faction(0), _defs, _db, _rng(45))
-	sup.near(flooded.power_capacity, 1100.0, 0.001,
+	sup.near(flooded.power_capacity, float(_db.get("BASE_POWER_STORAGE")) + 1000.0, 0.001,
 		"an Energy Storage raises the ceiling by 1000")
-	sup.ok(flooded.power > 100.0,
+	sup.ok(flooded.power > float(_db.get("BASE_POWER_STORAGE")),
 		"so the surplus is banked rather than wasted", "%.0f" % flooded.power)
 	sup.ok(not banked.power_short, "and a colony storing power is not short")
 
@@ -2777,12 +2798,18 @@ func _test_colony_sim() -> void:
 	sup.eq(walled.count(&"city_complex"), 1,
 		"the structures already built are untouched by the shortfall")
 
-	# One reactor fixes it, and then a second City Complex may be started.
-	walled.structures[&"solar"] = 2
-	walled.power = 40.0
+	# Enough reactors fix it, and then a second City Complex may be started.
+	#
+	# Twenty arrays, not two: a City Complex draws 10 and an array makes 1, so two arrays were
+	# never going to cover anything and the fixture used to top the bank up by hand instead --
+	# which, with a 10-unit base battery, is no longer even representable. The colony has to
+	# earn its way out of the shortfall, which is the whole of the rule being tested.
+	walled.structures[&"solar"] = 20
+	walled.structures[&"energy_storage"] = 1
 	_staff_all(walled)
+	walled.power = 0.0
 	ColonySim.simulate_colony(gpow, walled, gpow.faction(0), _defs, _db, _rng(71))
-	sup.ok(not walled.is_power_short(), "two reactors cover the deficit")
+	sup.ok(not walled.is_power_short(), "twenty arrays cover the deficit")
 	sup.ok(TurnResolver.can_queue_structure(walled, city_def, gpow.faction(0), _db),
 		"so the colony may start another power-drawing structure")
 
@@ -2972,7 +2999,12 @@ func _test_landed_colony_ship_entity() -> void:
 	var def := _defs_building(&"colony_ship_building") as Resource
 	sup.ok(def != null, "the landed colony ship has a definition")
 	if def != null:
-		sup.eq(int(def.get("pop_housed")), 5, "it houses five")
+		# Its berths, pantry and cells live in the base constants rather than on the
+		# structure -- see `BASE_HOUSING`. As fields they would be a second five on top of a
+		# base of five, and the printed formula would stop matching what the colony has.
+		sup.eq(int(def.get("pop_housed")), 0, "its berths are the base, not an extra")
+		sup.eq(float(def.get("food_store")), 0.0, "and its pantry is the base too")
+		sup.eq(float(def.get("energy_store")), 0.0, "and so are its cells")
 		var caps := ColonySim.capacity_for(planet, _defs.get("buildings") as Dictionary, _db)
 		sup.near(float(caps.get("housing", 0.0)), 5.0, 0.001,
 			"so a world with nothing else built houses five")
@@ -3036,7 +3068,8 @@ func _test_capacity_sync() -> void:
 	colony.build_total_turns = int(city.get("build_turns"))
 	colony.build_metal = float(city.get("cost_metals"))
 	ColonySim.finish_construction(colony, buildings, _db)
-	sup.near(colony.housing, 20.0, 0.001, "and a landed city complex raises housing")
+	sup.near(colony.housing, float(_db.get("BASE_HOUSING")) + 20.0, 0.001,
+		"and a landed city complex raises housing by 20")
 
 	# Scrapping takes them straight back, in the same turn, for the same reason.
 	var food_now := colony.food_capacity
@@ -3236,6 +3269,135 @@ func _test_starvation_releases_a_worker() -> void:
 	sup.ok(starved, "and it does eventually")
 	sup.ok(ColonySim.workers_assigned(colony) <= int(colony.population),
 		"with no more jobs than people left afterwards")
+
+
+# --- Phase 8 corrections IV: starting state and storage baselines ----------
+
+## A new empire begins with an empty sky, and its storage is the landed kit's.
+##
+## One function because the two are the same fixture: a colony that has landed a Colony Ship
+## *is* the starting colony, so its pantry, its cells and its berths are the baseline every
+## other colony is measured against.
+func _test_starting_state_and_baselines() -> void:
+	sup.begin("starting state and storage baselines")
+
+	# --- no starting ships ----------------------------------------------------
+	var g := _galaxy(24680)
+	sup.eq(g.fleets.size(), 0,
+		"a freshly generated galaxy has no fleets at all (got %d)" % g.fleets.size())
+	for f in g.factions:
+		sup.eq(g.fleets_of(f.id).size(), 0,
+			"%s starts with an empty orbit" % f.name)
+		var home := -1
+		for p in g.planets:
+			if p.owner == f.id and p.colonized:
+				home = p.index
+				break
+		sup.ok(home >= 0, "%s has a homeworld" % f.name)
+		if home >= 0:
+			sup.eq(g.orbital_fleet(home, f.id), null,
+				"nothing is stationed over %s's homeworld" % f.name)
+
+	# The absence is a *generator* property, so it has to hold for another seed too rather
+	# than being a coincidence of one galaxy's layout.
+	for seed_value in [7, 999, 31337]:
+		var other := _galaxy(seed_value)
+		sup.eq(other.fleets.size(), 0,
+			"seed %d also generates with nothing in orbit" % seed_value)
+
+	# --- the baselines the brief specifies ------------------------------------
+	sup.eq(float(_db.get("BASE_FOOD_STORAGE")), 50.0,
+		"base food storage is 50")
+	sup.eq(float(_db.get("BASE_POWER_STORAGE")), 10.0,
+		"base power storage is 10")
+	sup.eq(float(_db.get("BASE_HOUSING")), 5.0,
+		"base housing is 5 -- the kit's berths, held as a base rather than on the structure")
+
+	var kit := _defs_building(&"colony_ship_building") as Resource
+	sup.ok(kit != null, "the landed colony ship has a definition")
+	if kit == null:
+		return
+	# The five berths live in `BASE_HOUSING`, not on the structure: as a structure field they
+	# would be a second five on top of the base, and the printed formula would stop matching
+	# what the colony actually has.
+	sup.eq(int(kit.get("pop_housed")), 0, "its berths are the base, not an extra")
+	sup.eq(float(kit.get("food_store")), 0.0, "and its pantry is the base too")
+	sup.eq(float(kit.get("energy_store")), 0.0, "and so are its cells")
+
+
+	# A starting colony: homeworld, colonized, with its kit landed.
+	var colony := _habitable_colony(g)
+	if colony == null:
+		sup.ok(false, "a world exists to settle")
+		return
+	_set_structures(colony, {&"colony_ship_building": 1})
+	colony.population = 5.0
+	ColonySim.recount_capacity(colony, _defs.get("buildings") as Dictionary, _db)
+
+	sup.eq(int(colony.get_max_food()), 50,
+		"a starting colony's max food is 50, not zero")
+	sup.eq(int(colony.get_max_power()), 10,
+		"and its max power is 10, not zero")
+	sup.eq(int(colony.get_max_housing()), 5,
+		"and its housing is the kit's five")
+
+	# --- the formulas, one structure at a time --------------------------------
+	_set_structures(colony, {&"colony_ship_building": 1, &"granary": 1})
+	ColonySim.recount_capacity(colony, _defs.get("buildings") as Dictionary, _db)
+	sup.eq(int(colony.get_max_food()), 1050,
+		"50 + one granary * 1000 = 1050")
+
+	_set_structures(colony, {&"colony_ship_building": 1, &"energy_storage": 1})
+	ColonySim.recount_capacity(colony, _defs.get("buildings") as Dictionary, _db)
+	sup.eq(int(colony.get_max_power()), 1010,
+		"10 + one energy storage * 1000 = 1010")
+
+	_set_structures(colony, {&"colony_ship_building": 1, &"city_complex": 1})
+	ColonySim.recount_capacity(colony, _defs.get("buildings") as Dictionary, _db)
+	sup.eq(int(colony.get_max_housing()), 25,
+		"5 + one city complex * 20 = 25")
+
+	# Two of each, so the multiplication is not a coincidence of counting to one.
+	_set_structures(colony, {&"colony_ship_building": 1, &"granary": 2,
+		&"energy_storage": 3, &"city_complex": 4})
+	ColonySim.recount_capacity(colony, _defs.get("buildings") as Dictionary, _db)
+	sup.eq(int(colony.get_max_food()), 2050, "two granaries: 50 + 2000")
+	sup.eq(int(colony.get_max_power()), 3010, "three energy storages: 10 + 3000")
+	sup.eq(int(colony.get_max_housing()), 85, "four city complexes: 5 + 80")
+
+	# --- and the movement is immediate ---------------------------------------
+	# The complaint the brief reports is a panel printing a stale maximum. Both directions
+	# are checked on the colony itself, without a turn in between, because that is the whole
+	# claim: a structure that has landed is counted now.
+	var live := _habitable_colony(_galaxy(24681))
+	if live != null:
+		_set_structures(live, {&"colony_ship_building": 1})
+		live.population = 5.0
+		ColonySim.recount_capacity(live, _defs.get("buildings") as Dictionary, _db)
+		sup.eq(int(live.get_max_food()), 50, "a starting colony starts at 50 food")
+		var granary2 := _defs_building(&"granary") as Resource
+		live.building_queue[&"granary"] = 1
+		live.build_turns_remaining = int(granary2.get("build_turns"))
+		live.build_total_turns = int(granary2.get("build_turns"))
+		live.build_metal = float(granary2.get("cost_metals"))
+		live.reserve_metals = 10000.0
+		ColonySim.finish_construction(live, _defs.get("buildings") as Dictionary, _db)
+		sup.eq(int(live.get_max_food()), 1050,
+			"and a granary landing takes it to 1050 with no turn in between")
+		ColonySim.destroy_structure(live, &"granary",
+			_defs.get("buildings") as Dictionary, _db)
+		sup.eq(int(live.get_max_food()), 50,
+			"and scrapping that granary puts it straight back to 50")
+
+		# `refresh_capacities` is what the panel calls, so it has to agree with the sim.
+		live.food_capacity = 0.0
+		live.power_capacity = 0.0
+		live.housing = 0.0
+		live.refresh_capacities(_db)
+		sup.eq(int(live.get_max_food()), 50,
+			"and a panel that refreshes before reading recovers the figure")
+		sup.eq(int(live.get_max_power()), 10, "including the power maximum")
+		sup.eq(int(live.get_max_housing()), 5, "and the housing maximum")
 
 
 # --- research -----------------------------------------------------------

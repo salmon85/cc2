@@ -1689,3 +1689,85 @@ ratio, because `hold 400/0` is the exact phantom the ceiling created.
   being non-blocking, the Destroy menu and its refunds, the travel prompt, the flight-path
   toggle, the camera snap, unclaimed-world stats, orbit-driven labels, and the cargo sliders
   matching an unbounded hold.
+
+---
+
+# Phase 8 corrections IV: starting state, storage baselines, one source of truth
+
+## A new empire starts with an empty sky
+
+`GalaxyGenerator._establish_starting_forces` used to grant every faction a Colony Ship and an
+Exploration Ship over its homeworld. That was a gift, and it made three claims untrue at once:
+that a colony ship is something you begin with rather than something you launch, that scouting
+is free, and that the Space Port is where hulls come from. It is now a named but empty stage,
+so "generate a galaxy" keeps its shape and a scenario that *does* want to seed fleets has an
+obvious place to put them.
+
+The consequence is worth stating plainly, because it is a real cost: **a new empire cannot
+settle a second world, or survey, or travel, until it has built a Space Port and laid down a
+hull.** That is the intended trade — the first ship a player owns should be one they chose to
+build — but it is a change to the opening of the game, not a cosmetic one.
+
+## The baseline is a base, not a structure field
+
+The requested figures are `50 + granaries * 1000`, `10 + energy storages * 1000` and
+`5 + city complexes * 20`. Note what the housing formula does *not* contain: a colony-ship term.
+So the kit's five berths, its fifty food and its ten power live in `BASE_HOUSING`,
+`BASE_FOOD_STORAGE` and `BASE_POWER_STORAGE`, and the structure's own `pop_housed`,
+`food_store` and `energy_store` are all zero.
+
+They were briefly authored the other way round — fifty and ten on the `colony_ship_building`
+resource — and that is a silent double count: the colony-ship's kind is `COLONY_PAD`, not
+`GRANARY` or `STORAGE`, so its `food_store` was never read at all, while its `pop_housed` was,
+giving `5 (base) + 5 (structure)` = ten berths against a formula that says five. Two thirds of
+that configuration happened to look right, which is the worst way for it to fail. The test that
+catches it is in `test_defs`, as an *absence*: `pop_housed == 0`.
+
+Putting the baseline in the base also makes the printed figures unconditional. A colony that
+was invaded, or that scrapped its Colony Ship, still houses five and still has a fifty-unit
+pantry, and has to build its first City Complex before it grows past five. The pantry surviving
+the kit while the berths do not is a genuine asymmetry, and it is now asserted as one rather
+than left to be discovered.
+
+## One source of truth, and the panel asks it rather than trusting it
+
+`PlanetState` gained `get_max_food()`, `get_max_power()` and `get_max_housing()`, plus
+`refresh_capacities(db)`. The cached figures behind them are written by exactly one function --
+`ColonySim.recount_capacity` -- so there is no second derivation to drift.
+
+`PlanetState.bind_buildings` caches the building registry alongside the cached `PlanetTypeData`,
+so the accessors need no `Defs` handed to them. That matters: the `Food 300/0` symptom is
+exactly what a caller that passes no registry gets.
+
+**The panel calls `refresh_capacities` before it reads.** It is the only reader that can be
+looking at a colony mid-turn -- the player has just pressed Build, or just scrapped something,
+and the resolver has not run since -- so a panel that trusts a cache is a panel printing the
+previous turn's numbers. Asking the colony is cheap and cannot be stale.
+
+## Capacities announce themselves
+
+`SessionController.capacities_changed(planet_index)` fires from a single private helper, on
+every action that can move a maximum: a structure landing, a structure being scrapped, a Colony
+Ship touching down, and a worker being posted. Narrower than `state_changed` on purpose --
+that fires on every selection change, so a panel listening for "my numbers moved" would be
+woken dozens of times a turn and would still have to diff to find out whether anything actually
+changed.
+
+The GUI suite asserts the event through the *real* player path -- pressing Build, then scrapping
+through the controller -- rather than through a helper invented for the test.
+
+## Verification
+
+- `tools/verify.sh`: **12 suites, 3031 checks, 0 failed, ALL GREEN**, exit 0.
+- `test_turn_engine`: 1014 -- no fleet in orbit across three seeds, the 50/10/5 baselines, each
+  formula checked with one structure and with several, and both directions of the movement
+  happening with no turn in between.
+- `test_galaxy_gen`: 343 -- every faction's orbit empty at generation, and the homeworld's
+  orbital fleet is null. The old assertion indexed `f.fleets[0]` unguarded, which turned an
+  empty roster into a hard script error *after* the summary line was printed: the suite
+  reported "OK, 329 checks passed" while the engine logged a crash.
+- `test_gui_integration`: 625 -- `Food 300/50`, a granary taking it to `300/1050` on the next
+  refresh, `Power 10/1010`, housing 25, the event firing through the Build and Destroy buttons,
+  and the pantry outliving the kit.
+- `test_defs`: 244 -- the kit's berths asserted as an absence, so the double count cannot come
+  back quietly.

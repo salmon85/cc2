@@ -62,7 +62,7 @@ func _initialize() -> void:
 		"build_button", "landing_button", "travel_modal",
 		"immediate_bars", "metal_dialog", "travel_flow", "cargo_modal",
 		"map_visuals", "economy_rows", "background_music",
-		"worker_scrap_ui", "travel_prompt_paths", "camera_snap_uncolonized",
+		"worker_scrap_ui", "live_capacity", "travel_prompt_paths", "camera_snap_uncolonized",
 		"orbit_labels", "cargo_slider",
 		"macro_build", "macro_map_stable", "ready_button", "end_turn", "networked_end_turn",
 		"end_turn_again",
@@ -120,6 +120,7 @@ func _process(_delta: float) -> bool:
 		"economy_rows": _step_panel_economy_rows()
 		"background_music": _step_background_music()
 		"worker_scrap_ui": _step_worker_and_scrap_ui()
+		"live_capacity": _step_live_capacity_display()
 		"travel_prompt_paths": _step_travel_prompt_and_paths()
 		"camera_snap_uncolonized": _step_camera_snap_and_uncolonized()
 		"orbit_labels": _step_orbit_labels()
@@ -830,8 +831,15 @@ func _step_fleet_orders() -> void:
 	if _client == null or _client.controller == null:
 		return
 	var c := _client.controller
+	# A new empire starts with an empty orbit, so the first thing these tests do is put one
+	# hull there -- which doubles as a standing check that the generator granted nothing.
+	sup.eq(c.player_fleets().size(), 0,
+		"a new empire has no fleet: everything it puts in orbit it builds")
+	var home := _first_colony()
+	if home != null:
+		_ensure_transport(home.index, &"exploration_ship")
 	var fleets := c.player_fleets()
-	sup.ok(not fleets.is_empty(), "the player starts with at least one fleet",
+	sup.ok(not fleets.is_empty(), "and one placed by hand is immediately usable",
 		"got %d" % fleets.size())
 	if fleets.is_empty():
 		return
@@ -3351,9 +3359,15 @@ func _step_travel_flow() -> void:
 		return
 	c.select_planet(colony.index)
 
-	# The starting force is parked over the homeworld, so that is a legal source.
+	# A new empire has an empty orbit, so the source world is given a ship first. Which is
+	# the point: "which world can you travel from" now starts as *none of them*, and the flow
+	# has to work from wherever the player chooses to build.
+	# Not asserted as "false" first: an earlier step may already have placed a hull here, and
+	# the absence that matters is asserted where the board is untouched -- in the fleet-order
+	# step, against the generator's output.
+	_ensure_transport(colony.index, &"corvette")
 	sup.ok(c.can_travel_from(colony.index),
-		"the homeworld is a legal source: the player has ships in orbit there")
+		"the homeworld becomes a legal source once it holds a ship")
 	sup.ok(not c.can_travel_from(_other_planet_index(colony.index)),
 		"an empty world is not")
 
@@ -3685,27 +3699,33 @@ func _step_panel_economy_rows() -> void:
 		"reads '%s'" % pop_line)
 
 	# And the net really is generation minus consumption, with no minus zero.
-	colony.power_generated = 40.0
-	colony.power_drawn = 10.0
+	#
+	# Stated as structures rather than as figures assigned onto the planet. The panel
+	# recomputes generation and draw from the roster before printing -- that is the fix for a
+	# stale panel -- so a hand-set total is overwritten by the next refresh, and a fixture that
+	# set it was asserting against a value nothing maintained.
+	colony.structures = {&"farm": 2, &"mine": 2, &"granary": 1,
+		&"nuclear": 1, &"city_complex": 1}
+	colony.power = 10.0
 	_client.inspector.refresh()
 	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("+30"),
 		"a Nuclear plant's +40 against a City Complex's 10 reads +30",
 		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
-	colony.power_generated = 0.0
-	colony.power_drawn = 0.0
+	colony.structures = {&"farm": 2, &"mine": 2, &"granary": 1}
+	colony.power = 0.0
 	_client.inspector.refresh()
 	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("+0"),
 		"and a grid drawing nothing reads +0, not -0",
 		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
 
-	# A real deficit keeps its sign.
-	colony.power_generated = 0.0
-	colony.power_drawn = 12.0
+	# A real deficit keeps its sign: two City Complexes draw 20 and nothing generates.
+	colony.structures = {&"farm": 2, &"mine": 2, &"granary": 1, &"city_complex": 2}
+	colony.power = 0.0
 	_client.inspector.refresh()
-	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("-12"),
+	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("-20"),
 		"while a genuine shortfall still reads negative",
 		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
-	colony.power_drawn = 0.0
+	colony.structures = {&"farm": 2, &"mine": 2, &"granary": 1}
 
 
 ## The client owns the music, and owns it without forcing an audio device on.
@@ -4164,6 +4184,134 @@ func _unowned_body(galaxy: GalaxyState) -> int:
 		if p.owner < 0 and not p.colonized:
 			return p.index
 	return -1
+
+
+## The left panel's maximums, live: the failure being fixed is `Food 300/0`.
+##
+## Linear on purpose -- one action, one assertion, one refresh. The earlier version of this
+## step asserted things in an order that let a queued-but-unfinished project stand in for a
+## landed one, and then blamed the panel for it.
+func _step_live_capacity_display() -> void:
+	sup.begin("capacity maximums update live")
+	if _client == null or _client.controller == null or _client.inspector == null:
+		return
+	var c := _client.controller
+	var colony := _first_colony()
+	if colony == null:
+		sup.ok(false, "the player starts with a colony")
+		return
+	var buildings: Dictionary = _defs.get("buildings") as Dictionary
+
+	# Re-select before every panel assertion. Pressing Build adopts whichever colony the
+	# macro panel's dropdown names, which is not necessarily the one under test.
+	var focus := func() -> void:
+		c.select_planet(colony.index)
+		_client.select_colony(colony.index)
+		_client.inspector.refresh()
+
+	# --- a starting colony: the kit landed and nothing else --------------------
+	c.queue.clear()
+	colony.building_queue.clear()
+	colony.build_metal = 0.0
+	colony.ship_queue.clear()
+	colony.population = 5.0
+	colony.food_stock = 300.0
+	colony.power = 10.0
+	colony.structures = {&"colony_ship_building": 1}
+	colony.worker_assignment = {}
+	colony.reserve_metals = 100000.0
+	focus.call()
+
+	sup.eq(int(colony.get_max_food()), 50, "a starting colony's max food is 50")
+	sup.eq(int(colony.get_max_power()), 10, "and its max power is 10")
+	sup.eq(int(colony.get_max_housing()), 5, "and its housing is the kit's five")
+	var food_row := _row_for(_client.inspector.planet_label().text, "FOOD")
+	sup.ok(food_row.contains("300/50"),
+		"the panel shows Food 300/50 rather than 300/0", "reads '%s'" % food_row)
+	sup.ok(food_row.contains("("), "with the per-turn net beside it", "reads '%s'" % food_row)
+	sup.ok(_row_for(_client.inspector.planet_label().text, "POWER").contains("10/10"),
+		"and Power 10/10",
+		"reads '%s'" % _row_for(_client.inspector.planet_label().text, "POWER"))
+
+	# --- a granary, through the real player path -------------------------------
+	var announced := PackedInt32Array()
+	var on_change := func(index: int) -> void:
+		announced.append(index)
+	c.capacities_changed.connect(on_change)
+	c.queue.clear()
+	focus.call()
+	_client.macros.select_build(&"granary")
+	_client.macros.build_button().emit_signal("pressed")
+	sup.ok(not colony.building_queue.is_empty(), "Build queues the granary")
+	sup.ok(announced.has(colony.index),
+		"and pressing Build announces the capacity change for the right world",
+		"announced %s" % str(announced))
+
+	# Pay for it the way the resolver does, so the panel is being asked about a structure that
+	# really has landed rather than one still on the keel.
+	var granary := _defs.call("building", &"granary") as Resource
+	colony.build_metal = float(granary.get("cost_metals"))
+	ColonySim.finish_construction(colony, buildings, c.db)
+	sup.eq(int(colony.get_max_food()), 1050, "a landed granary takes max food to 1050")
+	focus.call()
+	sup.ok(_client.inspector.planet_label().text.contains("300/1050"),
+		"and the panel shows it on the very next refresh, with no turn and no restart",
+		"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+	sup.ok(not _client.inspector.planet_label().text.contains("IN BUILD"),
+		"and no longer claims something is still under construction")
+
+	# --- and back again -------------------------------------------------------
+	announced.clear()
+	c.queue.clear()
+	focus.call()
+	var refund := c.scrap(&"granary")
+	sup.ok(refund > 0.0, "scrapping the granary refunds metal", "got %.1f" % refund)
+	sup.ok(announced.has(colony.index),
+		"and announces the change too", "announced %s" % str(announced))
+	sup.eq(int(colony.get_max_food()), 50, "so max food returns to 50")
+	focus.call()
+	sup.ok(_client.inspector.planet_label().text.contains("300/50"),
+		"and the panel follows it straight back",
+		"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+	c.capacities_changed.disconnect(on_change)
+
+	# --- the other two maximums -----------------------------------------------
+	colony.building_queue[&"energy_storage"] = 1
+	colony.build_metal = float((_defs.call("building", &"energy_storage") as Resource).get(
+		"cost_metals"))
+	ColonySim.finish_construction(colony, buildings, c.db)
+	sup.eq(int(colony.get_max_power()), 1010, "an energy storage takes max power to 1010")
+	focus.call()
+	sup.ok(_client.inspector.planet_label().text.contains("10/1010"),
+		"and the panel shows Power 10/1010",
+		"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+
+	colony.building_queue[&"city_complex"] = 1
+	colony.build_metal = float((_defs.call("building", &"city_complex") as Resource).get(
+		"cost_metals"))
+	ColonySim.finish_construction(colony, buildings, c.db)
+	sup.eq(int(colony.get_max_housing()), 25, "a city complex takes housing to 25")
+	focus.call()
+	sup.ok(_client.inspector.planet_label().text.contains("HOUSING            25"),
+		"and the panel shows it",
+		"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
+
+	# --- and the pantry outlives the kit --------------------------------------
+	# The consequence of holding the baseline as a base rather than on the structure: scrapping
+	# the Colony Ship takes the five berths with it, but not the fifty food and ten power,
+	# because those are the base every colony has. Stated here because it is a real asymmetry a
+	# player can act on, and because the alternative -- a pantry that vanishes with its kit --
+	# would make the printed formula a two-term sum with a conditional in it.
+	colony.structures = {&"granary": 1}
+	focus.call()
+	sup.eq(int(colony.get_max_food()), 1050,
+		"the 50 base pantry survives losing the kit: 50 + one granary * 1000")
+	sup.eq(int(colony.get_max_housing()), 5,
+		"and the baseline five berths, which the kit brought and did not take away")
+	focus.call()
+	sup.ok(_client.inspector.planet_label().text.contains("300/1050"),
+		"which the panel agrees with",
+		"shown=%s" % _client.inspector.planet_label().text.replace("\n", " | "))
 
 
 func _step_teardown() -> void:

@@ -208,7 +208,13 @@ func _test_faction_seeding() -> void:
 				home_colonies += 1
 		_t.ok(home_colonies >= 1, "%s has a colonised homeworld" % f.name)
 		_t.ok(f.treasury > 0.0, "%s starts with a treasury" % f.name)
-		_t.eq(f.fleets.size(), 1, "%s starts with one scout fleet" % f.name)
+		# Nothing in orbit. The generator used to hand every empire a Colony Ship and an
+		# Exploration Ship over its homeworld, which made the first hull a player owned
+		# something the game gave them rather than something they built. Asserted here as an
+		# absence, because that is what it is now.
+		_t.eq(f.fleets.size(), 0, "%s starts with no fleet at all" % f.name)
+		_t.eq(g.fleets_of(f.id).size(), 0,
+			"%s has no hulls anywhere on the board" % f.name)
 
 	# No two empires may start on the same world. With one system this is the only
 	# separation rule left, and drawing without checking would hand two players the same
@@ -225,18 +231,21 @@ func _test_faction_seeding() -> void:
 	_t.eq(shared, 0, "no two factions share a homeworld")
 	_t.eq(homes.size(), g.factions.size(), "every faction got a distinct starting planet")
 
-	# The starting fleet sits on the homeworld, so turn 1 has a legal move.
+	# No starting fleet at all, so an empire's homeworld orbit is empty on turn one. The
+	# index is read with a size check rather than `[0]`: an empty `f.fleets` used to be a
+	# hard script error here rather than a failed assertion, which is how a suite can report
+	# "OK, 329 checks passed" while the engine logged a crash.
 	for f in g.factions:
-		var fleet := g.fleets.get(f.fleets[0], null) as FleetState
-		_t.ok(fleet != null, "%s has a starting fleet object" % f.name)
-		if fleet == null:
-			continue
-		var on_home := false
+		_t.eq(f.fleets.size(), 0, "%s has no fleet roster entries" % f.name)
+		_t.eq(g.fleets_of(f.id).size(), 0,
+			"%s has no fleet on the board" % f.name)
+		var home := -1
 		for p in g.planets:
-			if p.owner == f.id and p.colonized and p.index == fleet.system:
-				on_home = true
+			if p.owner == f.id and p.colonized:
+				home = p.index
 				break
-		_t.ok(on_home, "%s's starting fleet is parked on its homeworld" % f.name)
+		_t.eq(g.orbital_fleet(home, f.id), null,
+			"%s's homeworld orbit is empty" % f.name)
 
 	# Faction ids and fleet ids must be unique and dense.
 	var ids: Dictionary = {}
@@ -339,7 +348,9 @@ func _test_every_requested_faction_exists() -> void:
 				"%d factions in %d systems yields %d empires" % [want, systems, want])
 
 	# The claim the whole thing rests on: every empire is playable, not merely counted.
-	# A fourth slot with no homeworld, no colony and no fleet is a seat at an empty table.
+	# A fourth slot with no homeworld is a seat at an empty table. A fleet is deliberately
+	# *not* part of it: a new empire has a world and nothing else, and everything it puts in
+	# orbit it builds itself.
 	var g8 := _generate(90210, 40, 8)
 	_t.ok(g8 != null, "an eight-empire galaxy generates")
 	if g8 != null:
@@ -350,7 +361,7 @@ func _test_every_requested_faction_exists() -> void:
 					home = p.index
 					break
 			_t.ok(home >= 0, "%s owns a homeworld" % f.name)
-			_t.ok(f.fleets.size() >= 1, "%s starts with a fleet" % f.name)
+			_t.eq(f.fleets.size(), 0, "%s starts with an empty orbit" % f.name)
 			if f.fleets.is_empty():
 				continue
 			var fleet := g8.fleets.get(f.fleets[0], null) as FleetState

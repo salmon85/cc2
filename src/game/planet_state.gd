@@ -140,9 +140,21 @@ var surveyed: bool = false
 ## Cached `PlanetTypeData`, refreshed by the generator; never serialised.
 var _type: Resource = null
 
+## Cached building registry, so the capacity accessors below need no `Defs` handed in.
+##
+## Bound alongside `_type` by `rebind_definitions`. Without it the maximums can only be read
+## by passing the table in, and a caller that forgets passes nothing and gets a zero -- which
+## is exactly how a panel ends up printing `Food 300/0`.
+var _buildings: Dictionary = {}
+
 
 func bind_type(type_data: Resource) -> void:
 	_type = type_data
+
+
+## Bind the building registry this body's capacities are derived from.
+func bind_buildings(buildings: Dictionary) -> void:
+	_buildings = buildings
 
 
 func type_data() -> Resource:
@@ -177,6 +189,41 @@ func warning_set() -> Dictionary:
 	for key: Variant in warnings:
 		out[StringName(str(key))] = true
 	return out
+
+
+## Recompute food capacity, power capacity, the power budget and housing from the structures.
+##
+## The *only* thing that writes the four cached figures below. Everything that reads them --
+## the panel, the build-order guards, the cargo dialog -- reads them through this class's
+## accessors, and they are correct only because something called this.
+##
+## `db` supplies the base figures; pass null and they are zero, which is loud rather than
+## quietly wrong.
+func refresh_capacities(db: Node) -> void:
+	ColonySim.recount_capacity(self, _buildings, db)
+
+
+## Maximum food this colony can store: the base pantry plus every granary's 1000.
+##
+## `50 + granaries * 1000` for a colony that has landed its Colony Ship, and `0` for one that
+## has not -- the kit's pantry is part of the kit, not a floor the universe grants.
+##
+## This is the single source of truth for the figure. It is a named accessor rather than a
+## panel expression because a panel expression is free to disagree with the resolver, and did:
+## the left column printed `Food 300/0` while the colony was holding three hundred food and had
+## a Granary standing, because the two read different properties.
+func get_max_food() -> float:
+	return food_capacity
+
+
+## Maximum power this colony can bank: the base cells plus every Energy Storage's 1000.
+func get_max_power() -> float:
+	return power_capacity
+
+
+## Maximum population this colony can house: every City Complex's 20 plus the kit's 5.
+func get_max_housing() -> float:
+	return housing
 
 
 ## Whether this world is currently short of the power its structures draw.

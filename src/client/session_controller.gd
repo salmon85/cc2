@@ -21,6 +21,16 @@ signal state_changed
 ## doing nothing — the same "guards return a reason" discipline the Phase 4 tests use.
 signal action_rejected(reason: String)
 
+## Emitted when a colony's storage capacities, power budget or housing have changed.
+##
+## Carries the planet index. Narrower than `state_changed` on purpose: that fires on every
+## selection change and every refresh, so a panel listening for "my numbers moved" would be
+## woken dozens of times a turn and would still have to diff to find out whether anything
+## actually changed. This fires exactly on the events that do change a maximum -- a structure
+## landing, a structure being scrapped, a Colony Ship being landed -- which is what the panel
+## needs in order to redraw the moment it matters rather than on the next unrelated tick.
+signal capacities_changed(planet_index: int)
+
 ## Seeded simulation RNG. Shared with the resolver so a save/load resumes the stream.
 var rng: RandomNumberGenerator = null
 
@@ -436,6 +446,7 @@ func queue_build_structure(building_id: StringName) -> bool:
 		# slot is already full, so the resolver's pass over the same order finds the work done
 		# and does nothing. That is the same mirror-the-move idiom `queue_move` uses.
 		TurnResolver.apply_build_structure(galaxy, player(), order, defs, db)
+		_recount_and_announce(planet)
 		state_changed.emit()
 		return true
 	action_rejected.emit("the order was refused")
@@ -525,7 +536,7 @@ func land_colony_ship() -> bool:
 		selected_fleet = -1
 	# The landing is the structure's first turn of existence, so its capacities and its
 	# staffing are settled now rather than at the top of the next colony pass.
-	ColonySim.recount_capacity(planet, _building_table(), db)
+	_recount_and_announce(planet)
 	state_changed.emit()
 	return true
 
@@ -541,6 +552,19 @@ func can_land_colony_ship() -> bool:
 	return InvasionStage.can_land_colony_ship(f, galaxy.planet(f.system))
 
 
+## Recount a colony's capacities and announce it.
+##
+## The single place a capacity change is published. Every action that can move one -- a
+## structure landing, a structure being scrapped, a Colony Ship touching down, a worker change
+## that reseeds the staffing -- comes through here, so "the numbers moved" has one trigger and
+## a panel cannot be left listening to a signal nobody emits.
+func _recount_and_announce(planet: PlanetState) -> void:
+	if planet == null:
+		return
+	ColonySim.recount_capacity(planet, _building_table(), db)
+	capacities_changed.emit(planet.index)
+
+
 ## Post one more civilian to `building_id` on the selected colony.
 func assign_worker(building_id: StringName) -> bool:
 	var planet := _selected_owned_planet()
@@ -552,6 +576,10 @@ func assign_worker(building_id: StringName) -> bool:
 		else:
 			action_rejected.emit("every one of those is already worked")
 		return false
+	# Posting a worker does not move a capacity, but it does change who the colony is, and a
+	# panel that only redraws on `capacities_changed` would otherwise keep showing the old
+	# worked counts until something else happened.
+	capacities_changed.emit(planet.index)
 	state_changed.emit()
 	return true
 
@@ -679,6 +707,7 @@ func scrap(entry: StringName) -> float:
 	if refund <= 0.0:
 		action_rejected.emit("nothing was scrapped")
 		return 0.0
+	_recount_and_announce(planet)
 	state_changed.emit()
 	return refund
 
